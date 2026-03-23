@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db_session
@@ -316,6 +316,26 @@ async def generate_sections(
             next_poll=f"/api/v1/jobs/{job.id}",
         ),
     )
+
+
+@router.get("/projects/{project_id}/sections", response_model=APIResponse[list[SectionDraftRead]])
+async def list_section_drafts(
+    project_id: UUID,
+    draft_version: int | None = Query(default=None, ge=1),
+    session: AsyncSession = Depends(get_db_session),
+    service: SectionDraftService = Depends(get_section_draft_service),
+) -> APIResponse[list[SectionDraftRead]]:
+    try:
+        drafts = await service.list_section_drafts(
+            session=session,
+            project_id=project_id,
+            draft_version=draft_version,
+        )
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ArtifactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=[SectionDraftRead.model_validate(draft) for draft in drafts])
 
 
 @router.post(

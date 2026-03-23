@@ -15,6 +15,7 @@ from app.models.proposal_outline import ProposalOutline
 from app.models.requirement_card import RequirementCard
 from app.models.section_draft import SectionDraft
 from app.services.agents.executor import ExecutorAgent
+from app.services.validation.service import flatten_outline_sections
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
@@ -86,7 +87,7 @@ class SectionDraftService:
         requirement_card = await self._resolve_requirement_card(session=session, outline=outline)
         evidence_bundle = await self._resolve_evidence_bundle(session=session, outline=outline)
 
-        sections = (outline.outline_json or {}).get("sections") or []
+        sections = flatten_outline_sections(((outline.outline_json or {}).get("sections") or []))
         if not sections:
             raise ArtifactValidationError("Outline has no sections")
 
@@ -140,6 +141,38 @@ class SectionDraftService:
             await session.refresh(draft)
         await session.refresh(job)
         return job, generated_drafts
+
+    async def list_section_drafts(
+        self,
+        *,
+        session: AsyncSession,
+        project_id: UUID,
+        draft_version: int | None = None,
+    ) -> list[SectionDraft]:
+        project = await session.get(Project, project_id)
+        if not project:
+            raise ArtifactNotFoundError("Project not found")
+
+        target_draft_version = draft_version or int(project.current_draft_version or 0)
+        if target_draft_version <= 0:
+            return []
+
+        result = await session.scalars(
+            select(SectionDraft)
+            .where(
+                SectionDraft.project_id == project_id,
+                SectionDraft.draft_version == target_draft_version,
+            )
+            .order_by(SectionDraft.section_id.asc())
+        )
+        drafts = list(result.all())
+        if not drafts:
+            return []
+
+        return self._sort_drafts_by_outline(
+            drafts=drafts,
+            outline=await self._resolve_outline(session=session, project_id=project_id, outline_id=project.current_outline_id),
+        )
 
     async def regenerate_section(
         self,
@@ -309,8 +342,19 @@ class SectionDraftService:
         return draft
 
     def _find_section(self, *, outline: ProposalOutline, section_id: str) -> dict[str, Any]:
-        sections = (outline.outline_json or {}).get("sections") or []
+        sections = flatten_outline_sections(((outline.outline_json or {}).get("sections") or []))
         for section in sections:
             if str(section.get("section_id")) == section_id:
                 return section
         raise ArtifactNotFoundError("Section not found in outline")
+
+    def _sort_drafts_by_outline(self, *, drafts: list[SectionDraft], outline: ProposalOutline) -> list[SectionDraft]:
+        ordered_sections = flatten_outline_sections(((outline.outline_json or {}).get("sections") or []))
+        order_map = {
+            str(section.get("section_id") or ""): index
+            for index, section in enumerate(ordered_sections)
+        }
+        return sorted(
+            drafts,
+            key=lambda draft: (order_map.get(draft.section_id, len(order_map)), draft.section_id),
+        )

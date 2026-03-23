@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from app.services.composition.outline_service import normalize_outline_payload
-from app.services.composition.section_service import build_section_context
+from app.services.composition.section_service import SectionDraftService, build_section_context
 
 
 class CompositionHelperTests(unittest.TestCase):
@@ -59,6 +59,29 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("历史方案A", context)
         self.assertEqual(len(citations), 1)
         self.assertEqual(citations[0]["evidence_id"], "ev_001")
+
+    def test_find_section_supports_nested_outline_children(self) -> None:
+        service = SectionDraftService()
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试项目技术方案",
+                "sections": [
+                    {
+                        "section_id": "1",
+                        "title": "项目概述",
+                        "children": [
+                            {
+                                "section_id": "1.1",
+                                "title": "项目背景",
+                                "children": [],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        section = service._find_section(outline=outline, section_id="1.1")
+        self.assertEqual(section["title"], "项目背景")
 
 
 if __name__ == "__main__":

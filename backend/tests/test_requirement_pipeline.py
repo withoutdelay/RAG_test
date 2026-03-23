@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.requirement.service import build_clarification_items, build_requirement_content
+from app.services.requirement.service import (
+    build_clarification_items,
+    build_requirement_content,
+    resolve_clarification_state,
+)
 from app.services.retrieval.service import build_evidence_items, build_requirement_query
 
 
@@ -50,6 +54,18 @@ class RequirementPipelineHelperTests(unittest.TestCase):
         self.assertEqual(items[0]["type"], "table")
         self.assertEqual(items[0]["heading_path"], ["第3章", "控制策略"])
         self.assertAlmostEqual(items[0]["relevance_score"], 0.88)
+
+    def test_resolve_clarification_state_recomputes_missing_items_from_content(self) -> None:
+        missing_items, blocking_items = resolve_clarification_state(
+            content={
+                "project_name": "测试项目",
+                "product_line": "hv_vfd",
+                "industry": "电气",
+                "business_objective": "替换老旧设备",
+            }
+        )
+        self.assertEqual(missing_items, [])
+        self.assertEqual(blocking_items, [])
 
 
 if __name__ == "__main__":

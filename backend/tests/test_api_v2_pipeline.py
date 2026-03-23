@@ -193,9 +193,38 @@ class V2PipelineApiTests(unittest.TestCase):
                 self.assertEqual(latest_outline_response.status_code, 200)
                 outline = latest_outline_response.json()["data"]
                 self.assertGreaterEqual(len(outline["outline_json"]["sections"]), 5)
+                nested_outline_json = dict(outline["outline_json"])
+                nested_sections = [dict(section) for section in nested_outline_json["sections"]]
+                first_section = dict(nested_sections[0])
+                first_section["children"] = [
+                    {
+                        "section_id": f"{first_section['section_id']}.1",
+                        "title": f"{first_section['title']}背景",
+                        "purpose": "补充该章节的背景与约束条件。",
+                        "mandatory": False,
+                        "expected_evidence_types": ["section"],
+                        "needs_human_review": False,
+                        "children": [],
+                    }
+                ]
+                nested_sections[0] = first_section
+                nested_outline_json["sections"] = nested_sections
+
+                update_outline_response = client.patch(
+                    f"/api/v1/projects/{project_id}/outlines/{outline['id']}",
+                    json={"outline_json": nested_outline_json},
+                )
+                self.assertEqual(update_outline_response.status_code, 200)
 
                 sections_response = client.post(f"/api/v1/projects/{project_id}/generate-sections", json={})
                 self.assertEqual(sections_response.status_code, 202)
+
+                list_sections_response = client.get(f"/api/v1/projects/{project_id}/sections")
+                self.assertEqual(list_sections_response.status_code, 200)
+                section_drafts_payload = list_sections_response.json()["data"]
+                section_ids = {draft["section_id"] for draft in section_drafts_payload}
+                self.assertIn(first_section["section_id"], section_ids)
+                self.assertIn(f"{first_section['section_id']}.1", section_ids)
 
                 validate_response = client.post(
                     f"/api/v1/projects/{project_id}/validate",
@@ -274,7 +303,7 @@ class V2PipelineApiTests(unittest.TestCase):
         self.assertIsNotNone(stored_export)
         self.assertEqual(stored_project.status, "EXPORTED")
         self.assertEqual(stored_report.status, "passed")
-        self.assertEqual(len(stored_section_drafts), len(outline["outline_json"]["sections"]))
+        self.assertEqual(len(stored_section_drafts), len(section_drafts_payload))
         self.assertGreaterEqual(len(stored_review_tasks), len(review_tasks))
         self.assertTrue(any(task.task_type == "final_review" for task in stored_review_tasks))
         self.assertEqual(stored_export.status, "succeeded")

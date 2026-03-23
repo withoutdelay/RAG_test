@@ -76,64 +76,72 @@ class _FakeSectionDraftService:
         self.job_id = uuid4()
         self.section_draft_id = uuid4()
 
-    async def generate_sections(self, *, session, project_id, outline_id=None):
-        return (
-            SimpleNamespace(id=self.job_id, status="succeeded"),
-            [
-                SimpleNamespace(
-                    id=self.section_draft_id,
-                    project_id=project_id,
-                    draft_version=1,
-                    section_id="1",
-                    title="项目概述",
-                    content_md="## 项目概述\n\n已生成。",
-                    citation_refs=[],
-                    assumptions=[],
-                    global_param_snapshot={"total_power": "5000kW"},
-                    status="generated",
-                    validator_result={},
-                    created_at=datetime.now(timezone.utc),
-                    updated_at=datetime.now(timezone.utc),
-                )
-            ],
-        )
-
-    async def regenerate_section(self, *, session, project_id, section_id, outline_id=None):
-        return (
-            SimpleNamespace(id=self.job_id, status="succeeded"),
-            SimpleNamespace(
-                id=self.section_draft_id,
-                project_id=project_id,
-                draft_version=1,
-                section_id=section_id,
-                title="项目概述",
-                content_md="## 项目概述\n\n重生成内容。",
-                citation_refs=[],
-                assumptions=[],
-                global_param_snapshot={},
-                status="generated",
-                validator_result={},
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
-            ),
-        )
-
-    async def update_section(self, *, session, project_id, section_id, content_md, citation_refs=None, assumptions=None):
+    def _make_draft(
+        self,
+        *,
+        project_id,
+        section_id="1",
+        title="项目概述",
+        content_md="## 项目概述\n\n已生成。",
+        status="generated",
+        draft_id=None,
+    ):
         return SimpleNamespace(
-            id=self.section_draft_id,
+            id=draft_id or uuid4(),
             project_id=project_id,
             draft_version=1,
             section_id=section_id,
-            title="项目概述",
+            title=title,
             content_md=content_md,
-            citation_refs=citation_refs or [],
-            assumptions=assumptions or [],
-            global_param_snapshot={},
-            status="edited",
+            citation_refs=[],
+            assumptions=[],
+            global_param_snapshot={"total_power": "5000kW"},
+            status=status,
             validator_result={},
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
+
+    async def generate_sections(self, *, session, project_id, outline_id=None):
+        return (
+            SimpleNamespace(id=self.job_id, status="succeeded"),
+            [self._make_draft(project_id=project_id, draft_id=self.section_draft_id)],
+        )
+
+    async def list_section_drafts(self, *, session, project_id, draft_version=None):
+        return [
+            self._make_draft(project_id=project_id),
+            self._make_draft(
+                project_id=project_id,
+                section_id="1.1",
+                title="项目背景",
+                content_md="### 项目背景\n\n补充说明。",
+            ),
+        ]
+
+    async def regenerate_section(self, *, session, project_id, section_id, outline_id=None):
+        return (
+            SimpleNamespace(id=self.job_id, status="succeeded"),
+            self._make_draft(
+                project_id=project_id,
+                section_id=section_id,
+                content_md="## 项目概述\n\n重生成内容。",
+                draft_id=self.section_draft_id,
+            ),
+        )
+
+    async def update_section(self, *, session, project_id, section_id, content_md, citation_refs=None, assumptions=None):
+        draft = self._make_draft(
+            project_id=project_id,
+            section_id=section_id,
+            content_md=content_md,
+            status="edited",
+            draft_id=self.section_draft_id,
+        )
+        draft.citation_refs = citation_refs or []
+        draft.assumptions = assumptions or []
+        draft.global_param_snapshot = {}
+        return draft
 
 
 async def _fake_db_session():
@@ -196,6 +204,13 @@ class CompositionApiTests(unittest.TestCase):
             )
             self.assertEqual(generate_sections_response.status_code, 202)
             self.assertEqual(generate_sections_response.json()["data"]["status"], "succeeded")
+
+            list_sections_response = client.get(
+                f"/api/v1/projects/{self.outline_service.project_id}/sections"
+            )
+            self.assertEqual(list_sections_response.status_code, 200)
+            self.assertEqual(len(list_sections_response.json()["data"]), 2)
+            self.assertEqual(list_sections_response.json()["data"][1]["section_id"], "1.1")
 
             regenerate_response = client.post(
                 f"/api/v1/projects/{self.outline_service.project_id}/sections/1/regenerate",

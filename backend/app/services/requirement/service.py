@@ -82,6 +82,19 @@ def build_clarification_items(content: dict[str, Any]) -> tuple[list[dict[str, A
     return missing_items, blocking_items
 
 
+def resolve_clarification_state(
+    *,
+    content: dict[str, Any],
+    missing_items: list | None = None,
+    blocking_items: list | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    recomputed_missing_items, recomputed_blocking_items = build_clarification_items(content)
+    return (
+        missing_items if missing_items is not None else recomputed_missing_items,
+        blocking_items if blocking_items is not None else recomputed_blocking_items,
+    )
+
+
 class RequirementService:
     async def extract_requirement_card(
         self,
@@ -182,12 +195,17 @@ class RequirementService:
             merged_content = dict(card.content or {})
             merged_content.update(content)
             card.content = merged_content
-        if missing_items is not None:
-            card.missing_items = missing_items
-        if blocking_items is not None:
-            card.blocking_items = blocking_items
+        content_payload = dict(card.content or {})
+        card.missing_items, card.blocking_items = resolve_clarification_state(
+            content=content_payload,
+            missing_items=missing_items,
+            blocking_items=blocking_items,
+        )
         if confirmed_by_user is not None:
             card.confirmed_by_user = confirmed_by_user
+        if "product_line" in content_payload:
+            raw_product_line = content_payload.get("product_line")
+            project.product_line = str(raw_product_line) if raw_product_line not in (None, "") else None
 
         project.current_requirement_card_id = card.id
         project.status = "BLOCKED_FOR_CLARIFICATION" if self._has_open_blockers(card) else "REQUIREMENT_DRAFTED"
