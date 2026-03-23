@@ -37,6 +37,17 @@ class Phase2ApiTests(unittest.TestCase):
                 text(
                     """
                     TRUNCATE TABLE
+                        audit_logs,
+                        jobs,
+                        review_tasks,
+                        section_drafts,
+                        proposal_outlines,
+                        evidence_bundles,
+                        requirement_cards,
+                        knowledge_chunks,
+                        figure_assets,
+                        parsed_blocks,
+                        raw_documents,
                         review_points,
                         generation_tasks,
                         chunks,
