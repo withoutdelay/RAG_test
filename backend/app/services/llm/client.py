@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -330,7 +331,7 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
         if settings.openai_api_key and settings.openai_base_url:
             configs[ModelType.OPENAI] = ProviderEndpointConfig(
                 provider_name="openai",
-                base_url=settings.openai_base_url,
+                base_url=_normalize_openai_base_url(settings.openai_base_url),
                 api_key=settings.openai_api_key,
                 model_name=settings.openai_model_name,
             )
@@ -381,12 +382,13 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
             return None
         if model_type == ModelType.DEEPSEEK:
             return {"type": "json_object"}
+        strict_schema = _ensure_strict_json_schema(request.json_schema)
         return {
             "type": "json_schema",
             "json_schema": {
                 "name": f"{request.task_type.value}_response",
                 "strict": True,
-                "schema": request.json_schema,
+                "schema": strict_schema,
             },
         }
 
@@ -604,3 +606,38 @@ def _estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, math.ceil(len(text) / 4))
+
+
+def _normalize_openai_base_url(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    path = parsed.path.rstrip("/")
+    if not path:
+        path = "/v1"
+    normalized = parsed._replace(path=path)
+    return urlunparse(normalized).rstrip("/")
+
+
+def _ensure_strict_json_schema(schema: Any) -> Any:
+    if isinstance(schema, list):
+        return [_ensure_strict_json_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    normalized: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "properties" and isinstance(value, dict):
+            normalized[key] = {name: _ensure_strict_json_schema(child) for name, child in value.items()}
+        elif key == "items":
+            normalized[key] = _ensure_strict_json_schema(value)
+        elif key in {"anyOf", "oneOf", "allOf"} and isinstance(value, list):
+            normalized[key] = [_ensure_strict_json_schema(item) for item in value]
+        elif isinstance(value, (dict, list)):
+            normalized[key] = _ensure_strict_json_schema(value)
+        else:
+            normalized[key] = value
+
+    schema_type = normalized.get("type")
+    if schema_type == "object" and "additionalProperties" not in normalized:
+        normalized["additionalProperties"] = False
+
+    return normalized

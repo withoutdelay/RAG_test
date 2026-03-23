@@ -268,6 +268,7 @@ class LLMClientTests(unittest.TestCase):
             self.assertEqual(request.headers["Authorization"], "Bearer relay-key")
             self.assertEqual(payload["model"], "gpt-4o-mini")
             self.assertEqual(payload["response_format"]["type"], "json_schema")
+            self.assertFalse(payload["response_format"]["json_schema"]["schema"]["additionalProperties"])
             return httpx.Response(
                 200,
                 json={
@@ -288,7 +289,7 @@ class LLMClientTests(unittest.TestCase):
                 "AZURE_OPENAI_ENDPOINT": "",
                 "AZURE_OPENAI_DEPLOYMENT": "",
                 "OPENAI_API_KEY": "relay-key",
-                "OPENAI_BASE_URL": "https://relay.test/v1",
+                "OPENAI_BASE_URL": "https://relay.test",
                 "OPENAI_MODEL": "gpt-4o-mini",
             },
             clear=False,
