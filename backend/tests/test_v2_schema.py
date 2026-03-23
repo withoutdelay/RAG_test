@@ -18,6 +18,7 @@ class V2SchemaMetadataTests(unittest.TestCase):
             "proposal_outlines",
             "section_drafts",
             "review_tasks",
+            "validation_reports",
             "jobs",
             "audit_logs",
         }

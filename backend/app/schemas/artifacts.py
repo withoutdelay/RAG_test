@@ -137,3 +137,44 @@ class SectionDraftUpdateRequest(BaseModel):
 
 class SectionRegenerateRequest(BaseModel):
     outline_id: UUID | None = None
+
+
+class ValidationTriggerRequest(BaseModel):
+    draft_version: int | None = Field(default=None, ge=1)
+    outline_id: UUID | None = None
+
+
+class ValidationReportRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    draft_version: int
+    outline_id: UUID | None
+    requirement_card_id: UUID | None
+    evidence_bundle_id: UUID | None
+    status: str
+    errors: list[dict[str, Any]]
+    warnings: list[dict[str, Any]]
+    review_tasks_created: list[str]
+    created_at: datetime
+
+
+class ReviewTaskRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    task_type: str
+    blocking_level: str
+    payload: dict[str, Any]
+    assignee_user_id: UUID | None
+    status: str
+    created_at: datetime
+    resolved_at: datetime | None
+
+
+class ReviewTaskResolveRequest(BaseModel):
+    resolution: Any = None
+    status: str = Field(default="resolved", pattern="^(resolved|rejected)$")
+    assignee_user_id: UUID | None = None

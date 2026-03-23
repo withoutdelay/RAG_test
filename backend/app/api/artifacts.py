@@ -15,6 +15,8 @@ from app.schemas.artifacts import (
     OutlineGenerateRequest,
     OutlineUpdateRequest,
     ProposalOutlineRead,
+    ReviewTaskRead,
+    ReviewTaskResolveRequest,
     RequirementCardRead,
     RequirementCardUpdateRequest,
     RequirementExtractRequest,
@@ -22,12 +24,15 @@ from app.schemas.artifacts import (
     SectionDraftUpdateRequest,
     SectionGenerateRequest,
     SectionRegenerateRequest,
+    ValidationReportRead,
+    ValidationTriggerRequest,
 )
 from app.schemas.common import APIResponse
 from app.services.composition import OutlineService, SectionDraftService
 from app.services.jobs import JobService
 from app.services.requirement import RequirementService
 from app.services.retrieval import EvidenceBundleService
+from app.services.validation import ValidationService
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
@@ -52,6 +57,10 @@ def get_section_draft_service() -> SectionDraftService:
 
 def get_job_service() -> JobService:
     return JobService()
+
+
+def get_validation_service() -> ValidationService:
+    return ValidationService()
 
 
 @router.post(
@@ -359,6 +368,90 @@ async def update_section(
     except ArtifactValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return APIResponse(code=200, message="success", data=SectionDraftRead.model_validate(draft))
+
+
+@router.post(
+    "/projects/{project_id}/validate",
+    response_model=APIResponse[JobAcceptedData],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def validate_project(
+    project_id: UUID,
+    payload: ValidationTriggerRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: ValidationService = Depends(get_validation_service),
+) -> APIResponse[JobAcceptedData]:
+    try:
+        job, report = await service.validate_project(
+            session=session,
+            project_id=project_id,
+            draft_version=payload.draft_version,
+            outline_id=payload.outline_id,
+        )
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ArtifactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return APIResponse(
+        code=202,
+        message="success",
+        data=JobAcceptedData(
+            job_id=job.id,
+            status=job.status,
+            resource_id=report.id,
+            next_poll=f"/api/v1/jobs/{job.id}",
+        ),
+    )
+
+
+@router.get("/projects/{project_id}/validation/latest", response_model=APIResponse[ValidationReportRead])
+async def get_latest_validation_report(
+    project_id: UUID,
+    session: AsyncSession = Depends(get_db_session),
+    service: ValidationService = Depends(get_validation_service),
+) -> APIResponse[ValidationReportRead]:
+    try:
+        report = await service.get_latest_validation_report(session=session, project_id=project_id)
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=ValidationReportRead.model_validate(report))
+
+
+@router.get("/projects/{project_id}/review-tasks", response_model=APIResponse[list[ReviewTaskRead]])
+async def list_review_tasks(
+    project_id: UUID,
+    session: AsyncSession = Depends(get_db_session),
+    service: ValidationService = Depends(get_validation_service),
+) -> APIResponse[list[ReviewTaskRead]]:
+    try:
+        tasks = await service.list_review_tasks(session=session, project_id=project_id)
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=[ReviewTaskRead.model_validate(task) for task in tasks])
+
+
+@router.post("/projects/{project_id}/review-tasks/{task_id}/resolve", response_model=APIResponse[ReviewTaskRead])
+async def resolve_review_task(
+    project_id: UUID,
+    task_id: UUID,
+    payload: ReviewTaskResolveRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: ValidationService = Depends(get_validation_service),
+) -> APIResponse[ReviewTaskRead]:
+    try:
+        task = await service.resolve_review_task(
+            session=session,
+            project_id=project_id,
+            task_id=task_id,
+            resolution=payload.resolution,
+            status=payload.status,
+            assignee_user_id=payload.assignee_user_id,
+        )
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ArtifactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=ReviewTaskRead.model_validate(task))
 
 
 @router.get("/jobs/{job_id}", response_model=APIResponse[JobRead])

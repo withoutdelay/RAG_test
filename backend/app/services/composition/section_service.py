@@ -192,6 +192,7 @@ class SectionDraftService:
         draft.global_param_snapshot = global_params if isinstance(global_params, dict) else {}
         draft.status = "generated"
         draft.validator_result = {}
+        project.status = "DRAFT_READY"
 
         job.status = "succeeded"
         job.output_ref = {"draft_version": project.current_draft_version, "section_id": section_id}
@@ -230,6 +231,8 @@ class SectionDraftService:
         if assumptions is not None:
             draft.assumptions = assumptions
         draft.status = "edited"
+        draft.validator_result = {}
+        project.status = "DRAFT_READY"
         await session.commit()
         await session.refresh(draft)
         return draft

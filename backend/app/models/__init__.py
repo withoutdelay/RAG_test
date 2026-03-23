@@ -14,6 +14,7 @@ from app.models.requirement_card import RequirementCard
 from app.models.review_point import ReviewPoint
 from app.models.review_task import ReviewTask
 from app.models.section_draft import SectionDraft
+from app.models.validation_report import ValidationReport
 
 __all__ = [
     "AuditLog",
@@ -33,4 +34,5 @@ __all__ = [
     "ReviewPoint",
     "ReviewTask",
     "SectionDraft",
+    "ValidationReport",
 ]
