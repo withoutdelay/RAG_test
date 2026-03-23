@@ -81,3 +81,59 @@ class EvidenceBundleRead(BaseModel):
     content: dict
     quality_score: Decimal | None
     created_at: datetime
+
+
+class OutlineGenerateRequest(BaseModel):
+    requirement_card_id: UUID | None = None
+    evidence_bundle_id: UUID | None = None
+    instructions: str | None = None
+
+
+class ProposalOutlineRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    version: int
+    outline_json: dict
+    requirement_card_id: UUID | None
+    evidence_bundle_id: UUID | None
+    validator_status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class OutlineUpdateRequest(BaseModel):
+    outline_json: dict
+
+
+class SectionGenerateRequest(BaseModel):
+    outline_id: UUID | None = None
+
+
+class SectionDraftRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    draft_version: int
+    section_id: str
+    title: str
+    content_md: str
+    citation_refs: list
+    assumptions: list
+    global_param_snapshot: dict
+    status: str
+    validator_result: dict
+    created_at: datetime
+    updated_at: datetime
+
+
+class SectionDraftUpdateRequest(BaseModel):
+    content_md: str
+    citation_refs: list | None = None
+    assumptions: list | None = None
+
+
+class SectionRegenerateRequest(BaseModel):
+    outline_id: UUID | None = None

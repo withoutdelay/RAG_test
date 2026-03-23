@@ -9,7 +9,6 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.document import Document
 from app.models.evidence_bundle import EvidenceBundle
 from app.models.job import Job
 from app.models.project import Project
