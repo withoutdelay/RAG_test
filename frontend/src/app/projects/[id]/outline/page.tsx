@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { ArrowRight, FileText, Loader2, Network, Save, Wand2 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { OutlineTree } from '@/components/outline/OutlineTree';
 import api, { getApiErrorMessage, isNotFoundError } from '@/lib/api';
 import { Outline, OutlineNode } from '@/lib/types';
@@ -38,18 +39,22 @@ export default function OutlinePage() {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [navigating, setNavigating] = useState(false);
 
   const fetchOutline = useCallback(async () => {
     try {
       setLoading(true);
       const res = await api.get(`/projects/${projectId}/outlines/latest`);
       setOutline(toOutlineState(res.data as OutlineResponse));
+      setDirty(false);
     } catch (error: unknown) {
       if (!isNotFoundError(error)) {
         console.error(error);
         toast.error(getApiErrorMessage(error, 'Failed to load outline'));
       }
       setOutline(null);
+      setDirty(false);
     } finally {
       setLoading(false);
     }
@@ -60,6 +65,20 @@ export default function OutlinePage() {
       void fetchOutline();
     }
   }, [fetchOutline, projectId]);
+
+  useEffect(() => {
+    if (!dirty) {
+      return undefined;
+    }
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [dirty]);
 
   const handleGenerate = async () => {
     setGenerating(true);
@@ -75,29 +94,69 @@ export default function OutlinePage() {
     }
   };
 
+  const persistOutline = useCallback(
+    async ({ refreshAfterSave, successMessage }: { refreshAfterSave: boolean; successMessage: string }) => {
+      if (!outline) return false;
+
+      setSaving(true);
+      try {
+        await api.patch(`/projects/${projectId}/outlines/${outline.id}`, {
+          outline_json: {
+            title: outline.title,
+            sections: outline.sections,
+          },
+        });
+        toast.success(successMessage);
+        setDirty(false);
+        if (refreshAfterSave) {
+          await fetchOutline();
+        }
+        return true;
+      } catch (error: unknown) {
+        console.error(error);
+        toast.error(getApiErrorMessage(error, 'Error saving outline'));
+        return false;
+      } finally {
+        setSaving(false);
+      }
+    },
+    [fetchOutline, outline, projectId],
+  );
+
   const handleSave = async () => {
     if (!outline) return;
-    setSaving(true);
+    await persistOutline({
+      refreshAfterSave: true,
+      successMessage: 'Outline saved successfully',
+    });
+  };
+
+  const handleProceedToDrafts = async () => {
+    if (navigating) {
+      return;
+    }
+
+    setNavigating(true);
     try {
-      await api.patch(`/projects/${projectId}/outlines/${outline.id}`, {
-        outline_json: {
-          title: outline.title,
-          sections: outline.sections,
-        },
-      });
-      toast.success('Outline saved successfully');
-      await fetchOutline();
-    } catch (error: unknown) {
-      console.error(error);
-      toast.error(getApiErrorMessage(error, 'Error saving outline'));
+      if (dirty) {
+        const saved = await persistOutline({
+          refreshAfterSave: false,
+          successMessage: 'Outline saved. Moving to drafts.',
+        });
+        if (!saved) {
+          return;
+        }
+      }
+      router.push(`/projects/${projectId}/editor`);
     } finally {
-      setSaving(false);
+      setNavigating(false);
     }
   };
 
   const handleUpdateTree = (updatedNodes: OutlineNode[]) => {
     if (!outline) return;
     setOutline({ ...outline, sections: updatedNodes });
+    setDirty(true);
   };
 
   return (
@@ -112,12 +171,18 @@ export default function OutlinePage() {
         <div className="flex space-x-2">
           {outline ? (
             <>
+              {dirty && (
+                <Badge variant="warning" className="self-center">
+                  Unsaved changes
+                </Badge>
+              )}
               <Button variant="outline" onClick={handleSave} disabled={saving}>
                 {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                 Save
               </Button>
-              <Button onClick={() => router.push(`/projects/${projectId}/editor`)}>
-                Go to Drafts <ArrowRight className="ml-2 h-4 w-4" />
+              <Button onClick={handleProceedToDrafts} disabled={saving || navigating}>
+                {navigating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-2 h-4 w-4" />}
+                {dirty ? 'Save & Go to Drafts' : 'Go to Drafts'}
               </Button>
             </>
           ) : (
