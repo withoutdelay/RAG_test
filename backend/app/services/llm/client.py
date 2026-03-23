@@ -19,6 +19,7 @@ class ModelType(str, Enum):
     DEEPSEEK = "deepseek"
     QWEN = "qwen"
     AZURE = "azure"
+    OPENAI = "openai"
 
 
 class TaskType(str, Enum):
@@ -43,6 +44,7 @@ FALLBACK_TABLE = {
     ModelType.DEEPSEEK: ModelType.QWEN,
     ModelType.QWEN: ModelType.DEEPSEEK,
     ModelType.AZURE: ModelType.QWEN,
+    ModelType.OPENAI: ModelType.QWEN,
 }
 
 
@@ -104,6 +106,7 @@ class MockLLMProvider(BaseLLMProvider):
         ModelType.DEEPSEEK: 0.000002,
         ModelType.QWEN: 0.000003,
         ModelType.AZURE: 0.000004,
+        ModelType.OPENAI: 0.000004,
     }
 
     def __init__(self, *, chunk_size: int = 48, failing_models: set[ModelType] | None = None) -> None:
@@ -322,6 +325,14 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
                 auth_header_name="api-key",
                 auth_scheme=None,
                 query_params={"api-version": settings.azure_openai_api_version},
+            )
+
+        if settings.openai_api_key and settings.openai_base_url:
+            configs[ModelType.OPENAI] = ProviderEndpointConfig(
+                provider_name="openai",
+                base_url=settings.openai_base_url,
+                api_key=settings.openai_api_key,
+                model_name=settings.openai_model_name,
             )
 
         return configs
@@ -566,6 +577,8 @@ class LLMClient:
             ordered.append(fallback)
         if ModelType.AZURE not in ordered:
             ordered.append(ModelType.AZURE)
+        if ModelType.OPENAI not in ordered:
+            ordered.append(ModelType.OPENAI)
         return ordered
 
 

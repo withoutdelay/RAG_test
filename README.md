@@ -57,10 +57,12 @@ Phase 2 backend plus Phase 3 gateway scaffold for the presales AI system describ
 ## Phase 4 LLM Provider Modes
 
 - `LLM_PROVIDER_BACKEND=mock|live`
-  `mock` is the default for local tests; `live` enables real DeepSeek/Qwen/Azure chat-completions calls.
+  `mock` is the default for local tests; `live` enables real DeepSeek/Qwen/Azure/OpenAI-compatible chat-completions calls.
 - DeepSeek uses `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, and `DEEPSEEK_MODEL`.
 - Qwen uses `QWEN_API_KEY`, `QWEN_BASE_URL`, and `QWEN_MODEL`.
 - Azure OpenAI uses `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, and `AZURE_OPENAI_API_VERSION`.
+- OpenAI-compatible relay endpoints use `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
+- For development with a GPT-style proxy, point `OPENAI_BASE_URL` at the relay's `/v1` root and keep `LLM_PROVIDER_BACKEND=live`.
 - The backend currently targets each provider's chat-completions interface and keeps the masking gateway in front of outbound prompts.
 
 ## Test Commands

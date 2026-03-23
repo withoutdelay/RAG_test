@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     azure_openai_deployment: str | None = Field(default=None, validation_alias="AZURE_OPENAI_DEPLOYMENT")
     azure_openai_api_version: str = Field(default="2024-10-21", validation_alias="AZURE_OPENAI_API_VERSION")
     azure_model_name: str = Field(default="azure-gpt", validation_alias="AZURE_OPENAI_MODEL")
+    openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    openai_base_url: str | None = Field(default=None, validation_alias="OPENAI_BASE_URL")
+    openai_model_name: str = Field(default="gpt-4o-mini", validation_alias="OPENAI_MODEL")
 
     next_public_api_base_url: str = "http://localhost:8000/api/v1"
 

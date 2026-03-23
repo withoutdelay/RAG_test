@@ -260,6 +260,61 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(response.content, '{"ok":true}')
         self.assertEqual(response.model_used, "gpt-4o-mini")
 
+    def test_live_client_uses_openai_compatible_endpoint_when_only_openai_configured(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content.decode("utf-8"))
+            self.assertEqual(request.url.host, "relay.test")
+            self.assertEqual(request.url.path, "/v1/chat/completions")
+            self.assertEqual(request.headers["Authorization"], "Bearer relay-key")
+            self.assertEqual(payload["model"], "gpt-4o-mini")
+            self.assertEqual(payload["response_format"]["type"], "json_schema")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-openai",
+                    "model": "gpt-4o-mini",
+                    "choices": [{"message": {"role": "assistant", "content": '{"company":"[Company_A]"}'}}],
+                    "usage": {"prompt_tokens": 14, "completion_tokens": 5, "total_tokens": 19},
+                },
+            )
+
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER_BACKEND": "live",
+                "DEEPSEEK_API_KEY": "",
+                "QWEN_API_KEY": "",
+                "AZURE_OPENAI_API_KEY": "",
+                "AZURE_OPENAI_ENDPOINT": "",
+                "AZURE_OPENAI_DEPLOYMENT": "",
+                "OPENAI_API_KEY": "relay-key",
+                "OPENAI_BASE_URL": "https://relay.test/v1",
+                "OPENAI_MODEL": "gpt-4o-mini",
+            },
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            provider = HTTPChatCompletionsProvider(transport=httpx.MockTransport(handler))
+            client = self._make_client(provider)
+            response = asyncio.run(
+                client.invoke(
+                    LLMRequest(
+                        task_type=TaskType.OUTLINE,
+                        session_id="openai-relay-session",
+                        system_prompt="请输出 JSON。",
+                        user_prompt="请为上海电气集团生成结构化摘要。",
+                        json_schema={
+                            "type": "object",
+                            "properties": {"company": {"type": "string"}},
+                            "required": ["company"],
+                        },
+                    )
+                )
+            )
+
+        self.assertEqual(response.content, '{"company":"上海电气集团"}')
+        self.assertEqual(response.model_used, "gpt-4o-mini")
+
     def test_live_provider_streams_sse_chunks(self) -> None:
         stream_body = (
             'data: {"choices":[{"delta":{"content":"Hello "},"index":0}]}\n\n'
