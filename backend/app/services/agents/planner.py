@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+from app.services.llm.client import LLMClient, LLMRequest, LLMResponse, TaskType
+from app.services.llm.prompts import PLANNER_OUTLINE_SCHEMA, build_outline_prompts
+
+
+class PlannerAgent:
+    def __init__(self, *, llm_client: LLMClient | None = None) -> None:
+        self.llm_client = llm_client or LLMClient()
+
+    async def generate_outline(
+        self,
+        *,
+        task_id: str,
+        project_name: str,
+        instructions: str,
+        global_params: dict,
+        rfp_context: str,
+    ) -> LLMResponse:
+        system_prompt, user_prompt = build_outline_prompts(
+            project_name=project_name,
+            instructions=instructions,
+            global_params=global_params,
+            rfp_context=rfp_context,
+        )
+        return await self.llm_client.invoke(
+            LLMRequest(
+                task_type=TaskType.OUTLINE,
+                session_id=task_id,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                json_schema=PLANNER_OUTLINE_SCHEMA,
+                metadata={
+                    "project_name": project_name,
+                    "instructions": instructions,
+                    "global_params": global_params,
+                },
+            )
+        )

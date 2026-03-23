@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: presale-copilot-backend
+Version: 0.1.0
+Summary: Backend service for the presales copilot MVP
+Requires-Python: >=3.11
+Requires-Dist: alembic>=1.14.0
+Requires-Dist: asyncpg>=0.30.0
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: greenlet>=3.1.1
+Requires-Dist: httpx>=0.28.0
+Requires-Dist: minio>=7.2.0
+Requires-Dist: pydantic-settings>=2.6.0
+Requires-Dist: python-multipart>=0.0.18
+Requires-Dist: qdrant-client>=1.12.0
+Requires-Dist: sqlalchemy>=2.0.36
+Requires-Dist: uvicorn[standard]>=0.32.0
+Provides-Extra: parsing
+Requires-Dist: docling>=2.0.0; extra == "parsing"
+Provides-Extra: embeddings
+Requires-Dist: sentence-transformers>=3.4.0; extra == "embeddings"
+Provides-Extra: full
+Requires-Dist: docling>=2.0.0; extra == "full"
+Requires-Dist: sentence-transformers>=3.4.0; extra == "full"
