@@ -21,6 +21,7 @@ from sqlalchemy import select, text
 from app.config import get_settings
 from app.db import get_engine, get_session_factory, reset_db_state
 from app.models.project import Project
+from app.models.project_export import ProjectExport
 from app.models.review_task import ReviewTask
 from app.models.section_draft import SectionDraft
 from app.models.validation_report import ValidationReport
@@ -45,6 +46,7 @@ class V2PipelineApiTests(unittest.TestCase):
                 text(
                     """
                     TRUNCATE TABLE
+                        exports,
                         validation_reports,
                         audit_logs,
                         jobs,
@@ -96,11 +98,20 @@ class V2PipelineApiTests(unittest.TestCase):
                     .order_by(SectionDraft.section_id.asc())
                 )
             ).all()
+            export_record = (
+                await session.scalars(
+                    select(ProjectExport)
+                    .where(ProjectExport.project_id == project_id)
+                    .order_by(ProjectExport.created_at.desc())
+                    .limit(1)
+                )
+            ).first()
             return {
                 "project": project,
                 "report": report,
                 "review_tasks": list(review_tasks),
                 "section_drafts": list(section_drafts),
+                "export": export_record,
             }
 
     def test_v2_pipeline_runs_end_to_end_against_postgres(self) -> None:
@@ -213,6 +224,40 @@ class V2PipelineApiTests(unittest.TestCase):
                 self.assertEqual(project["status"], "REVIEW_REQUIRED")
                 self.assertEqual(project["current_draft_version"], 1)
                 self.assertEqual(project["current_outline_id"], outline["id"])
+
+                for task in review_tasks:
+                    resolution = {"confirmed": True}
+                    if task["task_type"] == "param_conflict":
+                        resolution = {"value": "5000kW"}
+                    resolve_response = client.post(
+                        f"/api/v1/projects/{project_id}/review-tasks/{task['id']}/resolve",
+                        json={"resolution": resolution},
+                    )
+                    self.assertEqual(resolve_response.status_code, 200)
+
+                exportable_project_response = client.get(f"/api/v1/projects/{project_id}")
+                self.assertEqual(exportable_project_response.status_code, 200)
+                self.assertEqual(exportable_project_response.json()["data"]["status"], "EXPORTABLE")
+
+                export_response = client.post(
+                    f"/api/v1/projects/{project_id}/export",
+                    json={"format": "markdown"},
+                )
+                self.assertEqual(export_response.status_code, 202)
+                export_id = export_response.json()["data"]["resource_id"]
+
+                latest_export_response = client.get(f"/api/v1/projects/{project_id}/exports/latest")
+                self.assertEqual(latest_export_response.status_code, 200)
+                export_payload = latest_export_response.json()["data"]
+                self.assertEqual(export_payload["id"], export_id)
+                self.assertEqual(export_payload["status"], "succeeded")
+                self.assertEqual(export_payload["snapshot"]["draft_version"], 1)
+                self.assertIn("## 项目概述", export_payload["content_md"])
+                self.assertIn("## 引用清单", export_payload["content_md"])
+
+                exported_project_response = client.get(f"/api/v1/projects/{project_id}")
+                self.assertEqual(exported_project_response.status_code, 200)
+                self.assertEqual(exported_project_response.json()["data"]["status"], "EXPORTED")
             finally:
                 if document_id and project_id:
                     client.delete(f"/api/v1/documents/{document_id}")
@@ -222,14 +267,17 @@ class V2PipelineApiTests(unittest.TestCase):
         stored_report = state["report"]
         stored_review_tasks = state["review_tasks"]
         stored_section_drafts = state["section_drafts"]
+        stored_export = state["export"]
 
         self.assertIsNotNone(stored_project)
         self.assertIsNotNone(stored_report)
-        self.assertEqual(stored_project.status, "REVIEW_REQUIRED")
-        self.assertEqual(stored_report.status, "review_required")
+        self.assertIsNotNone(stored_export)
+        self.assertEqual(stored_project.status, "EXPORTED")
+        self.assertEqual(stored_report.status, "passed")
         self.assertEqual(len(stored_section_drafts), len(outline["outline_json"]["sections"]))
         self.assertGreaterEqual(len(stored_review_tasks), len(review_tasks))
         self.assertTrue(any(task.task_type == "final_review" for task in stored_review_tasks))
+        self.assertEqual(stored_export.status, "succeeded")
 
 
 if __name__ == "__main__":

@@ -178,3 +178,26 @@ class ReviewTaskResolveRequest(BaseModel):
     resolution: Any = None
     status: str = Field(default="resolved", pattern="^(resolved|rejected)$")
     assignee_user_id: UUID | None = None
+
+
+class ExportRequest(BaseModel):
+    format: str = Field(default="markdown", pattern="^(markdown)$")
+
+
+class ExportRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    draft_version: int
+    outline_id: UUID | None
+    requirement_card_id: UUID | None
+    evidence_bundle_id: UUID | None
+    validation_report_id: UUID | None
+    file_name: str
+    file_type: str
+    storage_path: str
+    content_md: str
+    snapshot: dict[str, Any]
+    status: str
+    created_at: datetime

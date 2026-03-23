@@ -10,6 +10,8 @@ from app.schemas.artifacts import (
     ClarificationResolveRequest,
     EvidenceBundleRead,
     EvidenceRetrieveRequest,
+    ExportRead,
+    ExportRequest,
     JobAcceptedData,
     JobRead,
     OutlineGenerateRequest,
@@ -29,6 +31,7 @@ from app.schemas.artifacts import (
 )
 from app.schemas.common import APIResponse
 from app.services.composition import OutlineService, SectionDraftService
+from app.services.export import ExportService
 from app.services.jobs import JobService
 from app.services.requirement import RequirementService
 from app.services.retrieval import EvidenceBundleService
@@ -61,6 +64,10 @@ def get_job_service() -> JobService:
 
 def get_validation_service() -> ValidationService:
     return ValidationService()
+
+
+def get_export_service() -> ExportService:
+    return ExportService()
 
 
 @router.post(
@@ -452,6 +459,52 @@ async def resolve_review_task(
     except ArtifactValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return APIResponse(code=200, message="success", data=ReviewTaskRead.model_validate(task))
+
+
+@router.post(
+    "/projects/{project_id}/export",
+    response_model=APIResponse[JobAcceptedData],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def export_project(
+    project_id: UUID,
+    payload: ExportRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: ExportService = Depends(get_export_service),
+) -> APIResponse[JobAcceptedData]:
+    try:
+        job, export_record = await service.export_project(
+            session=session,
+            project_id=project_id,
+            format=payload.format,
+        )
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ArtifactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return APIResponse(
+        code=202,
+        message="success",
+        data=JobAcceptedData(
+            job_id=job.id,
+            status=job.status,
+            resource_id=export_record.id,
+            next_poll=f"/api/v1/jobs/{job.id}",
+        ),
+    )
+
+
+@router.get("/projects/{project_id}/exports/latest", response_model=APIResponse[ExportRead])
+async def get_latest_export(
+    project_id: UUID,
+    session: AsyncSession = Depends(get_db_session),
+    service: ExportService = Depends(get_export_service),
+) -> APIResponse[ExportRead]:
+    try:
+        export_record = await service.get_latest_export(session=session, project_id=project_id)
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=ExportRead.model_validate(export_record))
 
 
 @router.get("/jobs/{job_id}", response_model=APIResponse[JobRead])

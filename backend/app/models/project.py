@@ -58,6 +58,7 @@ class Project(Base):
     section_drafts = relationship("SectionDraft", back_populates="project", cascade="all, delete-orphan")
     review_tasks = relationship("ReviewTask", back_populates="project", cascade="all, delete-orphan")
     validation_reports = relationship("ValidationReport", back_populates="project", cascade="all, delete-orphan")
+    exports = relationship("ProjectExport", back_populates="project", cascade="all, delete-orphan")
     jobs = relationship("Job", back_populates="project", cascade="all, delete-orphan")
     audit_logs = relationship("AuditLog", back_populates="project", cascade="all, delete-orphan")
     current_requirement_card = relationship("RequirementCard", foreign_keys=[current_requirement_card_id], post_update=True)

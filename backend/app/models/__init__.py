@@ -8,6 +8,7 @@ from app.models.job import Job
 from app.models.knowledge_chunk import KnowledgeChunk
 from app.models.parsed_block import ParsedBlock
 from app.models.project import Project
+from app.models.project_export import ProjectExport
 from app.models.proposal_outline import ProposalOutline
 from app.models.raw_document import RawDocument
 from app.models.requirement_card import RequirementCard
@@ -28,6 +29,7 @@ __all__ = [
     "MaskingAuditLog",
     "ParsedBlock",
     "Project",
+    "ProjectExport",
     "ProposalOutline",
     "RawDocument",
     "RequirementCard",
