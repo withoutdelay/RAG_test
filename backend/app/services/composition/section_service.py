@@ -15,6 +15,7 @@ from app.models.proposal_outline import ProposalOutline
 from app.models.requirement_card import RequirementCard
 from app.models.section_draft import SectionDraft
 from app.services.agents.executor import ExecutorAgent
+from app.services.retrieval import AssetRetrievalService
 from app.services.validation.service import flatten_outline_sections
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
@@ -68,9 +69,55 @@ def section_outline_to_executor_payload(section: dict[str, Any]) -> dict[str, An
     }
 
 
+def build_section_global_params(requirement_content: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(requirement_content, dict):
+        return {}
+
+    merged: dict[str, Any] = {}
+    key_parameters = requirement_content.get("key_parameters")
+    if isinstance(key_parameters, dict):
+        merged.update(key_parameters)
+
+    for field_name in ("project_name", "industry", "product_line", "business_objective"):
+        value = requirement_content.get(field_name)
+        if value not in (None, "", [], {}):
+            merged.setdefault(field_name, value)
+    return merged
+
+
+def build_section_asset_query(*, section: dict[str, Any], global_params: dict[str, Any]) -> str:
+    parts = [
+        str(section.get("title") or "").strip(),
+        str(section.get("purpose") or "").strip(),
+        " ".join(str(item) for item in (section.get("keywords") or []) if item),
+        str(global_params.get("project_name") or "").strip(),
+        str(global_params.get("product_line") or "").strip(),
+        str(global_params.get("industry") or "").strip(),
+    ]
+    return " ".join(part for part in parts if part).strip()
+
+
+def build_section_asset_types(section: dict[str, Any]) -> list[str] | None:
+    expected_types = {str(item).lower() for item in (section.get("expected_evidence_types") or []) if item}
+    asset_types: list[str] = []
+    if {"table", "parameter"} & expected_types:
+        asset_types.append("table")
+    if {"figure", "diagram"} & expected_types:
+        asset_types.append("figure")
+    if {"formula", "equation"} & expected_types:
+        asset_types.append("formula_candidate")
+    return asset_types or None
+
+
 class SectionDraftService:
-    def __init__(self, *, executor: ExecutorAgent | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        executor: ExecutorAgent | None = None,
+        asset_retriever: AssetRetrievalService | None = None,
+    ) -> None:
         self.executor = executor or ExecutorAgent()
+        self.asset_retriever = asset_retriever or AssetRetrievalService()
 
     async def generate_sections(
         self,
@@ -104,16 +151,23 @@ class SectionDraftService:
 
         draft_version = int(project.current_draft_version or 0) + 1
         generated_drafts: list[SectionDraft] = []
-        global_params = requirement_card.content.get("key_parameters") if isinstance(requirement_card.content, dict) else {}
+        global_params = build_section_global_params(requirement_card.content)
 
         for section in sections:
             context, citations = build_section_context(section=section, evidence_bundle=evidence_bundle)
+            recommended_assets = await self._search_recommended_assets(
+                session=session,
+                project_id=project_id,
+                section=section,
+                global_params=global_params,
+            )
             response = await self.executor.write_section(
                 task_id=str(job.id),
                 section=section_outline_to_executor_payload(section),
-                global_params=global_params if isinstance(global_params, dict) else {},
+                global_params=global_params,
                 retrieved_context=context,
                 outline_title=(outline.outline_json or {}).get("title", "技术方案"),
+                recommended_assets=recommended_assets,
             )
             draft = SectionDraft(
                 project_id=project_id,
@@ -125,7 +179,7 @@ class SectionDraftService:
                 assumptions=[],
                 global_param_snapshot=global_params if isinstance(global_params, dict) else {},
                 status="generated",
-                validator_result={},
+                validator_result={"recommended_assets": recommended_assets},
             )
             session.add(draft)
             generated_drafts.append(draft)
@@ -211,20 +265,27 @@ class SectionDraftService:
         await session.flush()
 
         context, citations = build_section_context(section=section, evidence_bundle=evidence_bundle)
-        global_params = requirement_card.content.get("key_parameters") if isinstance(requirement_card.content, dict) else {}
+        global_params = build_section_global_params(requirement_card.content)
+        recommended_assets = await self._search_recommended_assets(
+            session=session,
+            project_id=project_id,
+            section=section,
+            global_params=global_params,
+        )
         response = await self.executor.write_section(
             task_id=str(job.id),
             section=section_outline_to_executor_payload(section),
-            global_params=global_params if isinstance(global_params, dict) else {},
+            global_params=global_params,
             retrieved_context=context,
             outline_title=(outline.outline_json or {}).get("title", "技术方案"),
+            recommended_assets=recommended_assets,
         )
         draft.title = str(section.get("title") or draft.title)
         draft.content_md = response.content
         draft.citation_refs = citations
-        draft.global_param_snapshot = global_params if isinstance(global_params, dict) else {}
+        draft.global_param_snapshot = global_params
         draft.status = "generated"
-        draft.validator_result = {}
+        draft.validator_result = {"recommended_assets": recommended_assets}
         project.status = "DRAFT_READY"
 
         job.status = "succeeded"
@@ -264,11 +325,37 @@ class SectionDraftService:
         if assumptions is not None:
             draft.assumptions = assumptions
         draft.status = "edited"
-        draft.validator_result = {}
+        current_result = draft.validator_result if isinstance(draft.validator_result, dict) else {}
+        draft.validator_result = {"recommended_assets": current_result.get("recommended_assets", [])}
         project.status = "DRAFT_READY"
         await session.commit()
         await session.refresh(draft)
         return draft
+
+    async def _search_recommended_assets(
+        self,
+        *,
+        session: AsyncSession,
+        project_id: UUID,
+        section: dict[str, Any],
+        global_params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        query = build_section_asset_query(section=section, global_params=global_params)
+        if not query:
+            return []
+        response = await self.asset_retriever.search_project_assets(
+            session=session,
+            project_id=project_id,
+            query=query,
+            top_k=3,
+            asset_types=build_section_asset_types(section),
+            section_context={
+                "section_title": str(section.get("title") or ""),
+                "expected_evidence_types": list(section.get("expected_evidence_types") or []),
+                "keywords": list(section.get("keywords") or []),
+            },
+        )
+        return [item.model_dump(mode="json") for item in response.results]
 
     async def _resolve_outline(
         self,

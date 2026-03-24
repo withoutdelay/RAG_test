@@ -37,3 +37,11 @@ class SectionDraft(Base):
     )
 
     project = relationship("Project", back_populates="section_drafts")
+
+    @property
+    def recommended_assets(self) -> list:
+        if isinstance(self.validator_result, dict):
+            assets = self.validator_result.get("recommended_assets")
+            if isinstance(assets, list):
+                return assets
+        return []

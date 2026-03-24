@@ -80,6 +80,11 @@ class _FallbackProvider(BaseLLMProvider):
 
 
 class LLMClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._gateway_masking_patch = patch.dict(os.environ, {"GATEWAY_MASKING_ENABLED": "true"}, clear=False)
+        self._gateway_masking_patch.start()
+        get_settings.cache_clear()
+
     def _make_client(self, provider: BaseLLMProvider) -> LLMClient:
         transport = httpx.ASGITransport(app=gateway_app)
         gateway_client = GatewayClient(base_url="http://gateway.test", transport=transport)
@@ -87,6 +92,7 @@ class LLMClientTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         get_settings.cache_clear()
+        self._gateway_masking_patch.stop()
 
     def test_invoke_falls_back_and_restores_masked_entities(self) -> None:
         client = self._make_client(_FallbackProvider())
@@ -269,12 +275,21 @@ class LLMClientTests(unittest.TestCase):
             self.assertEqual(payload["model"], "gpt-4o-mini")
             self.assertEqual(payload["response_format"]["type"], "json_schema")
             self.assertFalse(payload["response_format"]["json_schema"]["schema"]["additionalProperties"])
+            nested_items = payload["response_format"]["json_schema"]["schema"]["properties"]["sections"]["items"]
+            self.assertEqual(
+                nested_items["required"],
+                ["index", "title", "subsections"],
+            )
+            self.assertEqual(
+                nested_items["properties"]["subsections"]["items"]["required"],
+                ["index", "title"],
+            )
             return httpx.Response(
                 200,
                 json={
                     "id": "chatcmpl-openai",
                     "model": "gpt-4o-mini",
-                    "choices": [{"message": {"role": "assistant", "content": '{"company":"[Company_A]"}'}}],
+                    "choices": [{"message": {"role": "assistant", "content": '{"title":"结构化摘要","sections":[{"index":1,"title":"项目概述","subsections":[{"index":1,"title":"背景"}]}]}'}}],
                     "usage": {"prompt_tokens": 14, "completion_tokens": 5, "total_tokens": 19},
                 },
             )
@@ -306,14 +321,39 @@ class LLMClientTests(unittest.TestCase):
                         user_prompt="请为上海电气集团生成结构化摘要。",
                         json_schema={
                             "type": "object",
-                            "properties": {"company": {"type": "string"}},
-                            "required": ["company"],
+                            "properties": {
+                                "title": {"type": "string"},
+                                "sections": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "index": {"type": "integer"},
+                                            "title": {"type": "string"},
+                                            "subsections": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "index": {"type": "integer"},
+                                                        "title": {"type": "string"},
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                            "required": ["title", "sections"],
                         },
                     )
                 )
             )
 
-        self.assertEqual(response.content, '{"company":"上海电气集团"}')
+        self.assertEqual(
+            response.content,
+            '{"title":"结构化摘要","sections":[{"index":1,"title":"项目概述","subsections":[{"index":1,"title":"背景"}]}]}',
+        )
         self.assertEqual(response.model_used, "gpt-4o-mini")
 
     def test_live_provider_streams_sse_chunks(self) -> None:

@@ -96,6 +96,7 @@ class _FakeSectionDraftService:
             citation_refs=[],
             assumptions=[],
             global_param_snapshot={"total_power": "5000kW"},
+            recommended_assets=[],
             status=status,
             validator_result={},
             created_at=datetime.now(timezone.utc),

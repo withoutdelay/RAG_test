@@ -123,6 +123,7 @@ class SectionDraftRead(BaseModel):
     citation_refs: list
     assumptions: list
     global_param_snapshot: dict
+    recommended_assets: list = Field(default_factory=list)
     status: str
     validator_result: dict
     created_at: datetime

@@ -637,7 +637,14 @@ def _ensure_strict_json_schema(schema: Any) -> Any:
             normalized[key] = value
 
     schema_type = normalized.get("type")
-    if schema_type == "object" and "additionalProperties" not in normalized:
-        normalized["additionalProperties"] = False
+    if schema_type == "object":
+        properties = normalized.get("properties")
+        if isinstance(properties, dict):
+            property_names = list(properties.keys())
+            normalized["required"] = property_names
+        elif "required" not in normalized:
+            normalized["required"] = []
+        if "additionalProperties" not in normalized:
+            normalized["additionalProperties"] = False
 
     return normalized

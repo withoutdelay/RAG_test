@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     qdrant_location: str | None = None
     qdrant_collection: str = "presale_knowledge"
     parser_backend: Literal["auto", "docling", "fallback"] = "auto"
+    safe_ingestion_enabled: bool = True
+    formula_ocr_backend: Literal["none", "pix2tex"] = "none"
+    formula_ocr_max_assets: int = 3
+    formula_ocr_max_regions_per_asset: int = 3
     embedding_backend: Literal["auto", "sentence-transformers", "fallback"] = "fallback"
     embedding_model: str = "BAAI/bge-large-zh-v1.5"
     embedding_dimension: int = 1024

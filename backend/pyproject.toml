@@ -21,11 +21,15 @@ dependencies = [
 parsing = [
   "docling>=2.0.0",
 ]
+ocr = [
+  "pix2tex",
+]
 embeddings = [
   "sentence-transformers>=3.4.0",
 ]
 full = [
   "docling>=2.0.0",
+  "pix2tex",
   "sentence-transformers>=3.4.0",
 ]
 

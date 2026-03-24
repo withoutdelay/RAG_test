@@ -15,6 +15,26 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(chunks), 2)
         self.assertTrue(any(chunk.chunk_type == "TABLE" for chunk in chunks))
+        self.assertTrue(all("content_risk_level" in chunk.metadata for chunk in chunks))
+
+    def test_chunker_splits_medium_tables_into_multiple_chunks(self) -> None:
+        rows = "\n".join(f"| 参数{i} | 数值{i} | 补充说明{i} |" for i in range(12))
+        markdown = f"# 参数表\n\n| 名称 | 值 | 说明 |\n|---|---|---|\n{rows}\n"
+
+        chunks = Chunker(max_chars=160, max_table_rows_per_chunk=4).split(markdown, base_metadata={"industry": "电气"})
+
+        table_chunks = [chunk for chunk in chunks if chunk.chunk_type == "TABLE"]
+        self.assertGreaterEqual(len(table_chunks), 3)
+        self.assertTrue(all(chunk.token_count > 0 for chunk in table_chunks))
+        self.assertTrue(all(chunk.metadata["content_risk_level"] == "medium" for chunk in table_chunks))
+
+    def test_chunker_marks_asset_lookup_for_diagram_references(self) -> None:
+        markdown = "# 控制原理\n\n原理图与波形图详见附件，接线图如下。"
+
+        chunks = Chunker().split(markdown, base_metadata={"industry": "电气"})
+
+        self.assertTrue(any(chunk.metadata["needs_asset_lookup"] for chunk in chunks))
+        self.assertTrue(any(chunk.metadata["content_risk_level"] == "medium" for chunk in chunks))
 
     def test_embedder_returns_configured_dimension(self) -> None:
         embedder = Embedder()

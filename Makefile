@@ -8,7 +8,7 @@ ALEMBIC ?= $(ROOT_DIR)$(VENV)/bin/alembic
 POSTGRES_TEST_URL ?= postgresql+asyncpg://copilot:copilot@localhost:55432/copilot_db
 PHASE2_ENV = DATABASE_URL=$(POSTGRES_TEST_URL) QDRANT_LOCATION=:memory: EMBEDDING_DIMENSION=16 EMBEDDING_BACKEND=fallback PARSER_BACKEND=fallback PYTHONPYCACHEPREFIX=/tmp/pycache
 
-.PHONY: backend-install backend-install-full backend-migrate backend-run gateway-run phase2-test phase2-test-api phase3-test phase4-test phaseb-test phasec-test phased-test phasee-test phasev2-test-api
+.PHONY: backend-install backend-install-full backend-migrate backend-run gateway-run phase2-test phase2-test-api phase3-test phase4-test phaseb-test phasec-test phased-test phasee-test phasev2-test-api pdf-audit
 
 backend-install:
 	python3 -m venv $(VENV)
@@ -28,7 +28,7 @@ gateway-run:
 	cd gateway && REDIS_ENABLED=false $(UVICORN) app.main:app --reload --port 8001
 
 phase2-test:
-	cd backend && env PYTHONPYCACHEPREFIX=/tmp/pycache $(PYTHON) -m unittest tests.test_parsing tests.test_retrieval tests.test_storage
+	cd backend && env PYTHONPYCACHEPREFIX=/tmp/pycache $(PYTHON) -m unittest tests.test_parsing tests.test_document_profile tests.test_table_profile tests.test_formula_candidates tests.test_formula_regions tests.test_formula_ocr tests.test_pdf_audit tests.test_ingestion_filter tests.test_retrieval tests.test_storage
 
 phase2-test-api:
 	cd backend && env $(PHASE2_ENV) $(PYTHON) -m unittest tests.test_api_phase2
@@ -55,3 +55,7 @@ phasee-test:
 
 phasev2-test-api:
 	cd backend && env $(PHASE2_ENV) GATEWAY_MASKING_ENABLED=false LLM_PROVIDER_BACKEND=mock $(PYTHON) -m unittest tests.test_api_v2_pipeline
+
+pdf-audit:
+	@if [ -z "$(PDF)" ]; then echo "Usage: make pdf-audit PDF=/absolute/path/to/file.pdf"; exit 1; fi
+	cd backend && env PARSER_BACKEND=docling PYTHONPYCACHEPREFIX=/tmp/pycache ../$(VENV)/bin/python scripts/pdf_parse_audit.py "$(PDF)" $(if $(FORMULA_OCR_BACKEND),--formula-ocr-backend $(FORMULA_OCR_BACKEND),) $(if $(FORMULA_OCR_MAX_ASSETS),--formula-ocr-max-assets $(FORMULA_OCR_MAX_ASSETS),) $(if $(FORMULA_OCR_MAX_REGIONS_PER_ASSET),--formula-ocr-max-regions-per-asset $(FORMULA_OCR_MAX_REGIONS_PER_ASSET),)

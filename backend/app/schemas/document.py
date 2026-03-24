@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from datetime import datetime
 from uuid import UUID
 
@@ -40,5 +41,21 @@ class ChunkRead(BaseModel):
     heading_path: str | None
     image_url: str | None
     qdrant_point_id: UUID | None
+    metadata: dict = Field(validation_alias="meta")
+    created_at: datetime
+
+
+class FigureAssetRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    raw_document_id: UUID
+    page_no: int | None
+    asset_uri: str
+    asset_type: str
+    title: str | None
+    caption: str | None
+    reuse_mode: str
+    parse_confidence: Decimal | None
     metadata: dict = Field(validation_alias="meta")
     created_at: datetime

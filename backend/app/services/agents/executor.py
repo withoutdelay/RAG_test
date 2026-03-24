@@ -16,12 +16,14 @@ class ExecutorAgent:
         global_params: dict,
         retrieved_context: str,
         outline_title: str,
+        recommended_assets: list[dict] | None = None,
     ) -> LLMResponse:
         system_prompt, user_prompt = build_section_prompts(
             section=section,
             global_params=global_params,
             retrieved_context=retrieved_context,
             outline_title=outline_title,
+            recommended_assets=recommended_assets or [],
         )
         return await self.llm_client.invoke(
             LLMRequest(
@@ -29,9 +31,11 @@ class ExecutorAgent:
                 session_id=task_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                max_tokens=1600,
                 metadata={
                     "section": section,
                     "retrieved_context": retrieved_context,
+                    "recommended_assets": recommended_assets or [],
                 },
             )
         )
@@ -57,6 +61,7 @@ class ExecutorAgent:
                 session_id=task_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                max_tokens=1200,
                 metadata={
                     "section_context": section_context,
                     "selected_text": selected_text,

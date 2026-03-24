@@ -40,6 +40,15 @@ class LocalObjectStorage:
         shutil.copy2(source_path, destination)
         return str(destination)
 
+    def save_bytes(self, content: bytes, *, suffix: str = ".bin", prefix: str = "") -> str:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+            handle.write(content)
+            temp_path = Path(handle.name)
+        try:
+            return self.save(temp_path, prefix=prefix)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
     def materialize(self, storage_path: str) -> MaterializedObject:
         return MaterializedObject(path=Path(storage_path), temporary=False)
 
@@ -73,6 +82,15 @@ class MinioObjectStorage:
         object_name = f"{prefix}{uuid4()}{extension}"
         self.client.fput_object(self.bucket, object_name, str(source_path))
         return f"minio://{self.bucket}/{object_name}"
+
+    def save_bytes(self, content: bytes, *, suffix: str = ".bin", prefix: str = "") -> str:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+            handle.write(content)
+            temp_path = Path(handle.name)
+        try:
+            return self.save(temp_path, prefix=prefix)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     def materialize(self, storage_path: str) -> MaterializedObject:
         object_name = self._parse_object_name(storage_path)

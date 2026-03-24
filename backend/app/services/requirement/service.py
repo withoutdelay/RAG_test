@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -16,15 +17,31 @@ from app.models.project import Project
 from app.models.requirement_card import RequirementCard
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
+INTERNAL_OBJECTIVE_TERMS = (
+    "review",
+    "质量审查",
+    "质量review",
+    "导出",
+    "导出稿",
+    "draft",
+    "smoke",
+    "联调",
+    "测试",
+    "验证",
+    "llm",
+    "prompt",
+    "模型",
+    "闭环",
+    "relay",
+)
+
 
 def build_requirement_content(
     *,
     project: Project,
     source_excerpt: str,
 ) -> dict[str, Any]:
-    business_objective = (project.description or "").strip()
-    if not business_objective and source_excerpt:
-        business_objective = source_excerpt[:300]
+    business_objective = derive_business_objective(project=project, source_excerpt=source_excerpt)
 
     return {
         "project_name": project.name,
@@ -35,6 +52,48 @@ def build_requirement_content(
         "constraints": [],
         "key_parameters": {},
     }
+
+
+def derive_business_objective(*, project: Project, source_excerpt: str) -> str:
+    candidate = (project.description or "").strip()
+    if candidate and not looks_like_internal_objective(candidate):
+        return candidate
+    return summarize_business_objective_from_excerpt(source_excerpt)
+
+
+def looks_like_internal_objective(text: str) -> bool:
+    lowered = text.lower()
+    return any(term in lowered for term in INTERNAL_OBJECTIVE_TERMS)
+
+
+def summarize_business_objective_from_excerpt(source_excerpt: str) -> str:
+    if not source_excerpt:
+        return ""
+
+    cleaned_lines: list[str] = []
+    for raw_line in source_excerpt.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("|"):
+            continue
+        if re.fullmatch(r"[-:\s|]+", line):
+            continue
+        cleaned_lines.append(line)
+
+    collapsed = re.sub(r"\s+", " ", " ".join(cleaned_lines)).strip()
+    if not collapsed:
+        return ""
+
+    preferred_patterns = [
+        r"(本项目[^。！？]{0,180}[。！？]?)",
+        r"(项目面向[^。！？]{0,180}[。！？]?)",
+        r"(方案采用[^。！？]{0,180}[。！？]?)",
+    ]
+    for pattern in preferred_patterns:
+        match = re.search(pattern, collapsed)
+        if match:
+            return match.group(1).strip().rstrip("。！？")
+
+    return collapsed[:180].rstrip("。！？")
 
 
 def build_clarification_items(content: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

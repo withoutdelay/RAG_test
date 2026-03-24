@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.services.llm.client import LLMClient, LLMRequest, LLMResponse, TaskType
-from app.services.llm.prompts import PLANNER_OUTLINE_SCHEMA, build_outline_prompts
+from app.services.llm.prompts import build_outline_prompts
 
 
 class PlannerAgent:
@@ -29,7 +29,7 @@ class PlannerAgent:
                 session_id=task_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                json_schema=PLANNER_OUTLINE_SCHEMA,
+                max_tokens=1200,
                 metadata={
                     "project_name": project_name,
                     "instructions": instructions,

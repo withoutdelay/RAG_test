@@ -1,16 +1,36 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from app.services.requirement.service import (
     build_clarification_items,
     build_requirement_content,
+    derive_business_objective,
+    looks_like_internal_objective,
     resolve_clarification_state,
 )
 from app.services.retrieval.service import build_evidence_items, build_requirement_query
 
 
 class RequirementPipelineHelperTests(unittest.TestCase):
+    def test_derive_business_objective_filters_internal_workflow_description(self) -> None:
+        project = SimpleNamespace(
+            name="测试项目",
+            description="生成完整导出稿并做逐章质量review。",
+            product_line="hv_vfd",
+            industry="电气",
+        )
+        objective = derive_business_objective(
+            project=project,
+            source_excerpt="本项目面向110kV变电站场景，提供综合自动化与高压变频器配套方案。",
+        )
+        self.assertEqual(objective, "本项目面向110kV变电站场景，提供综合自动化与高压变频器配套方案")
+
+    def test_looks_like_internal_objective_detects_internal_terms(self) -> None:
+        self.assertTrue(looks_like_internal_objective("用于导出稿联调和review验证"))
+        self.assertFalse(looks_like_internal_objective("提升变电站自动化运行可靠性"))
+
     def test_build_clarification_items_marks_missing_product_line_as_blocking(self) -> None:
         missing_items, blocking_items = build_clarification_items(
             {
@@ -66,6 +86,19 @@ class RequirementPipelineHelperTests(unittest.TestCase):
         )
         self.assertEqual(missing_items, [])
         self.assertEqual(blocking_items, [])
+
+    def test_build_requirement_content_uses_excerpt_when_description_is_internal(self) -> None:
+        project = SimpleNamespace(
+            name="测试项目",
+            description="用于smoke和导出联调。",
+            product_line="hv_vfd",
+            industry="电气",
+        )
+        content = build_requirement_content(
+            project=project,
+            source_excerpt="本项目面向110kV变电站场景，提供综合自动化与高压变频器配套方案。",
+        )
+        self.assertEqual(content["business_objective"], "本项目面向110kV变电站场景，提供综合自动化与高压变频器配套方案")
 
 
 if __name__ == "__main__":

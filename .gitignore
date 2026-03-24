@@ -12,6 +12,7 @@ __pycache__/
 .DS_Store
 
 backend/data/uploads/
+backend/data/pdf_audits/
 
 frontend/node_modules/
 frontend/.next/

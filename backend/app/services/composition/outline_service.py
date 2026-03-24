@@ -89,7 +89,7 @@ def build_outline_inputs(
         if isinstance(item, dict)
     )
     instructions = (
-        f"请基于需求卡生成一份结构化方案大纲。"
+        f"请基于需求卡生成一份面向客户技术方案的大纲。"
         f"项目名称：{content.get('project_name') or '未命名项目'}。"
         f"业务目标：{content.get('business_objective') or '请结合检索证据归纳'}。"
     )

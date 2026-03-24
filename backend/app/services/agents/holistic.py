@@ -26,6 +26,7 @@ class HolisticAgent:
                 session_id=task_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                max_tokens=2200,
                 metadata={
                     "outline_title": outline_title,
                     "sections_markdown": all_sections_markdown,

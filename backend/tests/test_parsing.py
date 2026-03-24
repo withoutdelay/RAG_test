@@ -24,6 +24,9 @@ class ParsingTests(unittest.TestCase):
         self.assertIn("# 示例文档", parsed.markdown)
         self.assertEqual(parsed.metadata["table_count"], 1)
         self.assertEqual(parsed.metadata["image_count"], 0)
+        self.assertEqual(parsed.metadata["document_profile"]["name"], "text_digital")
+        self.assertEqual(parsed.metadata["ingestion_recommendation"], "main_vector_ready")
+        self.assertEqual(parsed.metadata["high_risk_content_flags"], [])
 
     def test_docling_parser_respects_fallback_backend(self) -> None:
         with patch.dict(os.environ, {"PARSER_BACKEND": "fallback"}, clear=False):
