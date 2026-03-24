@@ -29,6 +29,21 @@ def build_requirement_query(content: dict[str, Any]) -> str:
     return query or "售前方案 需求分析"
 
 
+def _compute_reusability_score(result: dict[str, Any]) -> float:
+    score = float(result.get("score") or 0)
+    metadata = result.get("metadata") or {}
+    content_risk_level = str(metadata.get("content_risk_level") or "").lower()
+    if content_risk_level == "high":
+        score *= 0.55
+    elif content_risk_level == "medium":
+        score *= 0.8
+    if metadata.get("front_matter"):
+        score *= 0.35
+    if metadata.get("needs_asset_lookup"):
+        score *= 0.85
+    return round(min(max(score, 0.0), 1.0), 4)
+
+
 def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for index, result in enumerate(results, start=1):
@@ -43,19 +58,25 @@ def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             evidence_type = "table"
         elif chunk_type == "IMAGE":
             evidence_type = "figure"
+        metadata = result.get("metadata") or {}
+        raw_content = str(result.get("content") or "")
         items.append(
             {
                 "evidence_id": f"ev_{index:03d}",
                 "type": evidence_type,
+                "source_chunk_id": str(result.get("chunk_id")),
+                "source_chunk_type": chunk_type,
                 "source_doc_id": str(result.get("document_id")),
                 "source_title": result.get("document_name"),
                 "page_range": [],
                 "heading_path": path_segments,
-                "summary": str(result.get("content") or "")[:180],
+                "summary": raw_content[:180],
+                "raw_content": raw_content,
                 "relevance_score": float(result.get("score") or 0),
+                "reusability_score": _compute_reusability_score(result),
                 "recommended_use": f"可用于 {result.get('chunk_type', '章节')} 相关内容起草",
                 "risk_note": None,
-                "metadata": result.get("metadata") or {},
+                "metadata": metadata,
             }
         )
     return items

@@ -17,6 +17,7 @@ class ExecutorAgent:
         retrieved_context: str,
         outline_title: str,
         recommended_assets: list[dict] | None = None,
+        reuse_pack: dict | None = None,
     ) -> LLMResponse:
         system_prompt, user_prompt = build_section_prompts(
             section=section,
@@ -24,6 +25,7 @@ class ExecutorAgent:
             retrieved_context=retrieved_context,
             outline_title=outline_title,
             recommended_assets=recommended_assets or [],
+            reuse_pack=reuse_pack or {},
         )
         return await self.llm_client.invoke(
             LLMRequest(
@@ -36,6 +38,7 @@ class ExecutorAgent:
                     "section": section,
                     "retrieved_context": retrieved_context,
                     "recommended_assets": recommended_assets or [],
+                    "reuse_pack": reuse_pack or {},
                 },
             )
         )

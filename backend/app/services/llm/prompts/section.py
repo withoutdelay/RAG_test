@@ -13,6 +13,14 @@ EXECUTOR_SYSTEM_PROMPT = """你是一位专业的技术文档撰写专家。请�
 6. 若信息不足，请使用“建议在深化设计阶段确认/补充”的客户语言，不要描述生成过程或内部工作流
 """
 
+REUSE_FIRST_SYSTEM_APPENDIX = """
+当章节 generation_mode 为 reuse_first 时，请额外遵守：
+1. 优先复用给定复用块中的技术骨架和信息顺序，不要把它们重新概括成空泛套话
+2. 仅做当前项目所需的最小改写，重点替换项目、客户、参数和边界信息
+3. 不要无依据扩写，不要为了完整性主动添加长篇背景铺垫
+4. 如果复用块里已经有足够技术描述，应尽量保留其干货密度
+"""
+
 
 def build_section_prompts(
     *,
@@ -21,23 +29,31 @@ def build_section_prompts(
     retrieved_context: str,
     outline_title: str,
     recommended_assets: list[dict] | None = None,
+    reuse_pack: dict | None = None,
 ) -> tuple[str, str]:
+    reuse_pack = reuse_pack or {}
     params_formatted = _format_global_params(global_params)
     section_title = str(section.get("title", "未命名章节"))
     section_guidance = _build_section_guidance(section_title)
     asset_guidance = _format_recommended_assets(recommended_assets or [])
+    generation_mode = str(section.get("generation_mode") or reuse_pack.get("generation_mode") or "baseline")
+    reuse_guidance = REUSE_FIRST_SYSTEM_APPENDIX if generation_mode == "reuse_first" else ""
     system_prompt = (
         f"{EXECUTOR_SYSTEM_PROMPT}\n\n"
+        f"{reuse_guidance}\n"
         f"方案标题：{outline_title}\n"
         f"当前章节：{section_title}\n"
         f"章节描述：{section.get('description', '')}\n"
         f"全局参数：\n{params_formatted}\n\n"
         f"章节写作要求：\n{section_guidance}"
     )
+    reuse_pack_text = _format_reuse_pack(reuse_pack)
     user_prompt = (
         f"请撰写章节《{section_title}》。\n"
+        f"生成模式：{generation_mode}\n"
         f"关键词：{', '.join(section.get('keywords', [])) or '暂无'}\n\n"
         f"参考资料：\n{retrieved_context or '暂无检索资料，请输出稳健的客户版标准章节内容。'}\n\n"
+        f"复用包：\n{reuse_pack_text}\n\n"
         f"建议参考资产：\n{asset_guidance}\n\n"
         "这些资产仅供参考，不代表已确认可直接外发；如引用，请用客户口径描述其作用，不要把未确认参数写成最终承诺。\n\n"
         "请直接输出客户可阅读的 Markdown 正文，不要解释写作过程。"
@@ -105,4 +121,26 @@ def _format_recommended_assets(recommended_assets: list[dict]) -> str:
         if reason:
             parts.append(f"推荐原因 {reason}")
         lines.append("- " + "；".join(parts))
+    return "\n".join(lines)
+
+
+def _format_reuse_pack(reuse_pack: dict) -> str:
+    blocks = reuse_pack.get("reusable_blocks") or []
+    if not blocks:
+        return "- 暂无可复用块，必要时再回退到常规写作。"
+
+    lines = []
+    for block in blocks[:3]:
+        heading = " > ".join(str(item) for item in (block.get("heading_path") or []) if item)
+        replace_fields = ", ".join(block.get("must_replace_fields") or []) or "无"
+        lines.extend(
+            [
+                f"- 来源：{block.get('source_title') or '未知来源'}"
+                + (f" / {heading}" if heading else ""),
+                f"  复用评分：{block.get('reusability_score')}",
+                f"  必须替换字段：{replace_fields}",
+                "  可复用正文：",
+                f"  {str(block.get('content_md') or '').replace(chr(10), chr(10) + '  ')}",
+            ]
+        )
     return "\n".join(lines)

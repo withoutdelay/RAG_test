@@ -6,6 +6,9 @@ from types import SimpleNamespace
 from app.services.composition.outline_service import normalize_outline_payload
 from app.services.composition.section_service import (
     SectionDraftService,
+    build_manual_only_section_content,
+    build_reuse_pack,
+    build_reusable_blocks,
     build_section_asset_query,
     build_section_context,
     build_section_global_params,
@@ -127,6 +130,7 @@ class CompositionHelperTests(unittest.TestCase):
                 "title": "硬件配置清单",
                 "description": "列出关键设备与配套建议。",
                 "keywords": ["硬件配置清单", "table"],
+                "generation_mode": "reuse_first",
             },
             global_params={"project_name": "测试项目", "industry": "电气"},
             retrieved_context="历史方案A 配置清单: 包含设备与数量",
@@ -140,10 +144,25 @@ class CompositionHelperTests(unittest.TestCase):
                     "reason": "与当前章节高度相关",
                 }
             ],
+            reuse_pack={
+                "generation_mode": "reuse_first",
+                "reusable_blocks": [
+                    {
+                        "source_title": "历史方案A",
+                        "heading_path": ["4.3", "设备配置"],
+                        "content_md": "推荐沿用高压变频器双机冗余配置。",
+                        "reusability_score": 0.92,
+                        "must_replace_fields": ["project_name", "quantity"],
+                    }
+                ],
+            },
         )
         self.assertIn("客户外发口径", system_prompt)
+        self.assertIn("优先复用给定复用块", system_prompt)
         self.assertIn("已确认的设备型号和数量", system_prompt)
         self.assertIn("建议参考资产", user_prompt)
+        self.assertIn("复用包", user_prompt)
+        self.assertIn("必须替换字段", user_prompt)
         self.assertIn("电机参数表", user_prompt)
         self.assertIn("不要解释写作过程", user_prompt)
 
@@ -163,6 +182,61 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("技术架构", query)
         self.assertIn("IEC 61850", query)
         self.assertIn("湛江中纸项目", query)
+
+    def test_build_reusable_blocks_prefers_raw_content_and_replace_fields(self) -> None:
+        bundle = SimpleNamespace(
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_001",
+                        "type": "section",
+                        "source_doc_id": "doc_1",
+                        "source_title": "历史方案A",
+                        "heading_path": ["第4章", "技术架构"],
+                        "summary": "摘要",
+                        "raw_content": "项目名称：旧项目A\n采用双机冗余架构，电压等级为10kV。",
+                        "reusability_score": 0.88,
+                        "metadata": {"front_matter": False, "needs_asset_lookup": False},
+                    }
+                ]
+            }
+        )
+        blocks = build_reusable_blocks(
+            section={"title": "技术架构", "expected_evidence_types": ["section"]},
+            evidence_bundle=bundle,
+            global_params={"project_name": "新项目", "voltage_level": "10kV"},
+        )
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("双机冗余架构", blocks[0]["content_md"])
+        self.assertIn("project_name", blocks[0]["must_replace_fields"])
+        self.assertIn("voltage_level", blocks[0]["must_replace_fields"])
+
+    def test_build_manual_only_section_content_includes_assets_and_reuse_hint(self) -> None:
+        reuse_pack = build_reuse_pack(
+            section={"title": "商务条款", "generation_mode": "manual_only"},
+            global_params={"project_name": "测试项目"},
+            reusable_blocks=[
+                {
+                    "source_title": "历史方案B",
+                    "heading_path": ["第8章", "商务条款"],
+                    "reusability_score": 0.75,
+                }
+            ],
+            recommended_assets=[
+                {
+                    "asset_type": "table",
+                    "asset_id": "asset-001",
+                    "title": "报价清单模板",
+                }
+            ],
+        )
+        content = build_manual_only_section_content(
+            section={"title": "商务条款"},
+            reuse_pack=reuse_pack,
+        )
+        self.assertIn("人工编写", content)
+        self.assertIn("[[ASSET:TABLE:asset-001]]", content)
+        self.assertIn("历史方案B", content)
 
 
 if __name__ == "__main__":

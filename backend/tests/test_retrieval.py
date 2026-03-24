@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from app.config import get_settings
+from app.services.retrieval.service import build_evidence_items
 from app.services.vectorstore.chunker import Chunker
 from app.services.vectorstore.embedder import Embedder
 
@@ -35,6 +36,25 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
 
         self.assertTrue(any(chunk.metadata["needs_asset_lookup"] for chunk in chunks))
         self.assertTrue(any(chunk.metadata["content_risk_level"] == "medium" for chunk in chunks))
+
+    def test_build_evidence_items_keeps_raw_content_and_reusability_score(self) -> None:
+        items = build_evidence_items(
+            [
+                {
+                    "chunk_id": "chunk-1",
+                    "document_id": "doc-1",
+                    "document_name": "历史方案A",
+                    "heading_path": "第4章 > 技术架构",
+                    "chunk_type": "PLAIN",
+                    "content": "项目名称：旧项目A\n采用双机冗余架构。",
+                    "score": 0.82,
+                    "metadata": {"content_risk_level": "low", "front_matter": False, "needs_asset_lookup": False},
+                }
+            ]
+        )
+        self.assertEqual(items[0]["source_chunk_type"], "PLAIN")
+        self.assertIn("双机冗余架构", items[0]["raw_content"])
+        self.assertGreater(items[0]["reusability_score"], 0.8)
 
     def test_embedder_returns_configured_dimension(self) -> None:
         embedder = Embedder()
