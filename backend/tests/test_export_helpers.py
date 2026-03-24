@@ -49,7 +49,7 @@ class ExportHelperTests(unittest.TestCase):
                 SimpleNamespace(
                     section_id="2",
                     title="技术架构",
-                    content_md="## 技术架构\n\n说明系统架构。",
+                    content_md="## 技术架构\n\n说明系统架构。\n\n[[ASSET:FIGURE:asset-001]]",
                     citation_refs=[
                         {
                             "evidence_id": "ev_001",
@@ -57,6 +57,21 @@ class ExportHelperTests(unittest.TestCase):
                             "heading_path": ["第2章", "技术架构"],
                         }
                     ],
+                    validator_result={
+                        "recommended_assets": [
+                            {
+                                "asset_id": "asset-001",
+                                "asset_type": "figure",
+                                "title": "系统拓扑图",
+                                "document_name": "历史方案A",
+                                "page_no": 12,
+                                "heading_path": "第2章 > 技术架构",
+                                "preview_text": "站控层、间隔层和网络层拓扑示意。",
+                                "reason": "与章节《技术架构》高度相关，可作为当前方案的参考插图。",
+                                "review_required": True,
+                            }
+                        ]
+                    },
                 ),
             ],
             snapshot={
@@ -71,6 +86,9 @@ class ExportHelperTests(unittest.TestCase):
         self.assertIn("## 技术架构", markdown)
         self.assertIn("## 引用清单", markdown)
         self.assertIn("ev_001 / 历史方案A / 第2章 > 技术架构", markdown)
+        self.assertIn("[建议插入图片] 系统拓扑图", markdown)
+        self.assertIn("资产占位符：[[ASSET:FIGURE:asset-001]]", markdown)
+        self.assertIn("来源：历史方案A / 第 12 页 / 第2章 > 技术架构", markdown)
 
 
 if __name__ == "__main__":

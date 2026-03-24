@@ -26,6 +26,7 @@ from app.utils.object_storage import get_object_storage
 
 
 SUPPORTED_EXPORT_FORMATS = {"markdown": "md"}
+ASSET_PLACEHOLDER_PATTERN = re.compile(r"\[\[ASSET:(FIGURE|TABLE|FORMULA):([^\]]+)\]\]")
 
 
 def build_export_snapshot(
@@ -87,7 +88,7 @@ def render_export_markdown(
         draft = drafts_by_id.get(str(section.get("section_id") or ""))
         if draft is None:
             continue
-        content = draft.content_md.strip()
+        content = _render_export_section_content(draft).strip()
         if not content.startswith("#"):
             content = f"## {draft.title}\n\n{content}"
         lines.extend([content, ""])
@@ -118,6 +119,94 @@ def render_export_markdown(
         lines.extend(["---", "", "## 引用清单", "", *citation_sections])
 
     return "\n".join(lines).strip() + "\n"
+
+
+def _render_export_section_content(draft: SectionDraft) -> str:
+    content = draft.content_md or ""
+    raw_validator_result = getattr(draft, "validator_result", {})
+    validator_result = raw_validator_result if isinstance(raw_validator_result, dict) else {}
+    recommended_assets = validator_result.get("recommended_assets") if isinstance(validator_result.get("recommended_assets"), list) else []
+    asset_lookup = _build_recommended_asset_lookup(recommended_assets)
+
+    def _replace(match: re.Match[str]) -> str:
+        placeholder_type = str(match.group(1) or "").upper()
+        asset_id = str(match.group(2) or "").strip()
+        asset = asset_lookup.get((placeholder_type, asset_id))
+        return _render_asset_reference_block(
+            placeholder_type=placeholder_type,
+            asset_id=asset_id,
+            asset=asset,
+        )
+
+    return ASSET_PLACEHOLDER_PATTERN.sub(_replace, content)
+
+
+def _build_recommended_asset_lookup(recommended_assets: list[dict]) -> dict[tuple[str, str], dict]:
+    lookup: dict[tuple[str, str], dict] = {}
+    for asset in recommended_assets:
+        if not isinstance(asset, dict):
+            continue
+        asset_id = str(asset.get("asset_id") or "").strip()
+        if not asset_id:
+            continue
+        asset_type = _normalize_asset_placeholder_type(str(asset.get("asset_type") or ""))
+        if not asset_type:
+            continue
+        lookup[(asset_type, asset_id)] = asset
+    return lookup
+
+
+def _normalize_asset_placeholder_type(asset_type: str) -> str:
+    normalized = str(asset_type or "").strip().lower()
+    if normalized == "figure":
+        return "FIGURE"
+    if normalized == "table":
+        return "TABLE"
+    if normalized == "formula_candidate":
+        return "FORMULA"
+    return ""
+
+
+def _render_asset_reference_block(*, placeholder_type: str, asset_id: str, asset: dict | None) -> str:
+    type_label = {
+        "FIGURE": "建议插入图片",
+        "TABLE": "建议插入表格",
+        "FORMULA": "建议插入公式",
+    }.get(placeholder_type, "建议插入资产")
+    if not asset:
+        return "\n".join(
+            [
+                f"> [{type_label}]",
+                f"> 资产占位符：[[ASSET:{placeholder_type}:{asset_id}]]",
+                "> 说明：当前未找到对应资产详情，请在审稿时手动补充。",
+            ]
+        )
+
+    title = str(asset.get("title") or asset.get("caption") or asset.get("preview_text") or "参考资产").strip()
+    document_name = str(asset.get("document_name") or "未知文档").strip()
+    page_no = asset.get("page_no")
+    heading_path = str(asset.get("heading_path") or "").strip()
+    reason = str(asset.get("reason") or "").strip()
+    preview_text = str(asset.get("preview_text") or "").strip()
+    review_required = bool(asset.get("review_required"))
+
+    source_parts = [document_name]
+    if page_no is not None:
+        source_parts.append(f"第 {page_no} 页")
+    if heading_path:
+        source_parts.append(heading_path)
+
+    lines = [
+        f"> [{type_label}] {title}",
+        f"> 资产占位符：[[ASSET:{placeholder_type}:{asset_id}]]",
+        f"> 来源：{' / '.join(part for part in source_parts if part)}",
+    ]
+    if reason:
+        lines.append(f"> 推荐原因：{reason}")
+    if preview_text:
+        lines.append(f"> 参考说明：{preview_text}")
+    lines.append("> 使用建议：需人工确认后复用或替换。" if review_required else "> 使用建议：可作为参考资产插入当前章节。")
+    return "\n".join(lines)
 
 
 class ExportService:
