@@ -83,10 +83,12 @@
 
 目标流程应改为：
 
-`Requirement Structuring -> Candidate Retrieval -> Reusable Block Selection -> Controlled Rewrite -> Asset Recommendation / Placeholder Assembly -> Validation -> Review -> Export`
+`Requirement Structuring -> Candidate Outline Generation -> Sales Engineer Outline Review -> Candidate Retrieval -> Reusable Block Selection -> Controlled Rewrite -> Asset Recommendation / Placeholder Assembly -> Validation -> Review -> Export`
 
 其中：
 
+- `Candidate Outline Generation` 只负责提出高层结构候选，不直接进入章节生成
+- `Sales Engineer Outline Review` 是正式人工确认断点，确认后的目录才允许进入后续复用链路
 - `Candidate Retrieval` 不只检索摘要，而是检索原始可复用块
 - `Reusable Block Selection` 是一级能力，不再是隐含步骤
 - `Controlled Rewrite` 只对必要字段改写，不鼓励自由发挥
@@ -125,13 +127,14 @@
 
 ### 4.2 新的主生成架构
 
-新的主生成架构建议拆为 5 层：
+新的主生成架构建议拆为 6 层：
 
 1. `Requirement Layer`
-2. `Retrieval Layer`
-3. `Reuse Assembly Layer`
-4. `Rewrite Layer`
-5. `Validation & Review Layer`
+2. `Outline Planning Layer`
+3. `Retrieval Layer`
+4. `Reuse Assembly Layer`
+5. `Rewrite Layer`
+6. `Validation & Review Layer`
 
 #### Requirement Layer
 
@@ -145,6 +148,22 @@
 - 关键约束
 - 已知关键参数
 - 明确不可沿用的客户专属信息
+
+#### Outline Planning Layer
+
+负责生成和确认“高层结构主干”：
+
+- LLM 先生成候选大纲
+- 售前工程师对候选大纲做编辑和确认
+- 只有确认后的大纲才进入章节级复用流程
+
+这一层是 `reuse-first` 的必要断点，而不是可选增强。
+
+原因：
+
+- 高层结构本身就是售前经验的重要表达
+- 如果章节骨架不对，后续复用和资产装配都会偏
+- 目录先确认，才能提升章节级检索精度与复用精度
 
 #### Retrieval Layer
 
@@ -240,6 +259,48 @@ LLM 不再“从摘要自由生成”，而是：
 ---
 
 ## 6. Reuse-First 的关键实现单元
+
+### 6.0 大纲人工确认断点
+
+在 `reuse-first` 路线中，不建议保留“LLM 生成大纲后直接开始章节写作”的全自动流程。
+
+建议改为：
+
+1. 系统生成 `outline candidate`
+2. 售前工程师进行目录级编辑
+3. 系统保存 `approved outline`
+4. 章节检索与生成严格基于 `approved outline`
+
+售前工程师在大纲层至少应能做这些动作：
+
+- 改章节标题
+- 调整章节顺序
+- 删除不需要的章节
+- 新增特定项目需要的章节
+- 合并或拆分章节
+- 标记章节是否高复用
+- 标记章节是否需要图 / 表 / 公式
+- 标记章节是否必须人工编写
+
+### 6.0.1 大纲层建议新增字段
+
+每个 section 在确认阶段建议显式维护以下字段：
+
+- `section_class`
+- `reuse_level`
+- `expected_evidence_types`
+- `asset_required`
+- `parameter_sensitive`
+- `customer_specificity`
+- `generation_mode`
+
+其中 `generation_mode` 建议支持：
+
+- `baseline`
+- `reuse_first`
+- `manual_only`
+
+这样章节生成阶段就不再是“一个 prompt 打天下”，而是基于人工确认后的章节类型做路由。
 
 ### 6.1 Reusable Block
 
@@ -482,6 +543,14 @@ MVP 应至少支持：
 - `质量与可靠性保障` -> 高复用
 - `售后服务` -> 高复用或 baseline 混合
 
+但在章节路由生效之前，必须先满足一个前置条件：
+
+- 目录已经被售前工程师确认
+
+也就是说，真正的路由顺序应是：
+
+`候选大纲 -> 人工确认大纲 -> 章节级路由 -> 检索 / 复用 / 改写`
+
 ---
 
 ## 9. 实施路线
@@ -498,7 +567,20 @@ MVP 应至少支持：
 - section class 规则
 - baseline / reuse-first 路由表
 
-### Phase R2：Reusable Block 建模与检索
+### Phase R2：大纲确认断点与章节路由
+
+目标：
+
+- 把“目录人工确认”从可选操作升级为正式断点
+- 为每个章节挂上生成模式和复用等级
+
+产出：
+
+- approved outline 数据结构
+- section-level route config
+- 目录确认后的章节元数据
+
+### Phase R3：Reusable Block 建模与检索
 
 目标：
 
@@ -510,7 +592,7 @@ MVP 应至少支持：
 - block scorer
 - reuse pack builder
 
-### Phase R3：受控改写链路
+### Phase R4：受控改写链路
 
 目标：
 
@@ -522,7 +604,7 @@ MVP 应至少支持：
 - 参数替换约束
 - 旧客户痕迹清洗规则
 
-### Phase R4：Asset-Aware Assembly
+### Phase R5：Asset-Aware Assembly
 
 目标：
 
@@ -534,7 +616,7 @@ MVP 应至少支持：
 - 插入点推荐
 - review-aware asset rendering
 
-### Phase R5：过拟合校验与评估
+### Phase R6：过拟合校验与评估
 
 目标：
 
