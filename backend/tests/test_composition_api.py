@@ -22,34 +22,57 @@ class _FakeOutlineService:
         self.project_id = uuid4()
         self.outline_id = uuid4()
         self.job_id = uuid4()
+        self.approved = False
+
+    def _build_outline(self, *, project_id, outline_json=None, validator_status="pending"):
+        default_payload = {
+            "title": "测试项目技术方案",
+            "generation_strategy": "reuse_first",
+            "approval_required": True,
+            "outline_status": "approved" if self.approved else "candidate",
+            "approved_by_user": self.approved,
+            "approved_at": "2026-03-24T10:00:00+00:00" if self.approved else None,
+            "reviewer_notes": "大纲已确认" if self.approved else None,
+            "sections": [
+                {
+                    "section_id": "1",
+                    "title": "项目概述",
+                    "purpose": "总结背景与范围",
+                    "mandatory": True,
+                    "expected_evidence_types": ["requirement", "case_summary"],
+                    "needs_human_review": False,
+                    "section_class": "overview",
+                    "reuse_level": "low",
+                    "asset_required": False,
+                    "parameter_sensitive": False,
+                    "customer_specificity": "high",
+                    "generation_mode": "baseline",
+                    "keywords": ["项目概述", "requirement", "case_summary"],
+                    "children": [],
+                }
+            ],
+        }
+        payload = dict(default_payload)
+        if outline_json:
+            payload.update(outline_json)
+        if "sections" not in payload:
+            payload["sections"] = default_payload["sections"]
+        return SimpleNamespace(
+            id=self.outline_id,
+            project_id=project_id,
+            version=1,
+            outline_json=payload,
+            requirement_card_id=uuid4(),
+            evidence_bundle_id=uuid4(),
+            validator_status=validator_status,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
 
     async def generate_outline(self, *, session, project_id, requirement_card_id=None, evidence_bundle_id=None, instructions=None):
         return (
             SimpleNamespace(id=self.job_id, status="succeeded"),
-            SimpleNamespace(
-                id=self.outline_id,
-                project_id=project_id,
-                version=1,
-                outline_json={
-                    "title": "测试项目技术方案",
-                    "sections": [
-                        {
-                            "section_id": "1",
-                            "title": "项目概述",
-                            "purpose": "总结背景与范围",
-                            "mandatory": True,
-                            "expected_evidence_types": ["requirement", "case_summary"],
-                            "needs_human_review": False,
-                            "children": [],
-                        }
-                    ],
-                },
-                requirement_card_id=uuid4(),
-                evidence_bundle_id=uuid4(),
-                validator_status="pending",
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
-            ),
+            self._build_outline(project_id=project_id),
         )
 
     async def get_latest_outline(self, *, session, project_id):
@@ -58,17 +81,17 @@ class _FakeOutlineService:
         )[1]
 
     async def update_outline(self, *, session, project_id, outline_id, outline_json):
-        return SimpleNamespace(
-            id=outline_id,
-            project_id=project_id,
-            version=1,
-            outline_json=outline_json,
-            requirement_card_id=uuid4(),
-            evidence_bundle_id=uuid4(),
-            validator_status="pending",
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-        )
+        self.approved = False
+        return self._build_outline(project_id=project_id, outline_json=outline_json, validator_status="pending")
+
+    async def approve_outline(self, *, session, project_id, outline_id, outline_json=None, reviewer_notes=None, approved_by_user=True):
+        self.approved = bool(approved_by_user)
+        payload = outline_json or (await self.get_latest_outline(session=session, project_id=project_id)).outline_json
+        payload["outline_status"] = "approved"
+        payload["approved_by_user"] = self.approved
+        payload["approved_at"] = "2026-03-24T10:00:00+00:00"
+        payload["reviewer_notes"] = reviewer_notes
+        return self._build_outline(project_id=project_id, outline_json=payload, validator_status="approved")
 
 
 class _FakeSectionDraftService:
@@ -176,6 +199,7 @@ class CompositionApiTests(unittest.TestCase):
             )
             self.assertEqual(get_outline_response.status_code, 200)
             self.assertEqual(get_outline_response.json()["data"]["outline_json"]["sections"][0]["section_id"], "1")
+            self.assertEqual(get_outline_response.json()["data"]["outline_json"]["outline_status"], "candidate")
 
             update_outline_response = client.patch(
                 f"/api/v1/projects/{self.outline_service.project_id}/outlines/{self.outline_service.outline_id}",
@@ -190,6 +214,7 @@ class CompositionApiTests(unittest.TestCase):
                                 "mandatory": True,
                                 "expected_evidence_types": ["requirement"],
                                 "needs_human_review": False,
+                                "generation_mode": "baseline",
                                 "children": [],
                             }
                         ],
@@ -198,6 +223,14 @@ class CompositionApiTests(unittest.TestCase):
             )
             self.assertEqual(update_outline_response.status_code, 200)
             self.assertEqual(update_outline_response.json()["data"]["outline_json"]["title"], "调整后大纲")
+            self.assertEqual(update_outline_response.json()["data"]["outline_json"]["outline_status"], "candidate")
+
+            approve_outline_response = client.post(
+                f"/api/v1/projects/{self.outline_service.project_id}/outlines/{self.outline_service.outline_id}/approve",
+                json={"reviewer_notes": "结构已确认"},
+            )
+            self.assertEqual(approve_outline_response.status_code, 200)
+            self.assertEqual(approve_outline_response.json()["data"]["outline_json"]["outline_status"], "approved")
 
             generate_sections_response = client.post(
                 f"/api/v1/projects/{self.outline_service.project_id}/generate-sections",

@@ -14,6 +14,7 @@ from app.schemas.artifacts import (
     ExportRequest,
     JobAcceptedData,
     JobRead,
+    OutlineApproveRequest,
     OutlineGenerateRequest,
     OutlineUpdateRequest,
     ProposalOutlineRead,
@@ -276,6 +277,30 @@ async def update_outline(
             project_id=project_id,
             outline_id=outline_id,
             outline_json=payload.outline_json,
+        )
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ArtifactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=ProposalOutlineRead.model_validate(outline))
+
+
+@router.post("/projects/{project_id}/outlines/{outline_id}/approve", response_model=APIResponse[ProposalOutlineRead])
+async def approve_outline(
+    project_id: UUID,
+    outline_id: UUID,
+    payload: OutlineApproveRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: OutlineService = Depends(get_outline_service),
+) -> APIResponse[ProposalOutlineRead]:
+    try:
+        outline = await service.approve_outline(
+            session=session,
+            project_id=project_id,
+            outline_id=outline_id,
+            outline_json=payload.outline_json,
+            reviewer_notes=payload.reviewer_notes,
+            approved_by_user=payload.approved_by_user,
         )
     except ArtifactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

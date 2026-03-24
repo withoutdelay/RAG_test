@@ -27,6 +27,22 @@ MANDATORY_SECTION_HINTS = {
     "实施排期",
     "售后服务",
 }
+SECTION_CLASS_CHOICES = {
+    "overview",
+    "requirement",
+    "architecture",
+    "configuration",
+    "implementation",
+    "service",
+    "appendix",
+    "custom",
+}
+REUSE_LEVEL_CHOICES = {"low", "medium", "high"}
+CUSTOMER_SPECIFICITY_CHOICES = {"low", "medium", "high"}
+GENERATION_MODE_CHOICES = {"baseline", "reuse_first", "manual_only"}
+MANUAL_ONLY_SECTION_HINTS = ("商务", "报价", "成本", "合同", "法务", "授权", "保密")
+ASSET_REQUIRED_HINTS = ("图", "表", "波形", "原理", "接线", "布局")
+PARAMETER_SENSITIVE_HINTS = ("参数", "配置", "清单", "规格", "容量", "功率", "数量")
 
 
 def _suggest_evidence_types(title: str) -> list[str]:
@@ -48,31 +64,217 @@ def _suggest_evidence_types(title: str) -> list[str]:
     return ["section"]
 
 
+def _normalize_choice(value: Any, *, allowed: set[str], fallback: str) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in allowed:
+        return candidate
+    return fallback
+
+
+def _normalize_keywords(raw_keywords: Any, *, title: str, evidence_types: list[str]) -> list[str]:
+    values: list[str] = []
+    if isinstance(raw_keywords, list):
+        values.extend(str(item).strip() for item in raw_keywords if str(item).strip())
+    for item in [title, *evidence_types]:
+        normalized = str(item).strip()
+        if normalized and normalized not in values:
+            values.append(normalized)
+    return values[:8]
+
+
+def _suggest_section_class(title: str) -> str:
+    if "概述" in title or "背景" in title:
+        return "overview"
+    if "需求" in title or "范围" in title or "目标" in title:
+        return "requirement"
+    if "架构" in title or "系统" in title or "接口" in title:
+        return "architecture"
+    if "配置" in title or "清单" in title or "参数" in title:
+        return "configuration"
+    if "实施" in title or "计划" in title or "排期" in title or "交付" in title:
+        return "implementation"
+    if "服务" in title or "培训" in title or "维保" in title:
+        return "service"
+    if "附录" in title:
+        return "appendix"
+    return "custom"
+
+
+def _suggest_customer_specificity(*, section_class: str, title: str) -> str:
+    if section_class in {"overview", "requirement"}:
+        return "high"
+    if section_class in {"configuration", "implementation"} or "工艺" in title:
+        return "medium"
+    return "low"
+
+
+def _suggest_reuse_level(*, section_class: str, customer_specificity: str, parameter_sensitive: bool) -> str:
+    if section_class in {"architecture", "configuration", "service"} and not parameter_sensitive:
+        return "high"
+    if customer_specificity == "high":
+        return "low"
+    return "medium"
+
+
+def _suggest_generation_mode(
+    *,
+    title: str,
+    section_class: str,
+    reuse_level: str,
+    customer_specificity: str,
+) -> str:
+    if any(hint in title for hint in MANUAL_ONLY_SECTION_HINTS):
+        return "manual_only"
+    if section_class in {"architecture", "configuration", "service"} and reuse_level == "high":
+        return "reuse_first"
+    if customer_specificity == "high":
+        return "baseline"
+    return "reuse_first" if reuse_level != "low" else "baseline"
+
+
+def _normalize_approved_at(value: Any, *, approved: bool) -> str | None:
+    if not approved or value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    text = str(value).strip()
+    return text or None
+
+
+def outline_is_approved(outline_json: dict[str, Any] | None) -> bool:
+    if not isinstance(outline_json, dict):
+        return False
+    return str(outline_json.get("outline_status") or "").lower() == "approved"
+
+
+def _normalize_section_payload(
+    section: dict[str, Any],
+    *,
+    fallback_id: str,
+) -> dict[str, Any]:
+    section_id = str(section.get("section_id") or fallback_id)
+    section_title = str(section.get("title") or f"章节 {section_id}")
+    purpose = str(section.get("purpose") or section.get("description") or f"围绕{section_title}展开说明。")
+    evidence_types = section.get("expected_evidence_types")
+    if not isinstance(evidence_types, list) or not evidence_types:
+        evidence_types = _suggest_evidence_types(section_title)
+    evidence_types = [str(item) for item in evidence_types if str(item).strip()]
+    if not evidence_types:
+        evidence_types = _suggest_evidence_types(section_title)
+    needs_human_review = bool(section.get("needs_human_review"))
+    if not needs_human_review and any(item in evidence_types for item in ["figure", "table", "parameter"]):
+        needs_human_review = True
+
+    section_class = _normalize_choice(
+        section.get("section_class"),
+        allowed=SECTION_CLASS_CHOICES,
+        fallback=_suggest_section_class(section_title),
+    )
+    customer_specificity = _normalize_choice(
+        section.get("customer_specificity"),
+        allowed=CUSTOMER_SPECIFICITY_CHOICES,
+        fallback=_suggest_customer_specificity(section_class=section_class, title=section_title),
+    )
+    asset_required = (
+        bool(section.get("asset_required"))
+        if "asset_required" in section
+        else any(item in evidence_types for item in ["figure", "table", "parameter"])
+        or any(hint in section_title for hint in ASSET_REQUIRED_HINTS)
+    )
+    parameter_sensitive = (
+        bool(section.get("parameter_sensitive"))
+        if "parameter_sensitive" in section
+        else any(item in evidence_types for item in ["table", "parameter"])
+        or any(hint in section_title for hint in PARAMETER_SENSITIVE_HINTS)
+    )
+    reuse_level = _normalize_choice(
+        section.get("reuse_level"),
+        allowed=REUSE_LEVEL_CHOICES,
+        fallback=_suggest_reuse_level(
+            section_class=section_class,
+            customer_specificity=customer_specificity,
+            parameter_sensitive=parameter_sensitive,
+        ),
+    )
+    generation_mode = _normalize_choice(
+        section.get("generation_mode"),
+        allowed=GENERATION_MODE_CHOICES,
+        fallback=_suggest_generation_mode(
+            title=section_title,
+            section_class=section_class,
+            reuse_level=reuse_level,
+            customer_specificity=customer_specificity,
+        ),
+    )
+    keywords = _normalize_keywords(section.get("keywords"), title=section_title, evidence_types=evidence_types)
+
+    children_raw = section.get("children") if isinstance(section.get("children"), list) else []
+    children = [
+        _normalize_section_payload(child, fallback_id=f"{section_id}.{index}")
+        for index, child in enumerate(children_raw, start=1)
+    ]
+
+    return {
+        "section_id": section_id,
+        "title": section_title,
+        "purpose": purpose,
+        "mandatory": bool(section.get("mandatory", section_title in MANDATORY_SECTION_HINTS)),
+        "expected_evidence_types": evidence_types,
+        "needs_human_review": needs_human_review,
+        "section_class": section_class,
+        "reuse_level": reuse_level,
+        "asset_required": asset_required,
+        "parameter_sensitive": parameter_sensitive,
+        "customer_specificity": customer_specificity,
+        "generation_mode": generation_mode,
+        "keywords": keywords,
+        "children": children,
+    }
+
+
 def normalize_outline_payload(payload: dict[str, Any], *, project_name: str) -> dict[str, Any]:
     title = str(payload.get("title") or f"{project_name}技术方案")
-    sections: list[dict[str, Any]] = []
-    for index, section in enumerate(payload.get("sections") or [], start=1):
-        section_title = str(section.get("title") or f"章节 {index}")
-        purpose = str(section.get("purpose") or section.get("description") or f"围绕{section_title}展开说明。")
-        evidence_types = section.get("expected_evidence_types")
-        if not isinstance(evidence_types, list) or not evidence_types:
-            evidence_types = _suggest_evidence_types(section_title)
-        needs_human_review = bool(section.get("needs_human_review"))
-        if not needs_human_review and any(item in evidence_types for item in ["figure", "table", "parameter"]):
-            needs_human_review = True
-        section_id = str(section.get("section_id") or index)
-        sections.append(
-            {
-                "section_id": section_id,
-                "title": section_title,
-                "purpose": purpose,
-                "mandatory": bool(section.get("mandatory", section_title in MANDATORY_SECTION_HINTS)),
-                "expected_evidence_types": [str(item) for item in evidence_types],
-                "needs_human_review": needs_human_review,
-                "children": section.get("children") if isinstance(section.get("children"), list) else [],
-            }
-        )
-    return {"title": title, "sections": sections}
+    outline_status = _normalize_choice(
+        payload.get("outline_status"),
+        allowed={"candidate", "approved"},
+        fallback="candidate",
+    )
+    approved_by_user = bool(payload.get("approved_by_user")) if outline_status == "approved" else False
+    approved_at = _normalize_approved_at(payload.get("approved_at"), approved=outline_status == "approved")
+    reviewer_notes = str(payload.get("reviewer_notes") or "").strip() or None
+    sections = [
+        _normalize_section_payload(section, fallback_id=str(index))
+        for index, section in enumerate(payload.get("sections") or [], start=1)
+    ]
+    return {
+        "title": title,
+        "generation_strategy": "reuse_first",
+        "approval_required": True,
+        "outline_status": outline_status,
+        "approved_by_user": approved_by_user,
+        "approved_at": approved_at,
+        "reviewer_notes": reviewer_notes,
+        "sections": sections,
+    }
+
+
+def mark_outline_as_approved(
+    outline_json: dict[str, Any],
+    *,
+    project_name: str,
+    reviewer_notes: str | None = None,
+    approved_by_user: bool = True,
+    approved_at: datetime | None = None,
+) -> dict[str, Any]:
+    normalized = normalize_outline_payload(outline_json, project_name=project_name)
+    normalized["outline_status"] = "approved"
+    normalized["approved_by_user"] = bool(approved_by_user)
+    normalized["approved_at"] = _normalize_approved_at(
+        approved_at or datetime.now(timezone.utc),
+        approved=True,
+    )
+    normalized["reviewer_notes"] = str(reviewer_notes).strip() if reviewer_notes else None
+    return normalized
 
 
 def build_outline_inputs(
@@ -219,6 +421,39 @@ class OutlineService:
         outline.validator_status = "pending"
         project.current_outline_id = outline.id
         project.status = "OUTLINE_READY"
+        await session.commit()
+        await session.refresh(outline)
+        return outline
+
+    async def approve_outline(
+        self,
+        *,
+        session: AsyncSession,
+        project_id: UUID,
+        outline_id: UUID,
+        outline_json: dict[str, Any] | None = None,
+        reviewer_notes: str | None = None,
+        approved_by_user: bool = True,
+    ) -> ProposalOutline:
+        outline = await session.get(ProposalOutline, outline_id)
+        if not outline or outline.project_id != project_id:
+            raise ArtifactNotFoundError("Outline not found")
+        project = await session.get(Project, project_id)
+        if not project:
+            raise ArtifactNotFoundError("Project not found")
+        if not approved_by_user:
+            raise ArtifactValidationError("Outline approval must be explicitly confirmed by user")
+
+        source_outline = outline_json if isinstance(outline_json, dict) else dict(outline.outline_json or {})
+        outline.outline_json = mark_outline_as_approved(
+            source_outline,
+            project_name=project.name,
+            reviewer_notes=reviewer_notes,
+            approved_by_user=approved_by_user,
+        )
+        outline.validator_status = "approved"
+        project.current_outline_id = outline.id
+        project.status = "OUTLINE_APPROVED"
         await session.commit()
         await session.refresh(outline)
         return outline

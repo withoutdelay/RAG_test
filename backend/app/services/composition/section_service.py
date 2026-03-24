@@ -15,6 +15,7 @@ from app.models.proposal_outline import ProposalOutline
 from app.models.requirement_card import RequirementCard
 from app.models.section_draft import SectionDraft
 from app.services.agents.executor import ExecutorAgent
+from app.services.composition.outline_service import outline_is_approved
 from app.services.retrieval import AssetRetrievalService
 from app.services.validation.service import flatten_outline_sections
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
@@ -66,6 +67,10 @@ def section_outline_to_executor_payload(section: dict[str, Any]) -> dict[str, An
         "title": section.get("title"),
         "description": section.get("purpose", ""),
         "keywords": [section.get("title", ""), *[str(item) for item in section.get("expected_evidence_types") or []]],
+        "section_class": section.get("section_class"),
+        "reuse_level": section.get("reuse_level"),
+        "generation_mode": section.get("generation_mode"),
+        "asset_required": bool(section.get("asset_required")),
     }
 
 
@@ -131,6 +136,8 @@ class SectionDraftService:
             raise ArtifactNotFoundError("Project not found")
 
         outline = await self._resolve_outline(session=session, project_id=project_id, outline_id=outline_id)
+        if not outline_is_approved(outline.outline_json):
+            raise ArtifactValidationError("Outline must be approved before generating sections")
         requirement_card = await self._resolve_requirement_card(session=session, outline=outline)
         evidence_bundle = await self._resolve_evidence_bundle(session=session, outline=outline)
 
@@ -243,6 +250,8 @@ class SectionDraftService:
             raise ArtifactValidationError("No draft version exists for this project")
 
         outline = await self._resolve_outline(session=session, project_id=project_id, outline_id=outline_id)
+        if not outline_is_approved(outline.outline_json):
+            raise ArtifactValidationError("Outline must be approved before regenerating sections")
         requirement_card = await self._resolve_requirement_card(session=session, outline=outline)
         evidence_bundle = await self._resolve_evidence_bundle(session=session, outline=outline)
         section = self._find_section(outline=outline, section_id=section_id)

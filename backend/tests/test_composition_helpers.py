@@ -23,15 +23,31 @@ class CompositionHelperTests(unittest.TestCase):
                     "title": "技术架构",
                     "description": "说明系统架构",
                     "keywords": ["技术架构"],
+                    "children": [
+                        {
+                            "title": "项目背景",
+                            "purpose": "补充背景与约束。",
+                        }
+                    ],
                 }
             ],
         }
         normalized = normalize_outline_payload(payload, project_name="测试项目")
+        self.assertEqual(normalized["outline_status"], "candidate")
+        self.assertEqual(normalized["generation_strategy"], "reuse_first")
         section = normalized["sections"][0]
         self.assertEqual(section["section_id"], "1")
         self.assertEqual(section["purpose"], "说明系统架构")
+        self.assertEqual(section["section_class"], "architecture")
+        self.assertEqual(section["reuse_level"], "high")
+        self.assertEqual(section["generation_mode"], "reuse_first")
+        self.assertTrue(section["asset_required"])
         self.assertIn("figure", section["expected_evidence_types"])
         self.assertTrue(section["needs_human_review"])
+        self.assertIn("技术架构", section["keywords"])
+        child = section["children"][0]
+        self.assertEqual(child["section_id"], "1.1")
+        self.assertEqual(child["generation_mode"], "baseline")
 
     def test_build_section_context_filters_by_expected_types(self) -> None:
         bundle = SimpleNamespace(

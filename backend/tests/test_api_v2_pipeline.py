@@ -215,6 +215,22 @@ class V2PipelineApiTests(unittest.TestCase):
                     json={"outline_json": nested_outline_json},
                 )
                 self.assertEqual(update_outline_response.status_code, 200)
+                self.assertEqual(update_outline_response.json()["data"]["outline_json"]["outline_status"], "candidate")
+
+                blocked_sections_response = client.post(
+                    f"/api/v1/projects/{project_id}/generate-sections",
+                    json={},
+                )
+                self.assertEqual(blocked_sections_response.status_code, 400)
+                self.assertIn("approved", blocked_sections_response.json()["detail"])
+
+                approve_outline_response = client.post(
+                    f"/api/v1/projects/{project_id}/outlines/{outline['id']}/approve",
+                    json={"reviewer_notes": "售前已确认大纲结构"},
+                )
+                self.assertEqual(approve_outline_response.status_code, 200)
+                approved_outline = approve_outline_response.json()["data"]
+                self.assertEqual(approved_outline["outline_json"]["outline_status"], "approved")
 
                 sections_response = client.post(f"/api/v1/projects/{project_id}/generate-sections", json={})
                 self.assertEqual(sections_response.status_code, 202)

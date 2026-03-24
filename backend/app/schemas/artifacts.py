@@ -107,6 +107,12 @@ class OutlineUpdateRequest(BaseModel):
     outline_json: dict
 
 
+class OutlineApproveRequest(BaseModel):
+    outline_json: dict | None = None
+    reviewer_notes: str | None = None
+    approved_by_user: bool = True
+
+
 class SectionGenerateRequest(BaseModel):
     outline_id: UUID | None = None
 
