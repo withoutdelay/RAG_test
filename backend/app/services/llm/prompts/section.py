@@ -19,6 +19,8 @@ REUSE_FIRST_SYSTEM_APPENDIX = """
 2. 仅做当前项目所需的最小改写，重点替换项目、客户、参数和边界信息
 3. 不要无依据扩写，不要为了完整性主动添加长篇背景铺垫
 4. 如果复用块里已经有足够技术描述，应尽量保留其干货密度
+5. 如果给定了禁止沿用词或必须替换字段，必须严格遵守，不得把旧客户或旧项目痕迹带入正文
+6. 如果给定了资产占位符要求，必须在合适位置输出相应的 [[ASSET:...]] 占位
 """
 
 
@@ -48,12 +50,14 @@ def build_section_prompts(
         f"章节写作要求：\n{section_guidance}"
     )
     reuse_pack_text = _format_reuse_pack(reuse_pack)
+    replacement_constraints = _format_replacement_constraints(reuse_pack)
     user_prompt = (
         f"请撰写章节《{section_title}》。\n"
         f"生成模式：{generation_mode}\n"
         f"关键词：{', '.join(section.get('keywords', [])) or '暂无'}\n\n"
         f"参考资料：\n{retrieved_context or '暂无检索资料，请输出稳健的客户版标准章节内容。'}\n\n"
         f"复用包：\n{reuse_pack_text}\n\n"
+        f"替换与禁用约束：\n{replacement_constraints}\n\n"
         f"建议参考资产：\n{asset_guidance}\n\n"
         "这些资产仅供参考，不代表已确认可直接外发；如引用，请用客户口径描述其作用，不要把未确认参数写成最终承诺。\n\n"
         "请直接输出客户可阅读的 Markdown 正文，不要解释写作过程。"
@@ -143,4 +147,30 @@ def _format_reuse_pack(reuse_pack: dict) -> str:
                 f"  {str(block.get('content_md') or '').replace(chr(10), chr(10) + '  ')}",
             ]
         )
+    return "\n".join(lines)
+
+
+def _format_replacement_constraints(reuse_pack: dict) -> str:
+    replace_fields = reuse_pack.get("must_replace_fields") or []
+    replacement_hints = reuse_pack.get("replacement_hints") or {}
+    banned_terms = reuse_pack.get("banned_terms") or []
+    placeholders = reuse_pack.get("required_asset_placeholders") or []
+
+    lines = [
+        f"- 必须替换字段：{', '.join(replace_fields) if replace_fields else '无'}",
+    ]
+    if replacement_hints:
+        lines.append("- 当前项目可用替换值：")
+        for key, value in replacement_hints.items():
+            lines.append(f"  - {key}: {value}")
+    if banned_terms:
+        lines.append(f"- 禁止沿用词：{', '.join(str(item) for item in banned_terms)}")
+    else:
+        lines.append("- 禁止沿用词：无")
+    if placeholders:
+        lines.append("- 必须包含的资产占位符：")
+        for item in placeholders:
+            lines.append(f"  - {item.get('placeholder')} {item.get('title') or ''}".rstrip())
+    else:
+        lines.append("- 必须包含的资产占位符：无")
     return "\n".join(lines)

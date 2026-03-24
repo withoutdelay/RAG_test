@@ -40,6 +40,7 @@ class ValidationHelperTests(unittest.TestCase):
                         "title": "技术架构",
                         "mandatory": True,
                         "expected_evidence_types": ["figure", "parameter"],
+                        "asset_required": True,
                         "needs_human_review": True,
                         "children": [],
                     },
@@ -58,7 +59,7 @@ class ValidationHelperTests(unittest.TestCase):
             SimpleNamespace(
                 section_id="1",
                 title="技术架构",
-                content_md="技术架构方案待确认系统拓扑，当前使用 [Company_A] 占位，并补充了足够多的技术说明文字用于测试。",
+                content_md="当前方案待确认系统拓扑，使用 [Company_A] 占位，并引用旧项目A 的拓扑描述，补充了足够多的技术说明文字用于测试。",
                 citation_refs=[
                     {
                         "evidence_id": "ev_001",
@@ -69,7 +70,10 @@ class ValidationHelperTests(unittest.TestCase):
                 ],
                 assumptions=[],
                 global_param_snapshot={"total_power": "5200kW"},
-                validator_result={},
+                validator_result={
+                    "recommended_assets": [{"asset_id": "asset-001", "asset_type": "figure"}],
+                    "reuse_pack": {"banned_terms": ["旧项目A"]},
+                },
             )
         ]
 
@@ -80,9 +84,9 @@ class ValidationHelperTests(unittest.TestCase):
             section_drafts=section_drafts,
         )
 
-        self.assertEqual({item["code"] for item in errors}, {"VAL002", "VAL003", "VAL006", "VAL007"})
-        self.assertEqual({item["code"] for item in warnings}, {"VAL101", "VAL102", "VAL103"})
-        self.assertEqual({item["code"] for item in section_results["1"]["errors"]}, {"VAL006", "VAL007"})
+        self.assertEqual({item["code"] for item in errors}, {"VAL002", "VAL003", "VAL006", "VAL007", "VAL008"})
+        self.assertEqual({item["code"] for item in warnings}, {"VAL101", "VAL102", "VAL103", "VAL104"})
+        self.assertEqual({item["code"] for item in section_results["1"]["errors"]}, {"VAL006", "VAL007", "VAL008"})
 
     def test_build_review_task_blueprints_creates_manual_tasks_and_final_review(self) -> None:
         outline = SimpleNamespace(id=uuid4(), outline_json={"title": "测试方案"})

@@ -23,14 +23,15 @@ from app.models.validation_report import ValidationReport
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
-HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007"}
-CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103"}
+HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008"}
+CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103", "VAL104"}
 ASSUMPTION_HINTS = ("待确认", "待补充", "TBD", "暂定", "后续确认")
 TECHNICAL_SECTION_HINTS = ("技术", "架构", "配置", "参数", "实施", "系统", "方案")
 PLACEHOLDER_PATTERNS = [
     re.compile(r"\[[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\]"),
     re.compile(r"\{\{[^{}\n]+\}\}"),
 ]
+ASSET_PLACEHOLDER_PATTERN = re.compile(r"\[\[ASSET:(FIGURE|TABLE|FORMULA):[^\]]+\]\]")
 
 
 def flatten_outline_sections(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -189,6 +190,7 @@ def collect_validation_findings(
         section_title = draft.title
         citations = draft.citation_refs if isinstance(draft.citation_refs, list) else []
         validator_result = draft.validator_result if isinstance(draft.validator_result, dict) else {}
+        reuse_pack = validator_result.get("reuse_pack") if isinstance(validator_result.get("reuse_pack"), dict) else {}
 
         if _is_technical_section(section=section, draft=draft) and not citations:
             issue = make_issue(
@@ -258,6 +260,23 @@ def collect_validation_findings(
             errors.append(issue)
             section_results[section_id]["errors"].append(issue)
 
+        leaked_terms = _find_reuse_leakage_terms(
+            content=draft.content_md,
+            banned_terms=reuse_pack.get("banned_terms") or [],
+        )
+        if leaked_terms:
+            issue = make_issue(
+                code="VAL008",
+                level="P0",
+                section_id=section_id,
+                section_title=section_title,
+                message=f"章节《{section_title}》疑似残留旧项目或旧客户痕迹。",
+                suggested_action="清理旧项目名称、买卖方或客户标识后重新校验。",
+                details={"leaked_terms": leaked_terms},
+            )
+            errors.append(issue)
+            section_results[section_id]["errors"].append(issue)
+
         if _looks_like_goal_drift(draft=draft, section=section):
             warning = make_issue(
                 code="VAL101",
@@ -278,6 +297,20 @@ def collect_validation_findings(
                 section_title=section_title,
                 message=f"章节《{section_title}》疑似存在未声明假设。",
                 suggested_action="将待确认前提写入 assumptions，或直接补充确定信息。",
+            )
+            warnings.append(warning)
+            section_results[section_id]["warnings"].append(warning)
+
+        if bool(section.get("asset_required")) and validator_result.get("recommended_assets") and not _has_asset_placeholder(
+            draft.content_md
+        ):
+            warning = make_issue(
+                code="VAL104",
+                level="P1",
+                section_id=section_id,
+                section_title=section_title,
+                message=f"章节《{section_title}》尚未显式插入推荐图表/公式占位符。",
+                suggested_action="补充 [[ASSET:...]] 占位符，或确认本章节无需插入资产。",
             )
             warnings.append(warning)
             section_results[section_id]["warnings"].append(warning)
@@ -514,7 +547,15 @@ class ValidationService:
             current_result = draft.validator_result if isinstance(draft.validator_result, dict) else {}
             persistent_fields = {
                 key: current_result[key]
-                for key in ["figure_confirmed", "accepted_param_values", "review_resolutions", "final_reviewed_at"]
+                for key in [
+                    "figure_confirmed",
+                    "accepted_param_values",
+                    "review_resolutions",
+                    "final_reviewed_at",
+                    "recommended_assets",
+                    "generation_mode",
+                    "reuse_pack",
+                ]
                 if key in current_result
             }
             per_section = section_results.get(draft.section_id, {"errors": [], "warnings": []})
@@ -896,6 +937,22 @@ def _find_placeholders(content: str) -> list[str]:
     for pattern in PLACEHOLDER_PATTERNS:
         matches.extend(match.group(0) for match in pattern.finditer(content or ""))
     return sorted(set(matches))
+
+
+def _has_asset_placeholder(content: str) -> bool:
+    return bool(ASSET_PLACEHOLDER_PATTERN.search(content or ""))
+
+
+def _find_reuse_leakage_terms(*, content: str, banned_terms: list[Any]) -> list[str]:
+    text = content or ""
+    leaked_terms: list[str] = []
+    for term in banned_terms:
+        candidate = str(term or "").strip()
+        if len(candidate) < 3:
+            continue
+        if candidate in text and candidate not in leaked_terms:
+            leaked_terms.append(candidate)
+    return leaked_terms
 
 
 def _looks_like_goal_drift(*, draft: SectionDraft, section: dict[str, Any]) -> bool:

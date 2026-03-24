@@ -12,6 +12,7 @@ from app.services.composition.section_service import (
     build_section_asset_query,
     build_section_context,
     build_section_global_params,
+    ensure_required_asset_placeholders,
 )
 from app.services.llm.prompts.section import build_section_prompts
 
@@ -146,6 +147,12 @@ class CompositionHelperTests(unittest.TestCase):
             ],
             reuse_pack={
                 "generation_mode": "reuse_first",
+                "must_replace_fields": ["project_name", "quantity"],
+                "replacement_hints": {"project_name": "测试项目", "quantity": "2"},
+                "banned_terms": ["旧项目A"],
+                "required_asset_placeholders": [
+                    {"placeholder": "[[ASSET:TABLE:asset-001]]", "title": "电机参数表"}
+                ],
                 "reusable_blocks": [
                     {
                         "source_title": "历史方案A",
@@ -163,6 +170,8 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("建议参考资产", user_prompt)
         self.assertIn("复用包", user_prompt)
         self.assertIn("必须替换字段", user_prompt)
+        self.assertIn("禁止沿用词", user_prompt)
+        self.assertIn("[[ASSET:TABLE:asset-001]]", user_prompt)
         self.assertIn("电机参数表", user_prompt)
         self.assertIn("不要解释写作过程", user_prompt)
 
@@ -210,6 +219,7 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("双机冗余架构", blocks[0]["content_md"])
         self.assertIn("project_name", blocks[0]["must_replace_fields"])
         self.assertIn("voltage_level", blocks[0]["must_replace_fields"])
+        self.assertIn("旧项目A", blocks[0]["banned_terms"])
 
     def test_build_manual_only_section_content_includes_assets_and_reuse_hint(self) -> None:
         reuse_pack = build_reuse_pack(
@@ -237,6 +247,20 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("人工编写", content)
         self.assertIn("[[ASSET:TABLE:asset-001]]", content)
         self.assertIn("历史方案B", content)
+
+    def test_ensure_required_asset_placeholders_appends_missing_placeholders(self) -> None:
+        content = ensure_required_asset_placeholders(
+            content_md="## 技术架构\n\n正文内容。",
+            reuse_pack={
+                "required_asset_placeholders": [
+                    {"placeholder": "[[ASSET:FIGURE:asset-001]]", "title": "系统架构图"},
+                    {"placeholder": "[[ASSET:TABLE:asset-002]]", "title": "接口参数表"},
+                ]
+            },
+        )
+        self.assertIn("### 建议插入图表", content)
+        self.assertIn("[[ASSET:FIGURE:asset-001]]", content)
+        self.assertIn("[[ASSET:TABLE:asset-002]]", content)
 
 
 if __name__ == "__main__":

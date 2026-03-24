@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+import re
 from typing import Any
 from uuid import UUID
 
@@ -21,6 +22,9 @@ from app.services.validation.service import flatten_outline_sections
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 DEFAULT_REUSE_LIMIT = 3
+BANNED_TERM_PATTERNS = (
+    re.compile(r"(?:项目名称|买方|卖方|客户|用户)\s*[:：]\s*([^\n]{2,80})"),
+)
 STANDARD_REPLACE_FIELDS = (
     "project_name",
     "customer_name",
@@ -155,6 +159,44 @@ def _collect_replace_fields(*, raw_content: str, global_params: dict[str, Any]) 
     return deduped
 
 
+def _extract_banned_terms(*, raw_content: str, global_params: dict[str, Any]) -> list[str]:
+    current_project_name = str(global_params.get("project_name") or "").strip()
+    terms: list[str] = []
+    for pattern in BANNED_TERM_PATTERNS:
+        for match in pattern.finditer(raw_content):
+            candidate = re.sub(r"\s+", " ", str(match.group(1)).strip())
+            candidate = candidate.strip(" :：;；,.，。()（）[]【】")
+            if len(candidate) < 3:
+                continue
+            if current_project_name and candidate == current_project_name:
+                continue
+            if candidate not in terms:
+                terms.append(candidate)
+    return terms
+
+
+def _build_required_asset_placeholders(recommended_assets: list[dict[str, Any]], *, asset_required: bool) -> list[dict[str, Any]]:
+    if not asset_required:
+        return []
+    placeholders: list[dict[str, Any]] = []
+    for asset in recommended_assets[:3]:
+        asset_type = str(asset.get("asset_type") or "").lower()
+        if asset_type not in {"figure", "table", "formula_candidate"}:
+            continue
+        asset_id = asset.get("asset_id")
+        if not asset_id:
+            continue
+        normalized_type = "FORMULA" if asset_type == "formula_candidate" else asset_type.upper()
+        placeholders.append(
+            {
+                "placeholder": f"[[ASSET:{normalized_type}:{asset_id}]]",
+                "title": asset.get("title") or asset.get("caption") or "参考资产",
+                "asset_type": asset_type,
+            }
+        )
+    return placeholders
+
+
 def build_reusable_blocks(
     *,
     section: dict[str, Any],
@@ -183,6 +225,7 @@ def build_reusable_blocks(
                 "customer_specificity_score": 0.8 if metadata.get("front_matter") else 0.25,
                 "asset_dependency_level": "high" if metadata.get("needs_asset_lookup") else "low",
                 "must_replace_fields": _collect_replace_fields(raw_content=raw_content, global_params=global_params),
+                "banned_terms": _extract_banned_terms(raw_content=raw_content, global_params=global_params),
                 "must_not_copy_spans": [],
                 "metadata": metadata,
             }
@@ -205,6 +248,19 @@ def build_reuse_pack(
         risk_flags.append("asset_required")
     if bool(section.get("needs_human_review")):
         risk_flags.append("human_review_required")
+    must_replace_fields: list[str] = []
+    banned_terms: list[str] = []
+    for block in reusable_blocks:
+        for field_name in block.get("must_replace_fields") or []:
+            if field_name not in must_replace_fields:
+                must_replace_fields.append(field_name)
+        for term in block.get("banned_terms") or []:
+            if term not in banned_terms:
+                banned_terms.append(term)
+    required_asset_placeholders = _build_required_asset_placeholders(
+        recommended_assets,
+        asset_required=bool(section.get("asset_required")),
+    )
 
     return {
         "section_title": str(section.get("title") or ""),
@@ -213,6 +269,14 @@ def build_reuse_pack(
         "reuse_level": str(section.get("reuse_level") or "medium"),
         "reusable_blocks": reusable_blocks,
         "recommended_assets": recommended_assets,
+        "must_replace_fields": must_replace_fields,
+        "banned_terms": banned_terms,
+        "replacement_hints": {
+            field_name: global_params.get(field_name)
+            for field_name in must_replace_fields
+            if global_params.get(field_name) not in (None, "", [], {})
+        },
+        "required_asset_placeholders": required_asset_placeholders,
         "parameter_candidates": {
             key: value
             for key, value in global_params.items()
@@ -276,11 +340,16 @@ def build_manual_only_section_content(*, section: dict[str, Any], reuse_pack: di
     assets = reuse_pack.get("recommended_assets") or []
     if assets:
         lines.extend(["### 建议插入资产", ""])
-        for asset in assets[:3]:
-            asset_type = str(asset.get("asset_type") or "asset").upper()
-            asset_id = asset.get("asset_id")
-            title_text = asset.get("title") or asset.get("caption") or "参考资产"
-            lines.append(f"- [[ASSET:{asset_type}:{asset_id}]] {title_text}")
+        placeholders = reuse_pack.get("required_asset_placeholders") or []
+        if placeholders:
+            for item in placeholders[:3]:
+                lines.append(f"- {item.get('placeholder')} {item.get('title')}")
+        else:
+            for asset in assets[:3]:
+                asset_type = str(asset.get("asset_type") or "asset").upper()
+                asset_id = asset.get("asset_id")
+                title_text = asset.get("title") or asset.get("caption") or "参考资产"
+                lines.append(f"- [[ASSET:{asset_type}:{asset_id}]] {title_text}")
         lines.append("")
     lines.extend(
         [
@@ -291,6 +360,24 @@ def build_manual_only_section_content(*, section: dict[str, Any], reuse_pack: di
         ]
     )
     return "\n".join(lines)
+
+
+def ensure_required_asset_placeholders(*, content_md: str, reuse_pack: dict[str, Any]) -> str:
+    placeholders = reuse_pack.get("required_asset_placeholders") or []
+    if not placeholders:
+        return content_md
+    missing = [
+        item
+        for item in placeholders
+        if str(item.get("placeholder") or "") and str(item.get("placeholder")) not in content_md
+    ]
+    if not missing:
+        return content_md
+
+    appendix_lines = ["", "### 建议插入图表", ""]
+    for item in missing:
+        appendix_lines.append(f"- {item.get('placeholder')} {item.get('title') or '参考资产'}")
+    return content_md.rstrip() + "\n" + "\n".join(appendix_lines).rstrip() + "\n"
 
 
 class SectionDraftService:
@@ -374,7 +461,7 @@ class SectionDraftService:
                     recommended_assets=recommended_assets,
                     reuse_pack=reuse_pack,
                 )
-                content_md = response.content
+                content_md = ensure_required_asset_placeholders(content_md=response.content, reuse_pack=reuse_pack)
                 draft_status = "generated"
             draft = SectionDraft(
                 project_id=project_id,
@@ -512,7 +599,7 @@ class SectionDraftService:
                 recommended_assets=recommended_assets,
                 reuse_pack=reuse_pack,
             )
-            content_md = response.content
+            content_md = ensure_required_asset_placeholders(content_md=response.content, reuse_pack=reuse_pack)
             draft_status = "generated"
         draft.title = str(section.get("title") or draft.title)
         draft.content_md = content_md
