@@ -88,6 +88,95 @@ class ValidationHelperTests(unittest.TestCase):
         self.assertEqual({item["code"] for item in warnings}, {"VAL101", "VAL102", "VAL103", "VAL104"})
         self.assertEqual({item["code"] for item in section_results["1"]["errors"]}, {"VAL006", "VAL007", "VAL008"})
 
+    def test_collect_validation_findings_flags_similarity_and_parameter_replacement_risk(self) -> None:
+        requirement_card = SimpleNamespace(
+            content={"key_parameters": {"voltage_level": "10kV", "quantity": "3台"}},
+            blocking_items=[],
+        )
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.8800"),
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_002",
+                        "source_doc_id": "doc_2",
+                        "source_title": "历史方案B",
+                        "type": "section",
+                    }
+                ]
+            },
+        )
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "4",
+                        "title": "硬件配置清单",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section", "parameter"],
+                        "asset_required": False,
+                        "parameter_sensitive": True,
+                        "customer_specificity": "medium",
+                        "needs_human_review": False,
+                        "children": [],
+                    }
+                ],
+            }
+        )
+        source_block = (
+            "硬件配置清单如下：本方案配置高压变频器 2台，电压等级 6kV，采用站控层、间隔层和网络层的分层架构，"
+            "配套原有控制柜和辅助系统，适用于历史项目的标准交付边界。"
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="4",
+                title="硬件配置清单",
+                content_md=source_block,
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_002",
+                        "source_doc_id": "doc_2",
+                        "source_title": "历史方案B",
+                        "type": "section",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={"voltage_level": "10kV", "quantity": "3台"},
+                validator_result={
+                    "reuse_pack": {
+                        "must_replace_fields": ["voltage_level", "quantity"],
+                        "replacement_hints": {"voltage_level": "10kV", "quantity": "3台"},
+                        "reusable_blocks": [
+                            {
+                                "block_id": "block-1",
+                                "source_title": "历史方案B",
+                                "content_md": source_block,
+                            }
+                        ],
+                    }
+                },
+            )
+        ]
+
+        errors, warnings, section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+        )
+
+        self.assertIn("VAL009", {item["code"] for item in errors})
+        self.assertIn("VAL105", {item["code"] for item in warnings})
+        self.assertEqual(
+            {item["code"] for item in section_results["4"]["errors"]},
+            {"VAL009"},
+        )
+        self.assertEqual(
+            {item["code"] for item in section_results["4"]["warnings"]},
+            {"VAL105"},
+        )
+
     def test_build_review_task_blueprints_creates_manual_tasks_and_final_review(self) -> None:
         outline = SimpleNamespace(id=uuid4(), outline_json={"title": "测试方案"})
         existing_open_task = SimpleNamespace(
@@ -115,6 +204,12 @@ class ValidationHelperTests(unittest.TestCase):
                     "section_id": "1",
                     "section_title": "技术架构",
                     "message": "章节可能偏离目标",
+                },
+                {
+                    "code": "VAL105",
+                    "section_id": "2",
+                    "section_title": "硬件配置清单",
+                    "message": "复用相似度过高",
                 }
             ],
             outline=outline,

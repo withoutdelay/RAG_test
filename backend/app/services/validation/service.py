@@ -5,6 +5,7 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
+from difflib import SequenceMatcher
 from typing import Any
 from uuid import UUID
 
@@ -23,10 +24,11 @@ from app.models.validation_report import ValidationReport
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
-HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008"}
-CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103", "VAL104"}
+HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008", "VAL009"}
+CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103", "VAL104", "VAL105", "VAL106"}
 ASSUMPTION_HINTS = ("待确认", "待补充", "TBD", "暂定", "后续确认")
 TECHNICAL_SECTION_HINTS = ("技术", "架构", "配置", "参数", "实施", "系统", "方案")
+PARAMETER_REPLACE_FIELDS = {"voltage_level", "power_rating", "quantity", "delivery_scope"}
 PLACEHOLDER_PATTERNS = [
     re.compile(r"\[[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\]"),
     re.compile(r"\{\{[^{}\n]+\}\}"),
@@ -276,6 +278,64 @@ def collect_validation_findings(
             )
             errors.append(issue)
             section_results[section_id]["errors"].append(issue)
+
+        expected_replacements = _collect_expected_replacement_values(section=section, reuse_pack=reuse_pack)
+        missing_replacements = [
+            field_name
+            for field_name, value in expected_replacements.items()
+            if not _contains_normalized_value(draft.content_md, value)
+        ]
+        if expected_replacements and len(missing_replacements) == len(expected_replacements):
+            issue = make_issue(
+                code="VAL009",
+                level="P0",
+                section_id=section_id,
+                section_title=section_title,
+                message=f"章节《{section_title}》未体现当前项目的关键参数替换结果。",
+                suggested_action="根据当前项目参数重写该章节，并显式落入关键数值或供货范围。",
+                details={
+                    "missing_fields": missing_replacements,
+                    "expected_values": expected_replacements,
+                },
+            )
+            errors.append(issue)
+            section_results[section_id]["errors"].append(issue)
+        elif missing_replacements:
+            warning = make_issue(
+                code="VAL106",
+                level="P1",
+                section_id=section_id,
+                section_title=section_title,
+                message=f"章节《{section_title}》仍缺少部分当前项目参数替换结果。",
+                suggested_action="补齐缺失的关键参数，避免沿用历史方案的默认值。",
+                details={
+                    "missing_fields": missing_replacements,
+                    "expected_values": expected_replacements,
+                },
+            )
+            warnings.append(warning)
+            section_results[section_id]["warnings"].append(warning)
+
+        reuse_similarity = _compute_reuse_similarity(
+            content=draft.content_md,
+            reusable_blocks=reuse_pack.get("reusable_blocks") or [],
+        )
+        if _should_flag_similarity(section=section, reuse_similarity=reuse_similarity):
+            warning = make_issue(
+                code="VAL105",
+                level="P1",
+                section_id=section_id,
+                section_title=section_title,
+                message=f"章节《{section_title}》与历史复用块相似度过高，建议人工确认是否过拟合。",
+                suggested_action="检查是否残留历史项目语境，并补足当前项目的差异化描述。",
+                details={
+                    "similarity_score": reuse_similarity.get("score"),
+                    "source_title": reuse_similarity.get("source_title"),
+                    "block_id": reuse_similarity.get("block_id"),
+                },
+            )
+            warnings.append(warning)
+            section_results[section_id]["warnings"].append(warning)
 
         if _looks_like_goal_drift(draft=draft, section=section):
             warning = make_issue(
@@ -937,6 +997,77 @@ def _find_placeholders(content: str) -> list[str]:
     for pattern in PLACEHOLDER_PATTERNS:
         matches.extend(match.group(0) for match in pattern.finditer(content or ""))
     return sorted(set(matches))
+
+
+def _collect_expected_replacement_values(*, section: dict[str, Any], reuse_pack: dict[str, Any]) -> dict[str, str]:
+    if not bool(section.get("parameter_sensitive")):
+        return {}
+    replacement_hints = reuse_pack.get("replacement_hints") if isinstance(reuse_pack.get("replacement_hints"), dict) else {}
+    must_replace_fields = [
+        str(field_name)
+        for field_name in (reuse_pack.get("must_replace_fields") or [])
+        if str(field_name) in PARAMETER_REPLACE_FIELDS
+    ]
+    expected: dict[str, str] = {}
+    for field_name in must_replace_fields:
+        value = replacement_hints.get(field_name)
+        if value in (None, "", [], {}):
+            continue
+        expected[field_name] = str(value).strip()
+    return expected
+
+
+def _contains_normalized_value(content: str, expected_value: str) -> bool:
+    normalized_content = re.sub(r"\s+", "", str(content or "")).lower()
+    normalized_expected = re.sub(r"\s+", "", str(expected_value or "")).lower()
+    if not normalized_expected:
+        return True
+    return normalized_expected in normalized_content
+
+
+def _compute_reuse_similarity(*, content: str, reusable_blocks: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized_content = _normalize_similarity_text(content)
+    if len(normalized_content) < 60:
+        return {}
+
+    best: dict[str, Any] = {}
+    best_score = 0.0
+    for block in reusable_blocks:
+        source_content = _normalize_similarity_text(block.get("content_md") or "")
+        if len(source_content) < 60:
+            continue
+        score = SequenceMatcher(None, normalized_content, source_content).ratio()
+        if score <= best_score:
+            continue
+        best_score = score
+        best = {
+            "score": round(score, 4),
+            "block_id": block.get("block_id"),
+            "source_title": block.get("source_title"),
+        }
+    return best
+
+
+def _normalize_similarity_text(content: str) -> str:
+    normalized = str(content or "")
+    normalized = re.sub(r"\[\[ASSET:[^\]]+\]\]", " ", normalized)
+    normalized = re.sub(r"[#>*`_\-\|\[\]\(\)]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip().lower()
+
+
+def _should_flag_similarity(*, section: dict[str, Any], reuse_similarity: dict[str, Any]) -> bool:
+    score = float(reuse_similarity.get("score") or 0)
+    if score <= 0:
+        return False
+    if score >= 0.98:
+        return True
+    customer_specificity = str(section.get("customer_specificity") or "medium").lower()
+    if bool(section.get("parameter_sensitive")) and score >= 0.92:
+        return True
+    if customer_specificity in {"medium", "high"} and score >= 0.92:
+        return True
+    return False
 
 
 def _has_asset_placeholder(content: str) -> bool:
