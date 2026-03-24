@@ -1,7 +1,8 @@
 # PDF 数据清洗开发计划
 
 > 目标：基于当前真实工程 PDF 的 review 结论，形成一份面向实施的剩余开发计划，聚焦 `PDF -> 清洗 -> 资产保留 -> 安全入库 -> 审计` 主线。  
-> 范围：仅覆盖 RAG 前置的数据质量问题，不覆盖生成质量、Prompt 优化和前端体验。
+> 范围：仅覆盖 RAG 前置的数据质量问题，不覆盖生成质量、Prompt 优化和前端体验。  
+> 当前定位说明：本计划服务于数据底座建设。售前方案主生成路线已调整为 `reuse-first`，详见 [reuse_first_rag_technical_route.md](/Volumes/thunder/code/RAG_test/reuse_first_rag_technical_route.md)。现有 `summary-first` 路线正式降级为 `baseline / fallback`。
 
 ---
 
