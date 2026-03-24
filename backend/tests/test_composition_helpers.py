@@ -220,6 +220,54 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("project_name", blocks[0]["must_replace_fields"])
         self.assertIn("voltage_level", blocks[0]["must_replace_fields"])
         self.assertIn("旧项目A", blocks[0]["banned_terms"])
+        self.assertGreaterEqual(blocks[0]["selection_score"], blocks[0]["reusability_score"])
+
+    def test_build_reusable_blocks_reranks_by_section_match(self) -> None:
+        bundle = SimpleNamespace(
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_generic",
+                        "type": "section",
+                        "source_doc_id": "doc_generic",
+                        "source_title": "历史方案通用章",
+                        "heading_path": ["第2章", "项目概述"],
+                        "summary": "摘要",
+                        "raw_content": "本项目总体说明与建设背景，适用于多个行业场景。",
+                        "reusability_score": 0.93,
+                        "metadata": {"front_matter": False, "needs_asset_lookup": False},
+                    },
+                    {
+                        "evidence_id": "ev_arch",
+                        "type": "section",
+                        "source_doc_id": "doc_arch",
+                        "source_title": "历史方案技术章",
+                        "heading_path": ["第4章", "技术架构"],
+                        "summary": "摘要",
+                        "raw_content": "技术架构采用站控层、间隔层和网络层分层设计，支持 IEC 61850 与高压变频器联动。",
+                        "reusability_score": 0.78,
+                        "metadata": {"front_matter": False, "needs_asset_lookup": False},
+                    },
+                ]
+            }
+        )
+
+        blocks = build_reusable_blocks(
+            section={
+                "title": "技术架构",
+                "purpose": "说明系统架构与关键接口",
+                "keywords": ["IEC 61850", "站控层", "高压变频器"],
+                "section_class": "architecture",
+                "expected_evidence_types": ["section"],
+            },
+            evidence_bundle=bundle,
+            global_params={"product_line": "hv_vfd", "industry": "电气"},
+            limit=2,
+        )
+
+        self.assertEqual(blocks[0]["block_id"], "ev_arch")
+        self.assertIn("heading_match", blocks[0]["selection_reasons"])
+        self.assertGreater(blocks[0]["selection_score"], blocks[1]["selection_score"])
 
     def test_build_manual_only_section_content_includes_assets_and_reuse_hint(self) -> None:
         reuse_pack = build_reuse_pack(

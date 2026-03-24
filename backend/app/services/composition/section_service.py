@@ -22,6 +22,22 @@ from app.services.validation.service import flatten_outline_sections
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 DEFAULT_REUSE_LIMIT = 3
+REUSE_CANDIDATE_MULTIPLIER = 3
+REUSE_MIN_CANDIDATES = 6
+REUSE_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./+-]{2,}|[\u4e00-\u9fff]{2,}")
+REUSE_STOPWORDS = {
+    "项目",
+    "方案",
+    "系统",
+    "技术",
+    "章节",
+    "当前",
+    "相关",
+    "说明",
+    "用于",
+    "以及",
+    "进行",
+}
 BANNED_TERM_PATTERNS = (
     re.compile(r"(?:项目名称|买方|卖方|客户|用户)\s*[:：]\s*([^\n]{2,80})"),
 )
@@ -204,8 +220,13 @@ def build_reusable_blocks(
     global_params: dict[str, Any],
     limit: int = DEFAULT_REUSE_LIMIT,
 ) -> list[dict[str, Any]]:
-    selected = _select_evidence_items(section=section, evidence_bundle=evidence_bundle, limit=limit)
+    selected = _select_evidence_items(
+        section=section,
+        evidence_bundle=evidence_bundle,
+        limit=max(limit * REUSE_CANDIDATE_MULTIPLIER, REUSE_MIN_CANDIDATES),
+    )
     blocks: list[dict[str, Any]] = []
+    query_terms = _build_reuse_query_terms(section=section, global_params=global_params)
     for item in selected:
         raw_content = str(item.get("raw_content") or item.get("summary") or "").strip()
         if not raw_content:
@@ -213,6 +234,13 @@ def build_reusable_blocks(
         heading_path = item.get("heading_path") or []
         block_type = str(item.get("source_chunk_type") or item.get("type") or "section").lower()
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        selection_score, selection_reasons = _score_reuse_candidate(
+            section=section,
+            item=item,
+            raw_content=raw_content,
+            heading_path=heading_path,
+            query_terms=query_terms,
+        )
         blocks.append(
             {
                 "block_id": str(item.get("evidence_id") or item.get("source_chunk_id") or ""),
@@ -222,6 +250,8 @@ def build_reusable_blocks(
                 "content_md": raw_content,
                 "block_type": block_type,
                 "reusability_score": float(item.get("reusability_score") or item.get("relevance_score") or 0),
+                "selection_score": selection_score,
+                "selection_reasons": selection_reasons,
                 "customer_specificity_score": 0.8 if metadata.get("front_matter") else 0.25,
                 "asset_dependency_level": "high" if metadata.get("needs_asset_lookup") else "low",
                 "must_replace_fields": _collect_replace_fields(raw_content=raw_content, global_params=global_params),
@@ -230,7 +260,13 @@ def build_reusable_blocks(
                 "metadata": metadata,
             }
         )
-    blocks.sort(key=lambda item: item["reusability_score"], reverse=True)
+    blocks.sort(
+        key=lambda item: (
+            float(item.get("selection_score") or 0),
+            float(item.get("reusability_score") or 0),
+        ),
+        reverse=True,
+    )
     return blocks[:limit]
 
 
@@ -308,6 +344,7 @@ def render_reuse_pack_context(reuse_pack: dict[str, Any]) -> str:
                     f"来源: {block.get('source_title') or '未知来源'}",
                     f"位置: {path_text or '未标注章节'}",
                     f"类型: {block.get('block_type')}",
+                    f"选择评分: {block.get('selection_score')}",
                     f"复用评分: {block.get('reusability_score')}",
                     f"必须替换字段: {replace_fields}",
                     "正文:",
@@ -378,6 +415,101 @@ def ensure_required_asset_placeholders(*, content_md: str, reuse_pack: dict[str,
     for item in missing:
         appendix_lines.append(f"- {item.get('placeholder')} {item.get('title') or '参考资产'}")
     return content_md.rstrip() + "\n" + "\n".join(appendix_lines).rstrip() + "\n"
+
+
+def _build_reuse_query_terms(*, section: dict[str, Any], global_params: dict[str, Any]) -> list[str]:
+    parts = [
+        str(section.get("title") or ""),
+        str(section.get("purpose") or ""),
+        " ".join(str(item) for item in (section.get("keywords") or []) if item),
+        " ".join(str(item) for item in (section.get("expected_evidence_types") or []) if item),
+        str(section.get("section_class") or ""),
+        str(global_params.get("product_line") or ""),
+        str(global_params.get("industry") or ""),
+    ]
+    tokens: list[str] = []
+    for part in parts:
+        for token in _tokenize_reuse_text(part):
+            if token not in tokens:
+                tokens.append(token)
+    return tokens
+
+
+def _tokenize_reuse_text(text: str) -> list[str]:
+    tokens: list[str] = []
+    for match in REUSE_TOKEN_PATTERN.findall(str(text or "")):
+        token = match.strip().lower()
+        if len(token) < 2 or token in REUSE_STOPWORDS:
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def _score_reuse_candidate(
+    *,
+    section: dict[str, Any],
+    item: dict[str, Any],
+    raw_content: str,
+    heading_path: list[Any],
+    query_terms: list[str],
+) -> tuple[float, list[str]]:
+    base_score = float(item.get("reusability_score") or item.get("relevance_score") or 0)
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    result_type = str(item.get("type") or item.get("source_chunk_type") or "").lower()
+    heading_text = " ".join(str(segment) for segment in heading_path if segment)
+    heading_terms = set(_tokenize_reuse_text(heading_text))
+    content_terms = set(_tokenize_reuse_text(raw_content[:1200]))
+    query_set = set(query_terms)
+    overlap_count = len(query_set & (heading_terms | content_terms))
+    overlap_ratio = (overlap_count / len(query_set)) if query_set else 0.0
+    score = base_score
+    reasons: list[str] = []
+
+    if overlap_ratio:
+        bonus = min(0.22, overlap_ratio * 0.22)
+        score += bonus
+        reasons.append(f"keyword_overlap={overlap_count}")
+    elif query_set:
+        score -= 0.12
+        reasons.append("keyword_mismatch_penalty")
+    if query_set and heading_terms and (query_set & heading_terms):
+        score += 0.12
+        reasons.append("heading_match")
+
+    expected_types = {str(item).lower() for item in (section.get("expected_evidence_types") or []) if item}
+    if result_type and result_type in expected_types:
+        score += 0.06
+        reasons.append("expected_type")
+
+    section_class = str(section.get("section_class") or "").lower()
+    if section_class and any(section_class in token for token in heading_terms | content_terms):
+        score += 0.08
+        reasons.append("section_class_match")
+
+    if metadata.get("front_matter"):
+        score -= 0.18
+        reasons.append("front_matter_penalty")
+    if metadata.get("needs_asset_lookup") and not bool(section.get("asset_required")):
+        score -= 0.08
+        reasons.append("asset_dependency_penalty")
+
+    customer_specificity = str(section.get("customer_specificity") or "medium").lower()
+    if customer_specificity in {"medium", "high"} and _looks_customer_specific(raw_content):
+        penalty = 0.08 if customer_specificity == "medium" else 0.12
+        score -= penalty
+        reasons.append("customer_specific_penalty")
+
+    if bool(section.get("parameter_sensitive")) and result_type not in {"parameter", "table"}:
+        score -= 0.04
+        reasons.append("parameter_type_penalty")
+
+    normalized_score = round(min(max(score, 0.0), 1.2), 4)
+    return normalized_score, reasons
+
+
+def _looks_customer_specific(content: str) -> bool:
+    text = str(content or "")
+    return any(token in text for token in ("买方", "卖方", "客户", "项目名称", "用户"))
 
 
 class SectionDraftService:
