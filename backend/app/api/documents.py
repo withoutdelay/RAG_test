@@ -42,6 +42,17 @@ def get_asset_retrieval_service() -> AssetRetrievalService:
     return AssetRetrievalService()
 
 
+def _build_document_base_metadata(*, project: Project, parsed_metadata: dict | None) -> dict:
+    metadata = dict(parsed_metadata or {})
+    if project.industry and not metadata.get("industry"):
+        metadata["industry"] = project.industry
+    if project.product_line and not metadata.get("product_line"):
+        metadata["product_line"] = project.product_line
+    if project.name and not metadata.get("project_name"):
+        metadata["project_name"] = project.name
+    return metadata
+
+
 async def _parse_and_index_document(
     *,
     session: AsyncSession,
@@ -458,6 +469,7 @@ async def upload_document(
         parsed_metadata = json.loads(metadata) if metadata else {}
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid metadata JSON") from exc
+    base_metadata = _build_document_base_metadata(project=project, parsed_metadata=parsed_metadata)
 
     suffix = Path(file.filename or "").suffix or ".bin"
     storage = get_object_storage()
@@ -477,7 +489,7 @@ async def upload_document(
         storage_path=storage_path,
         doc_type=doc_type,
         parse_status="parsing",
-        meta=parsed_metadata,
+        meta=base_metadata,
     )
     session.add(document)
     await session.flush()
@@ -486,7 +498,7 @@ async def upload_document(
         await _parse_and_index_document(
             session=session,
             document=document,
-            base_metadata=parsed_metadata,
+            base_metadata=base_metadata,
             parsed_document=parsed_document,
         )
         await session.commit()
@@ -543,11 +555,15 @@ async def reparse_document(
     document = await session.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    project = await session.get(Project, document.project_id) if document.project_id else None
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     document.parse_status = "parsing"
     await session.flush()
+    base_metadata = _build_document_base_metadata(project=project, parsed_metadata=document.meta or {})
 
     try:
-        await _parse_and_index_document(session=session, document=document, base_metadata=document.meta or {})
+        await _parse_and_index_document(session=session, document=document, base_metadata=base_metadata)
         await session.commit()
     except Exception as exc:
         document.parse_status = "failed"

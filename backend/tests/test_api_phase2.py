@@ -137,6 +137,56 @@ class Phase2ApiTests(unittest.TestCase):
             self.assertGreaterEqual(payload["total"], 1)
             self.assertTrue(any("ABB ACS880" in result["content"] for result in payload["results"]))
 
+    def test_document_upload_inherits_project_metadata_for_retrieval_filters(self) -> None:
+        with self._make_client() as client:
+            project_response = client.post(
+                "/api/v1/projects",
+                json={"name": "继承元数据测试项目", "industry": "制浆造纸", "product_line": "高压变频与电机驱动"},
+            )
+            project_id = project_response.json()["data"]["id"]
+
+            with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
+                handle.write("# 技术架构\n\n高浓磨机主驱动系统采用高压软起动方案，并与 DCS/PLC 接口联动。")
+                upload_path = Path(handle.name)
+
+            try:
+                with upload_path.open("rb") as file_handle:
+                    upload_response = client.post(
+                        f"/api/v1/projects/{project_id}/documents/upload",
+                        files={"file": ("sample.md", file_handle, "text/markdown")},
+                        data={"doc_type": "historical_proposal"},
+                    )
+            finally:
+                upload_path.unlink(missing_ok=True)
+
+            self.assertEqual(upload_response.status_code, 202)
+            document_id = upload_response.json()["data"]["id"]
+
+            document_response = client.get(f"/api/v1/documents/{document_id}")
+            self.assertEqual(document_response.status_code, 200)
+            document_payload = document_response.json()["data"]
+            self.assertEqual(document_payload["metadata"]["industry"], "制浆造纸")
+            self.assertEqual(document_payload["metadata"]["product_line"], "高压变频与电机驱动")
+
+            search_response = client.post(
+                "/api/v1/retrieval/search",
+                json={
+                    "query": "高浓磨机 高压软起动 DCS 接口",
+                    "project_id": project_id,
+                    "top_k": 5,
+                    "filters": {
+                        "industry": "制浆造纸",
+                        "chunk_type": ["PLAIN"],
+                        "doc_type": "historical_proposal",
+                    },
+                    "search_mode": "hybrid",
+                },
+            )
+            self.assertEqual(search_response.status_code, 200)
+            payload = search_response.json()["data"]
+            self.assertGreaterEqual(payload["total"], 1)
+            self.assertIn("高压软起动方案", payload["results"][0]["content"])
+
     def test_document_upload_applies_safe_ingestion_filter(self) -> None:
         with self._make_client() as client:
             project_response = client.post(
