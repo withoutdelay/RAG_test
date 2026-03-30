@@ -13,6 +13,8 @@ __pycache__/
 
 backend/data/uploads/
 backend/data/pdf_audits/
+backend/data/sample_manifests/
+backend/data/case_library/
 
 frontend/node_modules/
 frontend/.next/

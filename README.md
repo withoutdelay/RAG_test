@@ -35,6 +35,8 @@ Phase 2 backend plus Phase 3 gateway scaffold for the presales AI system describ
 
 - `PARSER_BACKEND=auto|docling|fallback`
   `auto` uses Docling for non-Markdown files when available.
+- `DOCLING_LIBREOFFICE_CMD=/absolute/path/to/soffice`
+  optional override for DOCX-to-PDF conversion when Docling needs LibreOffice to export embedded DrawingML images. If unset, the backend will try `soffice` in `PATH` plus common macOS install paths automatically.
 - `EMBEDDING_BACKEND=auto|sentence-transformers|fallback`
   `fallback` is the default lightweight mode for local dev and tests.
 - `QDRANT_LOCATION=:memory:`

@@ -80,6 +80,7 @@ class ProviderEndpointConfig:
     api_key: str
     model_name: str | None = None
     path: str = "/chat/completions"
+    api_style: str = "chat_completions"
     auth_header_name: str = "Authorization"
     auth_scheme: str | None = "Bearer"
     query_params: dict[str, str] = field(default_factory=dict)
@@ -257,12 +258,21 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
 
     async def invoke(self, model_type: ModelType, request: LLMRequest) -> LLMResponse:
         config = self._get_config(model_type)
+        if config.api_style == "responses":
+            payload = self._build_payload(model_type, request, stream=True)
+            return await self._collect_responses_stream(config=config, request=request, model_type=model_type, payload=payload)
         payload = self._build_payload(model_type, request, stream=False)
         response_json = await self._post_json(config=config, payload=payload)
         return self._parse_completion_response(model_type=model_type, request=request, data=response_json)
 
     async def invoke_stream(self, model_type: ModelType, request: LLMRequest) -> AsyncIterator[str]:
         config = self._get_config(model_type)
+        if config.api_style == "responses":
+            payload = self._build_payload(model_type, request, stream=True)
+            async for delta in self._iterate_responses_stream(config=config, payload=payload):
+                if delta:
+                    yield delta
+            return
         payload = self._build_payload(model_type, request, stream=True)
         headers = self._build_headers(config)
 
@@ -275,7 +285,11 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
                     headers=headers,
                     params=config.query_params,
                 ) as response:
-                    response.raise_for_status()
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        await exc.response.aread()
+                        raise
                     async for line in response.aiter_lines():
                         data = line.strip()
                         if not data.startswith("data:"):
@@ -334,6 +348,8 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
                 base_url=_normalize_openai_base_url(settings.openai_base_url),
                 api_key=settings.openai_api_key,
                 model_name=settings.openai_model_name,
+                path="/responses",
+                api_style="responses",
             )
 
         return configs
@@ -355,6 +371,31 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
         }
 
     def _build_payload(self, model_type: ModelType, request: LLMRequest, *, stream: bool) -> dict[str, Any]:
+        config = self._get_config(model_type)
+        if config.api_style == "responses":
+            payload: dict[str, Any] = {
+                "input": [
+                    {
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": request.system_prompt}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": request.user_prompt}],
+                    },
+                ],
+                "temperature": request.temperature,
+                "max_output_tokens": request.max_tokens,
+            }
+            if config.model_name:
+                payload["model"] = config.model_name
+            response_format = self._build_response_format(model_type, request, api_style=config.api_style)
+            if response_format is not None:
+                payload["text"] = {"format": response_format}
+            if stream:
+                payload["stream"] = True
+            return payload
+
         payload: dict[str, Any] = {
             "messages": [
                 {"role": "system", "content": request.system_prompt},
@@ -364,11 +405,10 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
             "max_tokens": request.max_tokens,
         }
 
-        config = self._get_config(model_type)
         if config.provider_name != "azure" and config.model_name:
             payload["model"] = config.model_name
 
-        response_format = self._build_response_format(model_type, request)
+        response_format = self._build_response_format(model_type, request, api_style=config.api_style)
         if response_format is not None:
             payload["response_format"] = response_format
 
@@ -377,9 +417,23 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
 
         return payload
 
-    def _build_response_format(self, model_type: ModelType, request: LLMRequest) -> dict[str, Any] | None:
+    def _build_response_format(
+        self,
+        model_type: ModelType,
+        request: LLMRequest,
+        *,
+        api_style: str,
+    ) -> dict[str, Any] | None:
         if request.json_schema is None:
             return None
+        if api_style == "responses":
+            strict_schema = _ensure_strict_json_schema(request.json_schema)
+            return {
+                "type": "json_schema",
+                "name": f"{request.task_type.value}_response",
+                "strict": True,
+                "schema": strict_schema,
+            }
         if model_type == ModelType.DEEPSEEK:
             return {"type": "json_object"}
         strict_schema = _ensure_strict_json_schema(request.json_schema)
@@ -403,6 +457,12 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
                     params=config.query_params,
                 )
                 response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            try:
+                await exc.response.aread()
+            except Exception:
+                pass
+            raise RuntimeError(self._format_http_error(config.provider_name, None, exc)) from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(self._format_http_error(config.provider_name, None, exc)) from exc
 
@@ -411,6 +471,87 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
         except ValueError as exc:
             raise RuntimeError(f"{config.provider_name} returned a non-JSON response") from exc
 
+    async def _collect_responses_stream(
+        self,
+        *,
+        config: ProviderEndpointConfig,
+        request: LLMRequest,
+        model_type: ModelType,
+        payload: dict[str, Any],
+    ) -> LLMResponse:
+        content_parts: list[str] = []
+        response_payload: dict[str, Any] | None = None
+        async for event in self._iterate_responses_stream(config=config, payload=payload, yield_events=True):
+            event_type = str(event.get("type") or "")
+            if event_type == "response.output_text.delta":
+                delta = str(event.get("delta") or "")
+                if delta:
+                    content_parts.append(delta)
+            elif event_type == "response.output_text.done":
+                text = str(event.get("text") or "")
+                if text:
+                    content_parts = [text]
+            elif event_type == "response.completed":
+                response_payload = event.get("response") if isinstance(event.get("response"), dict) else None
+
+        content = "".join(content_parts)
+        usage = (response_payload or {}).get("usage") or {}
+        prompt_tokens = int(usage.get("input_tokens") or _estimate_tokens(f"{request.system_prompt}\n{request.user_prompt}"))
+        completion_tokens = int(usage.get("output_tokens") or _estimate_tokens(content))
+        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+        return LLMResponse(
+            content=content,
+            model_used=str((response_payload or {}).get("model") or config.model_name or model_type.value),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost_estimate=0.0,
+        )
+
+    async def _iterate_responses_stream(
+        self,
+        *,
+        config: ProviderEndpointConfig,
+        payload: dict[str, Any],
+        yield_events: bool = False,
+    ) -> AsyncIterator[Any]:
+        headers = self._build_headers(config)
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
+                async with client.stream(
+                    "POST",
+                    config.url,
+                    json=payload,
+                    headers=headers,
+                    params=config.query_params,
+                ) as response:
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        await exc.response.aread()
+                        raise
+                    async for line in response.aiter_lines():
+                        data = line.strip()
+                        if not data.startswith("data:"):
+                            continue
+                        chunk = data[5:].strip()
+                        if not chunk or chunk == "[DONE]":
+                            continue
+                        try:
+                            payload_json = json.loads(chunk)
+                        except json.JSONDecodeError as exc:
+                            raise RuntimeError(f"{config.provider_name} returned invalid responses stream payload") from exc
+                        if yield_events:
+                            yield payload_json
+                        else:
+                            event_type = str(payload_json.get("type") or "")
+                            if event_type == "response.output_text.delta":
+                                delta = str(payload_json.get("delta") or "")
+                                if delta:
+                                    yield delta
+        except httpx.HTTPError as exc:
+            raise RuntimeError(self._format_http_error(config.provider_name, None, exc)) from exc
+
     def _parse_completion_response(
         self,
         *,
@@ -418,6 +559,24 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
         request: LLMRequest,
         data: dict[str, Any],
     ) -> LLMResponse:
+        config = self._get_config(model_type)
+        if config.api_style == "responses":
+            content = _extract_responses_output_text(data)
+            usage = data.get("usage") or {}
+            prompt_tokens = int(
+                usage.get("input_tokens") or _estimate_tokens(f"{request.system_prompt}\n{request.user_prompt}")
+            )
+            completion_tokens = int(usage.get("output_tokens") or _estimate_tokens(content))
+            total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+            return LLMResponse(
+                content=content,
+                model_used=str(data.get("model") or config.model_name or model_type.value),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cost_estimate=0.0,
+            )
+
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"{model_type.value} returned no completion choices")
@@ -452,7 +611,10 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
     def _format_http_error(provider_name: str, model_type: ModelType | None, exc: httpx.HTTPError) -> str:
         label = model_type.value if model_type else provider_name
         if isinstance(exc, httpx.HTTPStatusError):
-            body = exc.response.text.strip()
+            try:
+                body = exc.response.text.strip()
+            except Exception:
+                body = "<streaming response body unavailable>"
             if len(body) > 200:
                 body = f"{body[:200]}..."
             return f"{provider_name} request failed for {label}: {exc.response.status_code} {body}"
@@ -611,10 +773,34 @@ def _estimate_tokens(text: str) -> int:
 def _normalize_openai_base_url(base_url: str) -> str:
     parsed = urlparse(base_url)
     path = parsed.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        path = path[: -len("/chat/completions")]
+    elif path.endswith("/responses"):
+        path = path[: -len("/responses")]
     if not path:
         path = "/v1"
     normalized = parsed._replace(path=path)
     return urlunparse(normalized).rstrip("/")
+
+
+def _extract_responses_output_text(data: dict[str, Any]) -> str:
+    output_text = data.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text
+    if isinstance(output_text, list):
+        parts = [str(item) for item in output_text if str(item).strip()]
+        if parts:
+            return "".join(parts)
+
+    parts: list[str] = []
+    for item in data.get("output") or []:
+        for content in item.get("content") or []:
+            text = content.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+    if parts:
+        return "".join(parts)
+    raise RuntimeError("openai returned no output_text content")
 
 
 def _ensure_strict_json_schema(schema: Any) -> Any:

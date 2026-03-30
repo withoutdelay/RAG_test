@@ -108,4 +108,6 @@ class QdrantService:
             must.append(FieldCondition(key="chunk_type", match=MatchAny(any=chunk_types)))
         if doc_type := filters.get("doc_type"):
             must.append(FieldCondition(key="doc_type", match=MatchValue(value=doc_type)))
+        if document_names := filters.get("document_names"):
+            must.append(FieldCondition(key="document_name", match=MatchAny(any=document_names)))
         return Filter(must=must) if must else None

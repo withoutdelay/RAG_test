@@ -16,6 +16,7 @@ from app.models.project import Project
 from app.models.proposal_outline import ProposalOutline
 from app.models.requirement_card import RequirementCard
 from app.services.agents.planner import PlannerAgent
+from app.services.retrieval.case_service import build_outline_examples
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
@@ -47,6 +48,10 @@ PARAMETER_SENSITIVE_HINTS = ("参数", "配置", "清单", "规格", "容量", "
 
 def _suggest_evidence_types(title: str) -> list[str]:
     lowered = title.lower()
+    if "供货" in title or "清单" in title or "物料" in title:
+        return ["table", "parameter", "section"]
+    if "接口" in title or "通讯" in title or "通信" in title:
+        return ["section", "parameter"]
     if "配置" in title or "清单" in title:
         return ["table", "parameter"]
     if "架构" in title or "系统" in title:
@@ -83,6 +88,10 @@ def _normalize_keywords(raw_keywords: Any, *, title: str, evidence_types: list[s
 
 
 def _suggest_section_class(title: str) -> str:
+    if "供货" in title or "清单" in title or "物料" in title:
+        return "configuration"
+    if "接口" in title or "通讯" in title or "通信" in title:
+        return "architecture"
     if "概述" in title or "背景" in title:
         return "overview"
     if "需求" in title or "范围" in title or "目标" in title:
@@ -101,6 +110,10 @@ def _suggest_section_class(title: str) -> str:
 
 
 def _suggest_customer_specificity(*, section_class: str, title: str) -> str:
+    if "供货" in title or "清单" in title or "物料" in title:
+        return "medium"
+    if "接口" in title or "通讯" in title or "通信" in title:
+        return "low"
     if section_class in {"overview", "requirement"}:
         return "high"
     if section_class in {"configuration", "implementation"} or "工艺" in title:
@@ -281,15 +294,30 @@ def build_outline_inputs(
     *,
     requirement_card: RequirementCard,
     evidence_bundle: EvidenceBundle,
-) -> tuple[str, dict[str, Any], str]:
+) -> tuple[str, dict[str, Any], str, list[dict[str, Any]]]:
     content = requirement_card.content or {}
     global_params = content.get("key_parameters") if isinstance(content.get("key_parameters"), dict) else {}
+    global_params = {
+        **global_params,
+        **{
+            key: value
+            for key, value in {
+                "project_name": content.get("project_name"),
+                "industry": content.get("industry"),
+                "product_line": content.get("product_line"),
+                "business_objective": content.get("business_objective"),
+            }.items()
+            if value not in (None, "", [], {})
+        },
+    }
     evidence_results = (evidence_bundle.content or {}).get("results") or []
-    evidence_summary = "\n".join(
-        f"- {item.get('source_title')}: {item.get('summary')}"
+    evidence_summary = "\n\n".join(
+        f"- {item.get('source_title')}: {str(item.get('raw_content') or item.get('summary') or '').strip()[:420]}"
         for item in evidence_results[:5]
         if isinstance(item, dict)
     )
+    case_candidates = (evidence_bundle.content or {}).get("case_candidates") or []
+    outline_examples = build_outline_examples(case_candidates, max_cases=3, max_titles=12)
     instructions = (
         f"请基于需求卡生成一份面向客户技术方案的大纲。"
         f"项目名称：{content.get('project_name') or '未命名项目'}。"
@@ -303,7 +331,7 @@ def build_outline_inputs(
         ]
         if part
     )
-    return instructions, global_params, rfp_context
+    return instructions, global_params, rfp_context, outline_examples
 
 
 class OutlineService:
@@ -351,7 +379,7 @@ class OutlineService:
         session.add(job)
         await session.flush()
 
-        default_instructions, global_params, rfp_context = build_outline_inputs(
+        default_instructions, global_params, rfp_context, outline_examples = build_outline_inputs(
             requirement_card=requirement_card,
             evidence_bundle=evidence_bundle,
         )
@@ -361,6 +389,7 @@ class OutlineService:
             instructions=instructions or default_instructions,
             global_params=global_params,
             rfp_context=rfp_context,
+            outline_examples=outline_examples,
         )
         outline_payload = self._parse_outline_response(response.content, project_name=project.name)
         outline_json = normalize_outline_payload(outline_payload, project_name=project.name)
@@ -518,4 +547,52 @@ class OutlineService:
             payload = json.loads(match.group(0)) if match else {}
         if not payload:
             return {"title": f"{project_name}技术方案", "sections": []}
+        if not payload.get("title") and payload.get("document_title"):
+            payload["title"] = payload["document_title"]
+        if not payload.get("sections") and isinstance(payload.get("outline"), list):
+            converted_sections: list[dict[str, Any]] = []
+            for index, item in enumerate(payload.get("outline") or [], start=1):
+                if not isinstance(item, dict):
+                    continue
+                converted_sections.append(
+                    {
+                        "index": index,
+                        "title": str(item.get("title") or f"章节 {index}"),
+                        "description": str(item.get("description") or item.get("purpose") or ""),
+                        "keywords": item.get("keywords") if isinstance(item.get("keywords"), list) else [],
+                    }
+                )
+            payload = {
+                "title": str(payload.get("title") or payload.get("project_name") or f"{project_name}技术方案"),
+                "sections": converted_sections,
+            }
+        if not payload.get("sections") and isinstance(payload.get("chapters"), list):
+            converted_sections = []
+            for index, item in enumerate(payload.get("chapters") or [], start=1):
+                if not isinstance(item, dict):
+                    continue
+                chapter_title = str(item.get("title") or item.get("heading") or f"章节 {index}")
+                chapter_description = str(
+                    item.get("description")
+                    or item.get("purpose")
+                    or item.get("summary")
+                    or f"围绕{chapter_title}展开技术说明。"
+                )
+                converted_sections.append(
+                    {
+                        "index": index,
+                        "title": chapter_title,
+                        "description": chapter_description,
+                        "keywords": item.get("keywords") if isinstance(item.get("keywords"), list) else [chapter_title],
+                    }
+                )
+            payload = {
+                "title": str(
+                    payload.get("title")
+                    or payload.get("project_name")
+                    or payload.get("document_title")
+                    or f"{project_name}技术方案"
+                ),
+                "sections": converted_sections,
+            }
         return payload

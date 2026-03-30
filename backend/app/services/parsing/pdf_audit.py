@@ -373,7 +373,14 @@ def _build_findings(
             }
         )
 
-    if document_profile.ingestion_recommendation == "asset_only_review":
+    if document_profile.ingestion_recommendation == "conversion_required":
+        findings.append(
+            {
+                "level": "high",
+                "message": "This legacy .doc file should be converted to DOCX or PDF before it can safely enter the main parsing and retrieval pipeline.",
+            }
+        )
+    elif document_profile.ingestion_recommendation == "asset_only_review":
         findings.append(
             {
                 "level": "high",

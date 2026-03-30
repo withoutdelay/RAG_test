@@ -4,7 +4,11 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 import os
+import shutil
+import subprocess
+import tempfile
 from typing import Any
+import zipfile
 
 try:
     from app.config import get_settings
@@ -66,17 +70,49 @@ class DoclingParser:
         if get_settings is not None:
             settings = get_settings()
             self.backend_mode = settings.parser_backend
+            self.docling_libreoffice_cmd = settings.docling_libreoffice_cmd
         else:
             self.backend_mode = os.getenv("PARSER_BACKEND", "auto")
+            self.docling_libreoffice_cmd = os.getenv("DOCLING_LIBREOFFICE_CMD")
+        self.resolved_libreoffice_cmd = self._resolve_libreoffice_cmd()
 
     async def parse(self, file_path: str) -> ParsedDocument:
         path = Path(file_path)
         suffix = path.suffix.lower()
 
+        if suffix == ".doc":
+            return ParsedDocument(
+                markdown=self._normalize_text(
+                    "Legacy DOC binary format is not directly supported in the current pipeline.\n\n"
+                    "Please convert this file to DOCX or PDF before using it for main retrieval or reuse-first generation.",
+                    path.name,
+                ),
+                metadata={
+                    "source_name": path.name,
+                    "parser": "legacy-doc-placeholder",
+                    "parser_backend_requested": self.backend_mode,
+                    "parser_backend_used": "legacy_doc_placeholder",
+                    "parse_warning": "legacy_doc_requires_conversion",
+                    "format": suffix.lstrip("."),
+                },
+            )
+
         if self._should_use_docling(suffix):
             try:
-                converter = self._build_converter(suffix)
-                result = converter.convert(file_path)
+                self._configure_docling_environment()
+                effective_path = path
+                conversion_note: dict[str, Any] = {}
+                if suffix == ".docx" and self._docx_prefers_pdf_conversion(path):
+                    converted_pdf = self._convert_office_document_to_pdf(path)
+                    if converted_pdf is not None:
+                        effective_path = converted_pdf
+                        conversion_note = {
+                            "docling_docx_conversion": "libreoffice_pdf",
+                            "docling_docx_conversion_source_format": "docx",
+                            "docling_docx_conversion_target_format": "pdf",
+                        }
+                converter = self._build_converter(effective_path.suffix.lower())
+                result = converter.convert(str(effective_path))
                 markdown = result.document.export_to_markdown()
                 assets = self._extract_assets(result.document)
                 return ParsedDocument(
@@ -86,7 +122,10 @@ class DoclingParser:
                         "parser": "docling",
                         "parser_backend_requested": self.backend_mode,
                         "parser_backend_used": "docling",
+                        "docling_libreoffice_cmd": self.resolved_libreoffice_cmd,
+                        "docling_libreoffice_available": bool(self.resolved_libreoffice_cmd),
                         "format": suffix.lstrip("."),
+                        **conversion_note,
                     },
                     assets=assets,
                 )
@@ -108,9 +147,77 @@ class DoclingParser:
                 "parser": "fallback-docling-parser",
                 "parser_backend_requested": self.backend_mode,
                 "parser_backend_used": "fallback",
+                "docling_libreoffice_cmd": self.resolved_libreoffice_cmd,
+                "docling_libreoffice_available": bool(self.resolved_libreoffice_cmd),
                 "format": suffix.lstrip("."),
             },
         )
+
+    def _configure_docling_environment(self) -> None:
+        if self.resolved_libreoffice_cmd:
+            os.environ["DOCLING_LIBREOFFICE_CMD"] = self.resolved_libreoffice_cmd
+
+    def _docx_prefers_pdf_conversion(self, path: Path) -> bool:
+        if not self.resolved_libreoffice_cmd or path.suffix.lower() != ".docx":
+            return False
+        try:
+            with zipfile.ZipFile(path) as archive:
+                names = archive.namelist()
+        except zipfile.BadZipFile:
+            return False
+
+        media_names = [name.lower() for name in names if name.lower().startswith("word/media/")]
+        if any(name.endswith((".wmf", ".emf")) for name in media_names):
+            return True
+        return False
+
+    def _convert_office_document_to_pdf(self, path: Path) -> Path | None:
+        if not self.resolved_libreoffice_cmd:
+            return None
+        temp_dir = tempfile.mkdtemp(prefix="docling-office-pdf-")
+        executable = (
+            self.resolved_libreoffice_cmd
+            if Path(self.resolved_libreoffice_cmd).exists()
+            else shutil.which(Path(self.resolved_libreoffice_cmd).name)
+        )
+        if executable is None:
+            return None
+        command = [
+            executable,
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            temp_dir,
+            str(path),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True)
+        if completed.returncode != 0:
+            return None
+        pdf_path = Path(temp_dir) / f"{path.stem}.pdf"
+        if pdf_path.exists():
+            return pdf_path
+        return None
+
+    def _resolve_libreoffice_cmd(self) -> str | None:
+        candidates: list[str | None] = [
+            self.docling_libreoffice_cmd,
+            os.getenv("DOCLING_LIBREOFFICE_CMD"),
+            shutil.which("soffice"),
+            shutil.which("libreoffice"),
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+            "/Applications/LibreOffice.app/Contents/MacOS/LibreOffice",
+            "/opt/homebrew/bin/soffice",
+            "/usr/local/bin/soffice",
+            "/usr/bin/soffice",
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = Path(candidate).expanduser()
+            if path.exists():
+                return str(path.resolve())
+        return None
 
     def _build_converter(self, suffix: str) -> DocumentConverter:
         if suffix != ".pdf" or InputFormat is None or PdfPipelineOptions is None or PdfFormatOption is None:

@@ -16,12 +16,14 @@ class PlannerAgent:
         instructions: str,
         global_params: dict,
         rfp_context: str,
+        outline_examples: list[dict] | None = None,
     ) -> LLMResponse:
         system_prompt, user_prompt = build_outline_prompts(
             project_name=project_name,
             instructions=instructions,
             global_params=global_params,
             rfp_context=rfp_context,
+            outline_examples=outline_examples or [],
         )
         return await self.llm_client.invoke(
             LLMRequest(
@@ -34,6 +36,7 @@ class PlannerAgent:
                     "project_name": project_name,
                     "instructions": instructions,
                     "global_params": global_params,
+                    "outline_examples": outline_examples or [],
                 },
             )
         )

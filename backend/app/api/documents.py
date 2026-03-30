@@ -131,6 +131,7 @@ async def _parse_and_index_document(
                     "image_url": None,
                     "token_count": payload.token_count,
                     "indexable": True,
+                    **payload.metadata,
                 },
             )
             indexed_chunk_count += 1

@@ -14,6 +14,7 @@ from app.models.job import Job
 from app.models.project import Project
 from app.models.requirement_card import RequirementCard
 from app.schemas.retrieval import RetrievalFilters, RetrievalSearchRequest
+from app.services.retrieval.case_service import CaseLibraryService
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 from app.services.vectorstore.retriever import Retriever
 
@@ -76,6 +77,9 @@ def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "reusability_score": _compute_reusability_score(result),
                 "recommended_use": f"可用于 {result.get('chunk_type', '章节')} 相关内容起草",
                 "risk_note": None,
+                "section_type": metadata.get("section_type") or "unknown",
+                "equipment_type": metadata.get("equipment_type") or "generic",
+                "content_form": metadata.get("content_form") or "narrative",
                 "metadata": metadata,
             }
         )
@@ -83,8 +87,14 @@ def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 class EvidenceBundleService:
-    def __init__(self, *, retriever: Retriever | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        retriever: Retriever | None = None,
+        case_library: CaseLibraryService | None = None,
+    ) -> None:
         self.retriever = retriever or Retriever()
+        self.case_library = case_library or CaseLibraryService()
 
     async def retrieve_evidence(
         self,
@@ -119,10 +129,13 @@ class EvidenceBundleService:
         await session.flush()
 
         query = build_requirement_query(card.content or {})
+        case_candidates = self.case_library.retrieve_cases(query=query, top_k=min(top_k, 3), library_tracks={"pilot_main"})
+        scoped_document_names = [str(item.get("file_name") or "").strip() for item in case_candidates if str(item.get("file_name") or "").strip()]
         filters = RetrievalFilters(
             industry=card.content.get("industry"),
             doc_type=doc_type or "historical_proposal",
             chunk_type=["PLAIN", "TABLE", "IMAGE"],
+            document_names=scoped_document_names or None,
         )
         response = await self.retriever.search(
             session=session,
@@ -135,6 +148,25 @@ class EvidenceBundleService:
             ),
         )
         results = [item.model_dump(mode="json") for item in response.results]
+        retrieval_strategy = "case_first" if scoped_document_names else "global_fallback"
+        if not results and scoped_document_names:
+            fallback_filters = RetrievalFilters(
+                industry=card.content.get("industry"),
+                doc_type=doc_type or "historical_proposal",
+                chunk_type=["PLAIN", "TABLE", "IMAGE"],
+            )
+            response = await self.retriever.search(
+                session=session,
+                request=RetrievalSearchRequest(
+                    query=query,
+                    project_id=project_id,
+                    top_k=top_k,
+                    filters=fallback_filters,
+                    search_mode="hybrid",
+                ),
+            )
+            results = [item.model_dump(mode="json") for item in response.results]
+            retrieval_strategy = "case_first_fallback_global"
         evidence_items = build_evidence_items(results)
         quality_score = self._compute_quality_score(results)
         retrieval_version = await self._next_version(session=session, project_id=project_id)
@@ -146,6 +178,8 @@ class EvidenceBundleService:
             content={
                 "query": query,
                 "filters": filters.model_dump(exclude_none=True),
+                "retrieval_strategy": retrieval_strategy,
+                "case_candidates": case_candidates,
                 "results": evidence_items,
                 "source_requirement_card_id": str(card.id),
             },

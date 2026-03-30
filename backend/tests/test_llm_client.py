@@ -270,12 +270,13 @@ class LLMClientTests(unittest.TestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             payload = json.loads(request.content.decode("utf-8"))
             self.assertEqual(request.url.host, "relay.test")
-            self.assertEqual(request.url.path, "/v1/chat/completions")
+            self.assertEqual(request.url.path, "/v1/responses")
             self.assertEqual(request.headers["Authorization"], "Bearer relay-key")
             self.assertEqual(payload["model"], "gpt-4o-mini")
-            self.assertEqual(payload["response_format"]["type"], "json_schema")
-            self.assertFalse(payload["response_format"]["json_schema"]["schema"]["additionalProperties"])
-            nested_items = payload["response_format"]["json_schema"]["schema"]["properties"]["sections"]["items"]
+            self.assertTrue(payload["stream"])
+            self.assertEqual(payload["text"]["format"]["type"], "json_schema")
+            self.assertFalse(payload["text"]["format"]["schema"]["additionalProperties"])
+            nested_items = payload["text"]["format"]["schema"]["properties"]["sections"]["items"]
             self.assertEqual(
                 nested_items["required"],
                 ["index", "title", "subsections"],
@@ -284,15 +285,16 @@ class LLMClientTests(unittest.TestCase):
                 nested_items["properties"]["subsections"]["items"]["required"],
                 ["index", "title"],
             )
-            return httpx.Response(
-                200,
-                json={
-                    "id": "chatcmpl-openai",
-                    "model": "gpt-4o-mini",
-                    "choices": [{"message": {"role": "assistant", "content": '{"title":"结构化摘要","sections":[{"index":1,"title":"项目概述","subsections":[{"index":1,"title":"背景"}]}]}'}}],
-                    "usage": {"prompt_tokens": 14, "completion_tokens": 5, "total_tokens": 19},
-                },
+            result_text = '{"title":"结构化摘要","sections":[{"index":1,"title":"项目概述","subsections":[{"index":1,"title":"背景"}]}]}'
+            stream_body = (
+                "event: response.created\n"
+                f"data: {json.dumps({'type': 'response.created', 'response': {'id': 'resp-openai', 'model': 'gpt-4o-mini'}}, ensure_ascii=False)}\n\n"
+                "event: response.output_text.delta\n"
+                f"data: {json.dumps({'type': 'response.output_text.delta', 'delta': result_text}, ensure_ascii=False)}\n\n"
+                "event: response.completed\n"
+                f"data: {json.dumps({'type': 'response.completed', 'response': {'id': 'resp-openai', 'model': 'gpt-4o-mini', 'usage': {'input_tokens': 14, 'output_tokens': 5, 'total_tokens': 19}}}, ensure_ascii=False)}\n\n"
             )
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=stream_body)
 
         with patch.dict(
             os.environ,

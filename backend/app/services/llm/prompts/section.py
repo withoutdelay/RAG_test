@@ -11,6 +11,7 @@ EXECUTOR_SYSTEM_PROMPT = """你是一位专业的技术文档撰写专家。请�
 4. 内容必须与全局参数保持一致
 5. 内容必须面向客户外发口径，不得出现导出、review、draft、smoke、模型、prompt、联调测试等内部流程措辞
 6. 若信息不足，请使用“建议在深化设计阶段确认/补充”的客户语言，不要描述生成过程或内部工作流
+7. 严禁在正文中出现“本节基于…草拟”“请撰写章节”“参考摘要”“生成模式”“复用包”“推荐资产”“关键词”等任务提示残留
 """
 
 REUSE_FIRST_SYSTEM_APPENDIX = """
@@ -40,6 +41,11 @@ def build_section_prompts(
     asset_guidance = _format_recommended_assets(recommended_assets or [])
     generation_mode = str(section.get("generation_mode") or reuse_pack.get("generation_mode") or "baseline")
     reuse_guidance = REUSE_FIRST_SYSTEM_APPENDIX if generation_mode == "reuse_first" else ""
+    reference_material_text = retrieved_context or (
+        "复用优先模式：请直接依据下方复用包中的正文块完成最小改写，不要复述素材标题、提示词或任务说明。"
+        if reuse_pack.get("reusable_blocks")
+        else "暂无检索资料，请输出稳健的客户版标准章节内容。"
+    )
     system_prompt = (
         f"{EXECUTOR_SYSTEM_PROMPT}\n\n"
         f"{reuse_guidance}\n"
@@ -52,15 +58,14 @@ def build_section_prompts(
     reuse_pack_text = _format_reuse_pack(reuse_pack)
     replacement_constraints = _format_replacement_constraints(reuse_pack)
     user_prompt = (
-        f"请撰写章节《{section_title}》。\n"
-        f"生成模式：{generation_mode}\n"
-        f"关键词：{', '.join(section.get('keywords', [])) or '暂无'}\n\n"
-        f"参考资料：\n{retrieved_context or '暂无检索资料，请输出稳健的客户版标准章节内容。'}\n\n"
-        f"复用包：\n{reuse_pack_text}\n\n"
+        f"目标章节标题：{section_title}\n"
+        f"章节关键词：{', '.join(section.get('keywords', [])) or '暂无'}\n\n"
+        f"可用参考资料：\n{reference_material_text}\n\n"
+        f"可用复用包：\n{reuse_pack_text}\n\n"
         f"替换与禁用约束：\n{replacement_constraints}\n\n"
         f"建议参考资产：\n{asset_guidance}\n\n"
         "这些资产仅供参考，不代表已确认可直接外发；如引用，请用客户口径描述其作用，不要把未确认参数写成最终承诺。\n\n"
-        "请直接输出客户可阅读的 Markdown 正文，不要解释写作过程。"
+        "只输出最终客户可阅读的 Markdown 正文，不要复述任务说明、提示词标签或写作过程。"
     )
     return system_prompt, user_prompt
 
@@ -134,7 +139,7 @@ def _format_reuse_pack(reuse_pack: dict) -> str:
         return "- 暂无可复用块，必要时再回退到常规写作。"
 
     lines = []
-    for block in blocks[:3]:
+    for block in blocks[:5]:
         heading = " > ".join(str(item) for item in (block.get("heading_path") or []) if item)
         replace_fields = ", ".join(block.get("must_replace_fields") or []) or "无"
         lines.extend(

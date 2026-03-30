@@ -68,6 +68,35 @@ def build_document_profile(
     high_risk_flags: list[str] = []
     reasons: list[str] = []
 
+    if file_format == "doc":
+        high_risk_flags.append("legacy_doc_requires_conversion")
+        reasons.extend(
+            [
+                "legacy_binary_word_document_detected",
+                "convert_doc_to_docx_or_pdf_before_ingestion",
+            ]
+        )
+        return DocumentProfileResult(
+            name="legacy_word_doc",
+            confidence=0.96,
+            reasons=tuple(dict.fromkeys(reasons)),
+            ingestion_recommendation="conversion_required",
+            high_risk_content_flags=tuple(dict.fromkeys(high_risk_flags)),
+            metrics={
+                "markdown_char_count": markdown_char_count,
+                "nonempty_line_count": nonempty_line_count,
+                "table_count": table_count,
+                "image_count": image_count,
+                "table_asset_count": table_asset_count,
+                "large_visual_asset_count": large_visual_asset_count,
+                "math_candidate_count": math_candidate_count,
+                "garbled_formula_count": garbled_formula_count,
+                "figure_keyword_count": figure_keyword_count,
+                "front_matter_noise_count": front_matter_noise_count,
+                "text_density": text_density,
+            },
+        )
+
     if file_format == "pdf" and parser_backend_used != "docling":
         high_risk_flags.append("fallback_parser_used")
         reasons.append("pdf_not_kept_on_docling_path")

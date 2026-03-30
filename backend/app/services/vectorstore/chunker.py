@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import re
 
 from app.services.parsing.formula_candidates import has_garbled_formula_text, is_formula_like_text
+from app.services.vectorstore.block_taxonomy import classify_block_taxonomy
 
 
 FIGURE_KEYWORD_PATTERN = re.compile(
@@ -125,11 +126,19 @@ class Chunker:
             content_risk_level = "medium"
         else:
             content_risk_level = "low"
+        taxonomy = classify_block_taxonomy(
+            content=content,
+            heading_path=heading_path,
+            chunk_type=chunk_type,
+            front_matter=front_matter,
+            needs_asset_lookup=needs_asset_lookup,
+        )
         chunk_metadata = {
             **dict(base_metadata),
             "content_risk_level": content_risk_level,
             "front_matter": front_matter,
             "needs_asset_lookup": needs_asset_lookup,
+            **taxonomy,
         }
         return ChunkPayload(
             chunk_index=chunk_index,

@@ -74,6 +74,17 @@ class DocumentProfileTests(unittest.TestCase):
         self.assertEqual(profile.ingestion_recommendation, "asset_only_review")
         self.assertIn("scanned_content_likely", profile.high_risk_content_flags)
 
+    def test_legacy_doc_profile_requires_conversion(self) -> None:
+        profile = build_document_profile(
+            markdown="# legacy.doc\n\nLegacy DOC binary format is not directly supported.",
+            metadata={"format": "doc", "parser_backend_used": "legacy_doc_placeholder", "table_count": 0, "image_count": 0},
+            assets=[],
+        )
+
+        self.assertEqual(profile.name, "legacy_word_doc")
+        self.assertEqual(profile.ingestion_recommendation, "conversion_required")
+        self.assertIn("legacy_doc_requires_conversion", profile.high_risk_content_flags)
+
 
 if __name__ == "__main__":
     unittest.main()

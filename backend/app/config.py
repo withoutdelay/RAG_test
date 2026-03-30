@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+BACKEND_ROOT = Path(__file__).resolve().parent.parent
+CASE_LIBRARY_ROOT = BACKEND_ROOT / "data" / "case_library"
 
 
 class Settings(BaseSettings):
@@ -19,7 +24,10 @@ class Settings(BaseSettings):
     qdrant_port: int = 6333
     qdrant_location: str | None = None
     qdrant_collection: str = "presale_knowledge"
+    case_library_outline_path: str = str(CASE_LIBRARY_ROOT / "outline_library.json")
+    case_library_block_path: str = str(CASE_LIBRARY_ROOT / "block_library.json")
     parser_backend: Literal["auto", "docling", "fallback"] = "auto"
+    docling_libreoffice_cmd: str | None = None
     safe_ingestion_enabled: bool = True
     formula_ocr_backend: Literal["none", "pix2tex"] = "none"
     formula_ocr_max_assets: int = 3

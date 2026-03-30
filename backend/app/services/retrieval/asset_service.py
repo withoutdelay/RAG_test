@@ -15,6 +15,13 @@ from app.models.project import Project
 from app.models.raw_document import RawDocument
 from app.schemas.retrieval import AssetSearchResponse, AssetSearchResult
 from app.services.v2_errors import ArtifactNotFoundError
+from app.services.vectorstore.block_taxonomy import (
+    classify_block_taxonomy,
+    heading_family_similarity,
+    heading_focus_adjustment,
+    infer_target_taxonomy,
+    related_section_types,
+)
 from app.services.vectorstore.embedder import Embedder
 
 
@@ -48,6 +55,9 @@ class AssetCard:
     asset_uri: str
     preview_text: str
     retrieval_text: str
+    section_type: str
+    equipment_type: str
+    content_form: str
     metadata: dict[str, Any]
 
 
@@ -82,16 +92,34 @@ class AssetRetrievalService:
         query_vector = await self.embedder.embed_text(query)
         section_title = str((section_context or {}).get("section_title") or (section_context or {}).get("title") or "")
         expected_types = [str(item) for item in ((section_context or {}).get("expected_evidence_types") or [])]
+        target_taxonomy = infer_target_taxonomy(section_context or {})
+        anchor_document_names = {
+            str(item)
+            for item in ((section_context or {}).get("anchor_document_names") or [])
+            if str(item).strip()
+        }
+        anchor_headings = [
+            str(item)
+            for item in ((section_context or {}).get("anchor_heading_paths") or [])
+            if str(item).strip()
+        ]
 
         scored_cards: list[tuple[float, AssetCard]] = []
         for card in cards:
             retrieval_vector = await self.embedder.embed_text(card.retrieval_text)
-            semantic_score = _cosine_similarity(query_vector, retrieval_vector)
+            semantic_score = max(0.0, _cosine_similarity(query_vector, retrieval_vector))
             metadata_boost = _keyword_overlap_boost(query, card.retrieval_text)
             section_boost = _keyword_overlap_boost(section_title, f"{card.heading_path or ''} {card.title or ''} {card.caption or ''}")
             type_boost = _expected_type_boost(card.asset_type, expected_types)
+            taxonomy_boost = _asset_taxonomy_boost(card=card, target_taxonomy=target_taxonomy)
+            anchor_boost = _asset_anchor_boost(
+                card=card,
+                anchor_document_names=anchor_document_names,
+                anchor_headings=anchor_headings,
+            )
+            noise_penalty = _asset_noise_penalty(card=card, target_section_type=str(target_taxonomy.get("section_type") or "unknown"))
             risk_penalty = {"high": 0.08, "medium": 0.03}.get(card.risk_level, 0.0)
-            final_score = semantic_score + metadata_boost + section_boost + type_boost - risk_penalty
+            final_score = semantic_score + metadata_boost + section_boost + type_boost + taxonomy_boost + anchor_boost - risk_penalty - noise_penalty
             scored_cards.append((final_score, card))
 
         scored_cards.sort(key=lambda item: item[0], reverse=True)
@@ -212,6 +240,24 @@ def _build_asset_card(
         doc_type=linked_document.doc_type if linked_document else raw_document.doc_type,
         metadata=metadata,
     )
+    taxonomy = classify_block_taxonomy(
+        content=" ".join(
+            item
+            for item in (
+                title,
+                caption,
+                heading_path,
+                context_before,
+                context_after,
+                _normalize_text(metadata.get("source_ref")),
+            )
+            if item
+        ),
+        heading_path=heading_path or title or caption or "",
+        chunk_type="TABLE" if asset_type == "table" else "PLAIN",
+        front_matter=visual_role == "page_furniture",
+        needs_asset_lookup=asset_type == "figure",
+    )
 
     return AssetCard(
         asset_card_id=f"asset:{asset.id}",
@@ -234,11 +280,18 @@ def _build_asset_card(
         asset_uri=asset.asset_uri,
         preview_text=preview_text,
         retrieval_text=retrieval_text,
+        section_type=str(taxonomy.get("section_type") or "unknown"),
+        equipment_type=str(taxonomy.get("equipment_type") or "generic"),
+        content_form=str(taxonomy.get("content_form") or ("figure" if asset_type == "figure" else "parameter_table")),
         metadata=metadata,
     )
 
 
 def _to_result(*, card: AssetCard, score: float, section_title: str) -> AssetSearchResult:
+    metadata = dict(card.metadata or {})
+    metadata.setdefault("section_type", card.section_type)
+    metadata.setdefault("equipment_type", card.equipment_type)
+    metadata.setdefault("content_form", card.content_form)
     return AssetSearchResult(
         asset_card_id=card.asset_card_id,
         asset_id=card.asset_id,
@@ -260,7 +313,7 @@ def _to_result(*, card: AssetCard, score: float, section_title: str) -> AssetSea
         preview_text=card.preview_text,
         reason=_build_reason(card=card, section_title=section_title),
         score=round(score, 4),
-        metadata=card.metadata,
+        metadata=metadata,
     )
 
 
@@ -298,6 +351,62 @@ def _build_retrieval_text(
     if indexing_reasons:
         parts.append("risk_reasons:" + " ".join(str(item) for item in indexing_reasons))
     return "\n".join(part for part in parts if part)
+
+
+def _asset_taxonomy_boost(*, card: AssetCard, target_taxonomy: dict[str, Any]) -> float:
+    target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
+    target_equipment_type = str(target_taxonomy.get("equipment_type") or "generic").lower()
+    score = 0.0
+    if target_section_type != "unknown" and card.section_type == target_section_type:
+        score += 0.22
+    elif card.section_type in related_section_types(target_section_type):
+        score += 0.12
+    elif target_section_type not in {"unknown", "overall_solution"} and card.section_type == "unknown":
+        score -= 0.06
+    if target_equipment_type != "generic" and card.equipment_type == target_equipment_type:
+        score += 0.1
+    elif target_equipment_type != "generic" and card.equipment_type not in {"generic", target_equipment_type}:
+        score -= 0.1
+    heading_adjustment, _ = heading_focus_adjustment(
+        target_section_type=target_section_type,
+        heading_text=" ".join(part for part in (card.heading_path, card.title, card.caption) if part),
+    )
+    score += heading_adjustment
+    return score
+
+
+def _asset_anchor_boost(
+    *,
+    card: AssetCard,
+    anchor_document_names: set[str],
+    anchor_headings: list[str],
+) -> float:
+    score = 0.0
+    if anchor_document_names and (card.document_name or "") in anchor_document_names:
+        score += 0.18
+    if anchor_headings and card.heading_path:
+        heading_bonus = max(
+            (heading_family_similarity(anchor_heading, card.heading_path) for anchor_heading in anchor_headings),
+            default=0.0,
+        )
+        score += heading_bonus
+        if any(card.heading_path == anchor_heading for anchor_heading in anchor_headings):
+            score += 0.14
+    return score
+
+
+def _asset_noise_penalty(*, card: AssetCard, target_section_type: str) -> float:
+    text = " ".join(part for part in (card.heading_path, card.title, card.caption, card.preview_text) if part).casefold()
+    penalty = 0.0
+    if card.visual_role == "page_furniture":
+        penalty += 0.32
+    if any(token in text for token in ("检测报告", "检验", "认证", "证书", "质量保证", "文档控制", "公司简介")):
+        penalty += 0.22
+    if target_section_type in {"main_circuit_scheme", "overall_solution", "communication_interface"} and any(
+        token in text for token in ("检测报告", "认证", "证书")
+    ):
+        penalty += 0.18
+    return penalty
 
 
 def _build_preview_text(

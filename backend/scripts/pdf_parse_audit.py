@@ -12,8 +12,8 @@ from app.services.parsing.pdf_audit import build_pdf_audit_report, render_pdf_au
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Audit PDF parsing quality based on extracted markdown.")
-    parser.add_argument("paths", nargs="+", help="PDF file paths or directories containing PDFs.")
+    parser = argparse.ArgumentParser(description="Audit document parsing quality based on extracted markdown.")
+    parser.add_argument("paths", nargs="+", help="Document file paths or directories containing supported files.")
     parser.add_argument(
         "--output-dir",
         default="data/pdf_audits",
@@ -94,14 +94,16 @@ async def audit_pdf(
 
 
 def iter_pdf_paths(raw_paths: Iterable[str]) -> list[Path]:
+    allowed_suffixes = {".pdf", ".doc", ".docx"}
     resolved: list[Path] = []
     for raw_path in raw_paths:
         path = Path(raw_path).expanduser()
         if path.is_dir():
-            resolved.extend(sorted(item for item in path.rglob("*.pdf") if item.is_file()))
+            for suffix in ("*.pdf", "*.PDF", "*.doc", "*.DOC", "*.docx", "*.DOCX"):
+                resolved.extend(sorted(item for item in path.rglob(suffix) if item.is_file()))
             continue
-        if path.suffix.lower() != ".pdf":
-            raise SystemExit(f"Only PDF files are supported for this audit: {raw_path}")
+        if path.suffix.lower() not in allowed_suffixes:
+            raise SystemExit(f"Only PDF/DOC/DOCX files are supported for this audit: {raw_path}")
         resolved.append(path)
     unique: list[Path] = []
     seen: set[Path] = set()
@@ -112,7 +114,7 @@ def iter_pdf_paths(raw_paths: Iterable[str]) -> list[Path]:
         seen.add(normalized)
         unique.append(normalized)
     if not unique:
-        raise SystemExit("No PDF files were found.")
+        raise SystemExit("No supported document files were found.")
     return unique
 
 
@@ -120,26 +122,41 @@ async def main() -> None:
     args = parse_args()
     pdf_paths = iter_pdf_paths(args.paths)
     output_dir = Path(args.output_dir)
+    failures: list[dict[str, str]] = []
 
-    print(f"Auditing {len(pdf_paths)} PDF file(s) with ParserService...")
+    print(f"Auditing {len(pdf_paths)} document file(s) with ParserService...")
     for path in pdf_paths:
-        result = await audit_pdf(
-            path,
-            output_dir=output_dir,
-            max_previews=args.max_previews,
-            formula_ocr_backend=args.formula_ocr_backend,
-            formula_ocr_max_assets=args.formula_ocr_max_assets,
-            formula_ocr_max_regions_per_asset=args.formula_ocr_max_regions_per_asset,
-        )
+        try:
+            result = await audit_pdf(
+                path,
+                output_dir=output_dir,
+                max_previews=args.max_previews,
+                formula_ocr_backend=args.formula_ocr_backend,
+                formula_ocr_max_assets=args.formula_ocr_max_assets,
+                formula_ocr_max_regions_per_asset=args.formula_ocr_max_regions_per_asset,
+            )
+            print("")
+            print(f"Document: {result['file']}")
+            print(f"  parser backend: {result['backend']}")
+            print(f"  markdown chars: {result['markdown_chars']}")
+            print(f"  tables/images: {result['tables']}/{result['images']}")
+            print(f"  findings: {result['findings']}")
+            print(f"  formula ocr attempts/successes: {result['formula_ocr_attempts']}/{result['formula_ocr_successes']}")
+            print(f"  markdown report: {result['markdown_report']}")
+            print(f"  json report: {result['json_report']}")
+        except Exception as exc:
+            failures.append({"file": str(path.resolve()), "error": f"{type(exc).__name__}: {exc}"})
+            print("")
+            print(f"Document: {path.resolve()}")
+            print(f"  ERROR: {type(exc).__name__}: {exc}")
+
+    if failures:
         print("")
-        print(f"PDF: {result['file']}")
-        print(f"  parser backend: {result['backend']}")
-        print(f"  markdown chars: {result['markdown_chars']}")
-        print(f"  tables/images: {result['tables']}/{result['images']}")
-        print(f"  findings: {result['findings']}")
-        print(f"  formula ocr attempts/successes: {result['formula_ocr_attempts']}/{result['formula_ocr_successes']}")
-        print(f"  markdown report: {result['markdown_report']}")
-        print(f"  json report: {result['json_report']}")
+        print(f"Completed with {len(failures)} failure(s):")
+        for item in failures:
+            print(f"  - {item['file']}")
+            print(f"    {item['error']}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

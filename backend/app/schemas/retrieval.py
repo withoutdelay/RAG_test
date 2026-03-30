@@ -11,6 +11,7 @@ class RetrievalFilters(BaseModel):
     year_gte: int | None = None
     chunk_type: list[str] | None = None
     doc_type: str | None = None
+    document_names: list[str] | None = None
 
 
 class RetrievalSearchRequest(BaseModel):
