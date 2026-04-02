@@ -3,9 +3,11 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api.router import api_router
+from app.config import get_settings
 from app.db import get_engine
 
 
@@ -17,6 +19,18 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Presale Copilot Backend", version="0.1.0", lifespan=lifespan)
+settings = get_settings()
+if settings.app_env.lower() == "development":
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 app.include_router(api_router, prefix="/api/v1")
 
 

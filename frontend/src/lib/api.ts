@@ -1,10 +1,29 @@
 import axios from 'axios';
 
+const rawBaseURL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000/api/v1';
+
+function resolveApiBaseURL(): string {
+  if (typeof window === 'undefined') {
+    return rawBaseURL;
+  }
+
+  try {
+    const url = new URL(rawBaseURL);
+    const currentHost = window.location.hostname;
+    const isLocalPair = ['localhost', '127.0.0.1'].includes(url.hostname) && ['localhost', '127.0.0.1'].includes(currentHost);
+
+    if (isLocalPair && url.hostname !== currentHost) {
+      url.hostname = currentHost;
+    }
+
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return rawBaseURL;
+  }
+}
+
 const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api/v1',
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  baseURL: resolveApiBaseURL(),
 });
 
 api.interceptors.response.use(
@@ -17,10 +36,7 @@ api.interceptors.response.use(
     }
     return response.data;
   },
-  (error) => {
-    console.error('API Error:', error);
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
 export function getApiErrorMessage(error: unknown, fallback = 'API Error'): string {

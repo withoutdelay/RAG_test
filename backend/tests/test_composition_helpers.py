@@ -10,6 +10,7 @@ from app.services.composition.section_service import (
     _filter_reuse_blocks_for_assembly,
     _build_asset_search_context,
     _normalize_technical_spacing,
+    _select_section_scope_candidates,
     build_extractive_reuse_section_content,
     build_manual_only_section_content,
     build_reuse_pack,
@@ -21,12 +22,16 @@ from app.services.composition.section_service import (
     build_section_global_params,
     ensure_required_asset_placeholders,
     filter_recommended_assets_for_section,
+    polish_extractive_reuse_section_content,
+    prioritize_reusable_blocks_for_citations,
     prioritize_recommended_assets,
+    resolve_reuse_refinement_content,
     sanitize_generated_section_content,
     select_preferred_reuse_content,
     should_use_extractive_reuse,
     tighten_recommended_assets_for_reuse,
 )
+from app.services.llm.prompts.rewrite import build_rewrite_prompts
 from app.services.llm.prompts.section import build_section_prompts
 from app.services.vectorstore.block_taxonomy import infer_target_taxonomy
 
@@ -137,6 +142,41 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("历史方案A", context)
         self.assertEqual(len(citations), 1)
         self.assertEqual(citations[0]["evidence_id"], "ev_001")
+
+    def test_build_section_context_prioritizes_preferred_citation(self) -> None:
+        bundle = SimpleNamespace(
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_001",
+                        "type": "section",
+                        "source_doc_id": "doc_1",
+                        "source_title": "历史方案A",
+                        "heading_path": ["第3章", "标准说明"],
+                        "summary": "标准说明",
+                        "relevance_score": 0.95,
+                    },
+                    {
+                        "evidence_id": "ev_002",
+                        "type": "section",
+                        "source_doc_id": "doc_2",
+                        "source_title": "历史方案B",
+                        "heading_path": ["第4章", "主回路方案"],
+                        "summary": "主回路说明",
+                        "relevance_score": 0.72,
+                    },
+                ]
+            }
+        )
+
+        _, citations = build_section_context(
+            section={"title": "技术架构", "expected_evidence_types": ["section"]},
+            evidence_bundle=bundle,
+            preferred_evidence_ids={"ev_002"},
+        )
+
+        self.assertEqual(citations[0]["evidence_id"], "ev_002")
+        self.assertEqual(citations[0]["excerpt"], "主回路说明")
 
     def test_build_outline_inputs_includes_case_examples_and_raw_content(self) -> None:
         requirement_card = SimpleNamespace(
@@ -330,6 +370,20 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("IEC 61850", query)
         self.assertIn("湛江中纸项目", query)
 
+    def test_build_rewrite_prompts_enforces_structure_preservation(self) -> None:
+        system_prompt, user_prompt = build_rewrite_prompts(
+            section_context="章节标题: 主回路系统方案\n当前关键参数: project_name=测试项目",
+            selected_text="## 主回路系统方案\n\n### 关键技术参数\n\n| 参数 | 数值 |\n| --- | --- |\n| 电压 | 10kV |",
+            user_instruction="统一措辞并替换旧项目名称",
+            global_params={"project_name": "测试项目"},
+        )
+
+        self.assertIn("不低于原稿的 80%", system_prompt)
+        self.assertIn("字段标签仅供理解", system_prompt)
+        self.assertIn("<section_context>", user_prompt)
+        self.assertIn("<draft_markdown>", user_prompt)
+        self.assertIn("不要附加解释", user_prompt)
+
     def test_build_reusable_blocks_prefers_raw_content_and_replace_fields(self) -> None:
         bundle = SimpleNamespace(
             content={
@@ -382,6 +436,44 @@ class CompositionHelperTests(unittest.TestCase):
         )
 
         self.assertEqual(len(prioritized), 1)
+
+    def test_prioritize_reusable_blocks_for_citations_prefers_matching_block(self) -> None:
+        prioritized = prioritize_reusable_blocks_for_citations(
+            [
+                {
+                    "block_id": "case:sample-a:17",
+                    "source_doc_id": "sample-a",
+                    "source_title": "历史方案A",
+                    "heading_path": ["5. 接口"],
+                },
+                {
+                    "block_id": "case:sample-b:9",
+                    "source_doc_id": "sample-b",
+                    "source_title": "历史方案B",
+                    "heading_path": ["2. 主回路"],
+                },
+            ],
+            preferred_citation_ids=["case:sample-b:9"],
+        )
+
+        self.assertEqual(prioritized[0]["block_id"], "case:sample-b:9")
+
+    def test_build_reuse_citations_include_excerpt(self) -> None:
+        citations = build_reuse_citations(
+            [
+                {
+                    "block_id": "case:sample-a:17",
+                    "source_doc_id": "sample-a",
+                    "source_title": "历史方案A",
+                    "heading_path": ["5. 接口"],
+                    "selection_score": 0.91,
+                    "block_type": "section",
+                    "content_md": "## 5. 接口\n\n变频器向 DCS 提供状态量、报警量和运行反馈。",
+                }
+            ]
+        )
+
+        self.assertIn("变频器向 DCS 提供状态量", citations[0]["excerpt"])
 
     def test_filter_reuse_blocks_for_supply_scope_skips_process_narrative_support(self) -> None:
         reusable_blocks = [
@@ -470,6 +562,61 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(blocks[0]["source_title"], "历史方案接口章节")
         self.assertIn("section_type_match", blocks[0]["selection_reasons"])
         self.assertIn("通讯接口", blocks[0]["content_md"])
+
+    def test_select_section_scope_candidates_prefers_specific_paths_over_root_prefix(self) -> None:
+        selected = _select_section_scope_candidates(
+            [
+                {
+                    "section_id": "3",
+                    "section_path": "第三章 系统及方案介绍",
+                    "level": 1,
+                    "score": 0.54,
+                },
+                {
+                    "section_id": "3.2",
+                    "section_path": "第三章 系统及方案介绍 > 二、系统方案",
+                    "level": 2,
+                    "score": 0.58,
+                },
+                {
+                    "section_id": "3.2.4",
+                    "section_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.4控制信号接口说明",
+                    "level": 3,
+                    "score": 0.66,
+                },
+            ]
+        )
+
+        self.assertEqual([item["section_id"] for item in selected], ["3.2.4"])
+
+    def test_select_section_scope_candidates_keeps_broad_anchor_when_title_match_is_strong(self) -> None:
+        selected = _select_section_scope_candidates(
+            [
+                {
+                    "section_id": "3",
+                    "section_path": "第三章 系统及方案介绍",
+                    "level": 1,
+                    "score": 0.52,
+                    "reason": "normalized_section_title_match",
+                },
+                {
+                    "section_id": "3.2",
+                    "section_path": "第三章 系统及方案介绍 > 二、系统方案",
+                    "level": 2,
+                    "score": 0.58,
+                    "reason": "section_path_title_match",
+                },
+                {
+                    "section_id": "3.2.4",
+                    "section_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.4控制信号接口说明",
+                    "level": 3,
+                    "score": 0.66,
+                    "reason": "section_path_title_match; detail_overlap=接口",
+                },
+            ]
+        )
+
+        self.assertEqual([item["section_id"] for item in selected], ["3.2", "3.2.4"])
 
     def test_build_reusable_blocks_reranks_by_section_match(self) -> None:
         bundle = SimpleNamespace(
@@ -881,6 +1028,24 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("移相整流变压器", content)
         self.assertIn("旁路切换时", content)
 
+    def test_polish_extractive_reuse_section_content_adds_opening_and_table_lead(self) -> None:
+        polished = polish_extractive_reuse_section_content(
+            section={
+                "title": "主回路系统方案",
+                "section_class": "architecture",
+                "generation_mode": "reuse_first",
+                "keywords": ["主回路", "旁路"],
+            },
+            content_md=(
+                "## 主回路系统方案\n\n"
+                "### 设备选型与容量配置\n\n"
+                "| 项目 | 配置 |\n| --- | --- |\n| 整流变压器 | 1套 |\n"
+            ),
+        )
+
+        self.assertIn("本项目主回路按照安全隔离、旁路切换和连续运行要求进行配置", polished)
+        self.assertIn("主要设备配置如下表所示。", polished)
+
     def test_build_extractive_reuse_section_content_simplifies_supply_scope_output(self) -> None:
         content = build_extractive_reuse_section_content(
             section={
@@ -1007,6 +1172,26 @@ class CompositionHelperTests(unittest.TestCase):
 
         self.assertIn("移相整流变压器", preferred)
         self.assertNotIn("章节标题:", preferred)
+
+    def test_resolve_reuse_refinement_content_returns_fallback_reason(self) -> None:
+        content, status, fallback_reason = resolve_reuse_refinement_content(
+            assembled_content=(
+                "## 主回路系统方案\n\n"
+                "高压变频器主回路采用移相整流变压器配合功率单元串联结构，"
+                "输入侧设置隔离开关和快速熔断器。\n"
+            ),
+            rewritten_content=(
+                "## 主回路系统方案\n\n"
+                "章节标题: 主回路系统方案\n"
+                "当前关键参数: project_name=测试项目\n"
+                "已根据要求完成重写。\n"
+            ),
+            section_title="主回路系统方案",
+        )
+
+        self.assertEqual(status, "fallback_assembled")
+        self.assertEqual(fallback_reason, "rewrite_leakage")
+        self.assertIn("移相整流变压器", content)
 
     def test_build_reuse_refinement_instruction_mentions_density_and_placeholders(self) -> None:
         instruction = build_reuse_refinement_instruction(

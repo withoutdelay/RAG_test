@@ -10,7 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Progress } from '@/components/ui/progress';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import api, { getApiErrorMessage, isNotFoundError } from '@/lib/api';
-import { EvidenceBundle } from '@/lib/types';
+import { CaseCandidate, EvidenceBundle } from '@/lib/types';
 import { toast } from 'sonner';
 
 export default function EvidencePage() {
@@ -27,7 +27,6 @@ export default function EvidencePage() {
       setBundle(res.data as EvidenceBundle);
     } catch (error: unknown) {
       if (!isNotFoundError(error)) {
-        console.error(error);
         toast.error(getApiErrorMessage(error, 'Failed to load evidence bundle'));
       }
       setBundle(null);
@@ -49,7 +48,10 @@ export default function EvidencePage() {
       toast.success('Evidence retrieval completed');
       await fetchEvidenceBundle();
     } catch (error: unknown) {
-      console.error(error);
+      if (isNotFoundError(error)) {
+        toast.error('Retrieve Evidence requires a ready Requirement Card');
+        return;
+      }
       toast.error(getApiErrorMessage(error, 'Error retrieving evidence'));
     } finally {
       setRetrieving(false);
@@ -57,7 +59,9 @@ export default function EvidencePage() {
   };
 
   const evidenceItems = useMemo(() => bundle?.content?.results ?? [], [bundle]);
+  const caseCandidates = useMemo<CaseCandidate[]>(() => bundle?.content?.case_candidates ?? [], [bundle]);
   const queryText = bundle?.content?.query ?? 'Auto-generated context from requirements';
+  const retrievalStrategy = bundle?.content?.retrieval_strategy ?? 'unknown';
 
   return (
     <div className="p-6 space-y-6">
@@ -118,9 +122,44 @@ export default function EvidencePage() {
                     <span className="text-muted-foreground">Results Found</span>
                     <Badge variant="secondary">{evidenceItems.length}</Badge>
                   </div>
+                  <div className="pt-2 border-t flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">Matched Samples</span>
+                    <Badge variant="secondary">{caseCandidates.length}</Badge>
+                  </div>
+                  <div className="pt-2 border-t flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">Strategy</span>
+                    <Badge variant="outline">{retrievalStrategy}</Badge>
+                  </div>
                 </div>
               </CardContent>
             </Card>
+
+            {caseCandidates.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-lg">Matched Sample Files</CardTitle>
+                  <CardDescription>Case-library matches selected before vector retrieval</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {caseCandidates.map((candidate) => (
+                    <div key={candidate.sample_id} className="rounded-md border p-3 text-sm">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="font-medium leading-snug">{candidate.file_name}</div>
+                        <Badge variant="outline">{(candidate.score * 100).toFixed(0)}%</Badge>
+                      </div>
+                      {candidate.reason && (
+                        <p className="mt-2 text-xs text-muted-foreground">{candidate.reason}</p>
+                      )}
+                      {candidate.top_level_titles && candidate.top_level_titles.length > 0 && (
+                        <p className="mt-2 text-xs text-muted-foreground line-clamp-3">
+                          {candidate.top_level_titles.slice(0, 4).join(' / ')}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
           </div>
 
           <div className="lg:col-span-3">
@@ -163,7 +202,9 @@ export default function EvidencePage() {
                 </Accordion>
                 {evidenceItems.length === 0 && (
                   <div className="text-center py-10 text-muted-foreground">
-                    No relevant historical data found.
+                    {caseCandidates.length > 0
+                      ? 'Matched sample files were found, but no reusable section blocks passed the current vector retrieval filters.'
+                      : 'No relevant historical data found.'}
                   </div>
                 )}
               </ScrollArea>

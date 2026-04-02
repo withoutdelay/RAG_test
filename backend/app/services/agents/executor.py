@@ -64,7 +64,7 @@ class ExecutorAgent:
                 session_id=task_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=1200,
+                max_tokens=1600,
                 metadata={
                     "section_context": section_context,
                     "selected_text": selected_text,

@@ -16,6 +16,7 @@ from app.models.requirement_card import RequirementCard
 from app.schemas.retrieval import RetrievalFilters, RetrievalSearchRequest
 from app.services.retrieval.case_service import CaseLibraryService
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
+from app.services.vectorstore.chunk_quality import flatten_heading_text, is_noise_chunk
 from app.services.vectorstore.retriever import Retriever
 
 
@@ -43,11 +44,105 @@ def _compute_reusability_score(result: dict[str, Any]) -> float:
     if metadata.get("needs_asset_lookup"):
         score *= 0.85
     return round(min(max(score, 0.0), 1.0), 4)
+def _is_noise_evidence_result(result: dict[str, Any]) -> bool:
+    raw_content = str(result.get("content") or "").strip()
+    if not raw_content:
+        return True
+    heading_text = flatten_heading_text(result.get("heading_path"))
+    chunk_type = str(result.get("chunk_type") or "PLAIN").upper()
+    return is_noise_chunk(
+        chunk_type=chunk_type,
+        raw_content=raw_content,
+        heading_path=heading_text,
+    )
+
+
+def filter_evidence_results(results: list[dict[str, Any]], *, limit: int | None = None) -> list[dict[str, Any]]:
+    filtered = [item for item in results if not _is_noise_evidence_result(item)]
+    if limit is not None:
+        return filtered[:limit]
+    return filtered
+
+
+def build_evidence_search_plan(
+    *,
+    project_id: UUID,
+    industry: str | None,
+    doc_type: str,
+    chunk_types: list[str],
+    scoped_document_names: list[str],
+) -> list[tuple[str, UUID | None, RetrievalFilters]]:
+    search_project_id = None if doc_type == "historical_proposal" else project_id
+    normalized_industry = str(industry).strip() or None if industry is not None else None
+    normalized_document_names = [name for name in scoped_document_names if name]
+
+    attempts: list[tuple[str, UUID | None, RetrievalFilters]] = []
+    if normalized_document_names:
+        attempts.append(
+            (
+                "case_first",
+                search_project_id,
+                RetrievalFilters(
+                    industry=normalized_industry,
+                    doc_type=doc_type,
+                    chunk_type=chunk_types,
+                    document_names=normalized_document_names,
+                ),
+            )
+        )
+        if normalized_industry:
+            attempts.append(
+                (
+                    "case_first_relaxed_industry",
+                    search_project_id,
+                    RetrievalFilters(
+                        doc_type=doc_type,
+                        chunk_type=chunk_types,
+                        document_names=normalized_document_names,
+                    ),
+                )
+            )
+        attempts.append(
+            (
+                "case_first_fallback_global",
+                search_project_id,
+                RetrievalFilters(
+                    doc_type=doc_type,
+                    chunk_type=chunk_types,
+                ),
+            )
+        )
+        return attempts
+
+    attempts.append(
+        (
+            "global_fallback",
+            search_project_id,
+            RetrievalFilters(
+                industry=normalized_industry,
+                doc_type=doc_type,
+                chunk_type=chunk_types,
+            ),
+        )
+    )
+    if normalized_industry:
+        attempts.append(
+            (
+                "global_fallback_relaxed_industry",
+                search_project_id,
+                RetrievalFilters(
+                    doc_type=doc_type,
+                    chunk_type=chunk_types,
+                ),
+            )
+        )
+    return attempts
 
 
 def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for index, result in enumerate(results, start=1):
+    filtered_results = filter_evidence_results(results)
+    for index, result in enumerate(filtered_results, start=1):
         heading_path = result.get("heading_path")
         if heading_path:
             path_segments = [segment.strip() for segment in str(heading_path).split(">") if segment.strip()]
@@ -129,44 +224,38 @@ class EvidenceBundleService:
         await session.flush()
 
         query = build_requirement_query(card.content or {})
+        resolved_doc_type = doc_type or "historical_proposal"
+        chunk_types = ["PLAIN", "TABLE", "IMAGE"]
         case_candidates = self.case_library.retrieve_cases(query=query, top_k=min(top_k, 3), library_tracks={"pilot_main"})
         scoped_document_names = [str(item.get("file_name") or "").strip() for item in case_candidates if str(item.get("file_name") or "").strip()]
-        filters = RetrievalFilters(
+        search_plan = build_evidence_search_plan(
+            project_id=project_id,
             industry=card.content.get("industry"),
-            doc_type=doc_type or "historical_proposal",
-            chunk_type=["PLAIN", "TABLE", "IMAGE"],
-            document_names=scoped_document_names or None,
+            doc_type=resolved_doc_type,
+            chunk_types=chunk_types,
+            scoped_document_names=scoped_document_names,
         )
-        response = await self.retriever.search(
-            session=session,
-            request=RetrievalSearchRequest(
-                query=query,
-                project_id=project_id,
-                top_k=top_k,
-                filters=filters,
-                search_mode="hybrid",
-            ),
-        )
-        results = [item.model_dump(mode="json") for item in response.results]
-        retrieval_strategy = "case_first" if scoped_document_names else "global_fallback"
-        if not results and scoped_document_names:
-            fallback_filters = RetrievalFilters(
-                industry=card.content.get("industry"),
-                doc_type=doc_type or "historical_proposal",
-                chunk_type=["PLAIN", "TABLE", "IMAGE"],
-            )
+        retrieval_strategy = search_plan[0][0]
+        active_filters = search_plan[0][2]
+        results: list[dict[str, Any]] = []
+
+        for strategy_name, search_project_id, filters in search_plan:
             response = await self.retriever.search(
                 session=session,
                 request=RetrievalSearchRequest(
                     query=query,
-                    project_id=project_id,
-                    top_k=top_k,
-                    filters=fallback_filters,
+                    project_id=search_project_id,
+                    top_k=max(top_k * 3, top_k + 4),
+                    filters=filters,
                     search_mode="hybrid",
                 ),
             )
-            results = [item.model_dump(mode="json") for item in response.results]
-            retrieval_strategy = "case_first_fallback_global"
+            raw_results = [item.model_dump(mode="json") for item in response.results]
+            results = filter_evidence_results(raw_results, limit=top_k)
+            retrieval_strategy = strategy_name
+            active_filters = filters
+            if results:
+                break
         evidence_items = build_evidence_items(results)
         quality_score = self._compute_quality_score(results)
         retrieval_version = await self._next_version(session=session, project_id=project_id)
@@ -177,7 +266,7 @@ class EvidenceBundleService:
             retrieval_version=retrieval_version,
             content={
                 "query": query,
-                "filters": filters.model_dump(exclude_none=True),
+                "filters": active_filters.model_dump(exclude_none=True),
                 "retrieval_strategy": retrieval_strategy,
                 "case_candidates": case_candidates,
                 "results": evidence_items,

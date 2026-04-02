@@ -6,7 +6,7 @@ import re
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Document
@@ -75,6 +75,7 @@ class AssetRetrievalService:
         asset_types: list[str] | None = None,
         doc_types: list[str] | None = None,
         section_context: dict[str, Any] | None = None,
+        include_global_historical: bool = False,
     ) -> AssetSearchResponse:
         project = await session.get(Project, project_id)
         if not project:
@@ -85,6 +86,8 @@ class AssetRetrievalService:
             project_id=project_id,
             asset_types=asset_types,
             doc_types=doc_types,
+            anchor_document_names=(section_context or {}).get("anchor_document_names"),
+            include_global_historical=include_global_historical,
         )
         if not cards:
             return AssetSearchResponse(results=[], total=0)
@@ -136,12 +139,17 @@ class AssetRetrievalService:
         project_id: UUID,
         asset_types: list[str] | None,
         doc_types: list[str] | None,
+        anchor_document_names: list[str] | None,
+        include_global_historical: bool,
     ) -> list[AssetCard]:
+        scope_filters = [RawDocument.project_id == project_id]
+        if include_global_historical:
+            scope_filters.append(RawDocument.corpus_scope == "global")
         rows = (
             await session.execute(
                 select(FigureAsset, RawDocument)
                 .join(RawDocument, FigureAsset.raw_document_id == RawDocument.id)
-                .where(RawDocument.project_id == project_id)
+                .where(or_(*scope_filters))
                 .order_by(FigureAsset.created_at.asc())
             )
         ).all()
@@ -167,16 +175,23 @@ class AssetRetrievalService:
 
         normalized_doc_types = {str(item) for item in (doc_types or []) if item}
         normalized_asset_types = {str(item) for item in (asset_types or []) if item}
+        normalized_anchor_document_names = {str(item).strip() for item in (anchor_document_names or []) if str(item).strip()}
 
         cards: list[AssetCard] = []
+        fallback_cards: list[AssetCard] = []
         for asset, raw_document in rows:
             card = _build_asset_card(asset=asset, raw_document=raw_document, document_map=document_map)
             if normalized_doc_types and (card.doc_type or "") not in normalized_doc_types:
                 continue
             if normalized_asset_types and card.asset_type not in normalized_asset_types:
                 continue
+            if normalized_anchor_document_names and (card.document_name or "") not in normalized_anchor_document_names:
+                fallback_cards.append(card)
+                continue
             cards.append(card)
-        return cards
+        if cards:
+            return cards
+        return fallback_cards
 
 
 def _build_asset_card(

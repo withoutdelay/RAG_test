@@ -4,6 +4,10 @@
 > 适用范围：面向售前方案生成主链路，不替代现有 `PDF -> 清洗 -> 资产保留 -> 安全入库 -> 审计` 数据底座。  
 > 结论：对于“客户历史方案 80% 可复用”的场景，主路线应从“摘要后生成”切换为“检索可复用块 -> 受控改写 -> 组装成稿”。
 
+补充说明：
+
+- 章节结构抽取与“标题优先”的章节检索，已单独整理为 [section_truth_and_heading_retrieval_plan.md](/Volumes/thunder/code/RAG_test/section_truth_and_heading_retrieval_plan.md)。这部分属于 `reuse-first` 后续必须补齐的上游能力，不应继续靠 prompt 微调替代。
+
 ---
 
 ## 1. 背景与决策

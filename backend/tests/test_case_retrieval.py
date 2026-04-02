@@ -94,7 +94,7 @@ class CaseRetrievalTests(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["sample_id"], "case-a")
-        self.assertIn("section_title_match", results[0]["reason"])
+        self.assertIn("normalized_section_title_match", results[0]["reason"])
         self.assertIn("equipment_type_match", results[0]["reason"])
 
     def test_build_outline_examples_compacts_top_level_titles(self) -> None:
@@ -231,6 +231,88 @@ class CaseRetrievalTests(unittest.TestCase):
         self.assertEqual(results[0]["heading_path"], "2.2 高压变频器主回路方案说明")
         self.assertIn("heading_noise_penalty", results[1]["reason"])
 
+    def test_retrieve_sections_penalizes_inline_state_and_generic_summary_headings(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[
+                {
+                    "sample_id": "case-a",
+                    "file_name": "环冷风机方案.docx",
+                    "library_track": "pilot_main",
+                    "section_catalog": [
+                        {
+                            "section_id": "1",
+                            "title": "第三章 系统及方案介绍",
+                            "source_heading": "第三章 系统及方案介绍",
+                            "normalized_heading": "系统及方案介绍",
+                            "heading_aliases": ["系统及方案介绍"],
+                            "level": 1,
+                            "section_path": "第三章 系统及方案介绍",
+                            "heading_path": "第三章 系统及方案介绍",
+                            "normalized_section_path": "系统及方案介绍",
+                            "source_signals": ["toc", "parser_heading"],
+                            "children": [
+                                {
+                                    "section_id": "1.1",
+                                    "title": "二、系统方案",
+                                    "source_heading": "二、系统方案",
+                                    "normalized_heading": "系统方案",
+                                    "heading_aliases": ["系统方案"],
+                                    "level": 2,
+                                    "section_path": "第三章 系统及方案介绍 > 二、系统方案",
+                                    "heading_path": "第三章 系统及方案介绍 > 二、系统方案",
+                                    "normalized_section_path": "系统及方案介绍 > 系统方案",
+                                    "source_signals": ["toc", "parser_heading"],
+                                    "children": [],
+                                },
+                                {
+                                    "section_id": "1.2",
+                                    "title": "方案综述",
+                                    "source_heading": "方案综述",
+                                    "normalized_heading": "方案综述",
+                                    "heading_aliases": ["方案综述"],
+                                    "level": 2,
+                                    "section_path": "第三章 系统及方案介绍 > 方案综述",
+                                    "heading_path": "第三章 系统及方案介绍 > 方案综述",
+                                    "normalized_section_path": "系统及方案介绍 > 方案综述",
+                                    "source_signals": ["markdown_heading"],
+                                    "children": [],
+                                },
+                                {
+                                    "section_id": "1.3",
+                                    "title": "1#环冷风机在工频运行时：",
+                                    "source_heading": "1#环冷风机在工频运行时：",
+                                    "normalized_heading": "1#环冷风机在工频运行时",
+                                    "heading_aliases": ["1#环冷风机在工频运行时"],
+                                    "level": 2,
+                                    "section_path": "第三章 系统及方案介绍 > 1#环冷风机在工频运行时：",
+                                    "heading_path": "第三章 系统及方案介绍 > 1#环冷风机在工频运行时：",
+                                    "normalized_section_path": "系统及方案介绍 > 1#环冷风机在工频运行时",
+                                    "source_signals": ["markdown_heading"],
+                                    "children": [],
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+            block_entries=[],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_sections(
+                query="系统总体架构 模块划分 接口关系 冷风机",
+                top_k=3,
+                sample_ids={"case-a"},
+                section_title="系统及方案介绍",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(results[0]["heading_path"], "第三章 系统及方案介绍 > 二、系统方案")
+        generic_summary = next(item for item in results if item["heading_path"].endswith("方案综述"))
+        self.assertIn("generic_summary_heading_penalty", generic_summary["reason"])
+        self.assertFalse(any("工频运行时" in item["heading_path"] for item in results))
+
     def test_retrieve_blocks_prefers_interface_heading_over_performance_requirements(self) -> None:
         outline_path, block_path, temp_dir = self._write_library(
             outline_entries=[],
@@ -279,6 +361,192 @@ class CaseRetrievalTests(unittest.TestCase):
         self.assertEqual(results[0]["heading_path"], "2.4 控制信号接口说明")
         self.assertIn("interface_heading_bonus", results[0]["reason"])
         self.assertNotEqual(results[-1]["heading_path"], "4. 变频器性能要求")
+
+    def test_retrieve_sections_prefers_specific_subsection_when_detail_intent_is_present(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[
+                {
+                    "sample_id": "case-a",
+                    "file_name": "环冷风机方案.docx",
+                    "library_track": "pilot_main",
+                    "section_catalog": [
+                        {
+                            "section_id": "3",
+                            "title": "第三章 系统及方案介绍",
+                            "source_heading": "第三章 系统及方案介绍",
+                            "normalized_heading": "系统及方案介绍",
+                            "heading_aliases": ["系统及方案介绍"],
+                            "level": 1,
+                            "section_path": "第三章 系统及方案介绍",
+                            "heading_path": "第三章 系统及方案介绍",
+                            "normalized_section_path": "系统及方案介绍",
+                            "source_signals": ["toc", "parser_heading"],
+                            "children": [
+                                {
+                                    "section_id": "3.2",
+                                    "title": "二、系统方案",
+                                    "source_heading": "二、系统方案",
+                                    "normalized_heading": "系统方案",
+                                    "heading_aliases": ["系统方案"],
+                                    "level": 2,
+                                    "section_path": "第三章 系统及方案介绍 > 二、系统方案",
+                                    "heading_path": "第三章 系统及方案介绍 > 二、系统方案",
+                                    "normalized_section_path": "系统及方案介绍 > 系统方案",
+                                    "source_signals": ["toc", "parser_heading"],
+                                    "children": [],
+                                },
+                                {
+                                    "section_id": "3.2.4",
+                                    "title": "2.4 控制信号接口说明",
+                                    "source_heading": "2.4 控制信号接口说明",
+                                    "normalized_heading": "控制信号接口说明",
+                                    "heading_aliases": ["控制信号接口说明", "接口说明"],
+                                    "level": 3,
+                                    "section_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.4 控制信号接口说明",
+                                    "heading_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.4 控制信号接口说明",
+                                    "normalized_section_path": "系统及方案介绍 > 系统方案 > 控制信号接口说明",
+                                    "source_signals": ["toc", "parser_heading"],
+                                    "children": [],
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+            block_entries=[],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_sections(
+                query="系统总体架构 模块划分 接口关系",
+                top_k=3,
+                sample_ids={"case-a"},
+                library_tracks={"pilot_main"},
+                section_title="系统及方案介绍",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(results[0]["section_id"], "3.2.4")
+        self.assertIn("detail_section_specificity_bonus", results[0]["reason"])
+
+    def test_retrieve_blocks_can_be_scoped_to_section_prefixes(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[],
+            block_entries=[
+                {
+                    "sample_id": "case-a",
+                    "file_name": "环冷风机方案.docx",
+                    "library_track": "pilot_main",
+                    "source_section_id": "3.2.4",
+                    "section_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.4 控制信号接口说明",
+                    "heading_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.4 控制信号接口说明",
+                    "normalized_heading": "控制信号接口说明",
+                    "source_heading": "2.4 控制信号接口说明",
+                    "heading_aliases": ["控制信号接口说明", "接口说明"],
+                    "reuse_level": "high",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "communication_interface",
+                    "equipment_type": "vfd",
+                    "content_form": "narrative",
+                    "token_count": 120,
+                    "content": "DCS 至变频器提供 DI/DO、AI/AO 和 Modbus/RS485 接口。",
+                },
+                {
+                    "sample_id": "case-a",
+                    "file_name": "环冷风机方案.docx",
+                    "library_track": "pilot_main",
+                    "source_section_id": "3.3.1",
+                    "section_path": "第三章 系统及方案介绍 > 三、施工方案 > 3.1 电机改造工程",
+                    "heading_path": "第三章 系统及方案介绍 > 三、施工方案 > 3.1 电机改造工程",
+                    "normalized_heading": "电机改造工程",
+                    "source_heading": "3.1 电机改造工程",
+                    "heading_aliases": ["电机改造工程"],
+                    "reuse_level": "high",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "motor_spec",
+                    "equipment_type": "motor",
+                    "content_form": "narrative",
+                    "token_count": 120,
+                    "content": "实施过程中拆除原异步电机并完成安装校准。",
+                },
+            ],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_blocks(
+                query="DCS PLC Modbus RS485 DI DO AI AO",
+                top_k=4,
+                sample_ids={"case-a"},
+                section_title="系统及方案介绍",
+                section_path_prefixes={"第三章 系统及方案介绍 > 二、系统方案 > 2.4 控制信号接口说明"},
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["source_section_id"], "3.2.4")
+
+    def test_retrieve_blocks_prefers_parent_title_matched_narrative_over_parameter_table(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[],
+            block_entries=[
+                {
+                    "sample_id": "case-a",
+                    "file_name": "乌海建龙方案.docx",
+                    "library_track": "pilot_main",
+                    "heading_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.1 高压变频器选型",
+                    "section_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.1 高压变频器选型",
+                    "source_heading": "2.1 高压变频器选型",
+                    "normalized_heading": "高压变频器选型",
+                    "normalized_section_path": "系统及方案介绍 > 系统方案 > 高压变频器选型",
+                    "heading_aliases": ["高压变频器选型"],
+                    "reuse_level": "high",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "overall_solution",
+                    "equipment_type": "vfd",
+                    "content_form": "narrative",
+                    "token_count": 150,
+                    "content": "本系统采用高压变频器一拖一方案，说明整体系统架构、模块划分以及控制接口边界。",
+                },
+                {
+                    "sample_id": "case-a",
+                    "file_name": "乌海建龙方案.docx",
+                    "library_track": "pilot_main",
+                    "heading_path": "1、1#环冷风机",
+                    "section_path": "第三章 系统及方案介绍 > 一、电机配置及参数 > 1、1#环冷风机",
+                    "source_heading": "1、1#环冷风机",
+                    "normalized_heading": "1#环冷风机",
+                    "normalized_section_path": "系统及方案介绍 > 电机配置及参数 > 1#环冷风机",
+                    "heading_aliases": ["1#环冷风机"],
+                    "reuse_level": "high",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "vfd_spec",
+                    "equipment_type": "fan_blower",
+                    "content_form": "parameter_table",
+                    "token_count": 160,
+                    "content": "| 额定电压 | 10kV | 额定功率 | 710kW | 额定电流 | 52.28A |",
+                },
+            ],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_blocks(
+                query="系统总体架构 模块划分 接口关系 冷风机 钢铁 风机",
+                top_k=2,
+                sample_ids={"case-a"},
+                section_title="系统及方案介绍",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(results[0]["source_heading"], "2.1 高压变频器选型")
+        self.assertIn("section_path_title_match", results[0]["reason"])
+        self.assertIn("narrative_section_table_penalty", results[1]["reason"])
 
 
 if __name__ == "__main__":

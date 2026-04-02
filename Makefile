@@ -8,7 +8,7 @@ ALEMBIC ?= $(ROOT_DIR)$(VENV)/bin/alembic
 POSTGRES_TEST_URL ?= postgresql+asyncpg://copilot:copilot@localhost:55432/copilot_db
 PHASE2_ENV = DATABASE_URL=$(POSTGRES_TEST_URL) QDRANT_LOCATION=:memory: EMBEDDING_DIMENSION=16 EMBEDDING_BACKEND=fallback PARSER_BACKEND=fallback PYTHONPYCACHEPREFIX=/tmp/pycache
 
-.PHONY: backend-install backend-install-full backend-migrate backend-run gateway-run phase2-test phase2-test-api phase3-test phase4-test phaseb-test phasec-test phased-test phasee-test phasev2-test-api pdf-audit sample-manifest case-library
+.PHONY: backend-install backend-install-full backend-migrate backend-run gateway-run phase2-test phase2-test-api phase3-test phase4-test phaseb-test phasec-test phased-test phasee-test phasev2-test-api pdf-audit sample-manifest case-library historical-corpus
 
 backend-install:
 	python3 -m venv $(VENV)
@@ -67,3 +67,7 @@ sample-manifest:
 case-library:
 	@if [ -z "$(MANIFEST)" ]; then echo "Usage: make case-library MANIFEST=backend/data/sample_manifests/sample_manifest.json [INCLUDE_HOLDOUT=1]"; exit 1; fi
 	cd backend && env PARSER_BACKEND=docling PYTHONPYCACHEPREFIX=/tmp/pycache ../$(VENV)/bin/python scripts/build_case_library.py --manifest "$(MANIFEST)" $(if $(OUTPUT_DIR),--output-dir $(OUTPUT_DIR),) $(if $(INCLUDE_HOLDOUT),--include-holdout,)
+
+historical-corpus:
+	@if [ -z "$(MANIFEST)" ]; then echo "Usage: make historical-corpus MANIFEST=data/sample_manifests/sample_manifest.json [TRACKS=pilot_main] [RECREATE_COLLECTION=1]"; exit 1; fi
+	cd backend && env PARSER_BACKEND=docling PYTHONPYCACHEPREFIX=/tmp/pycache ../$(VENV)/bin/python scripts/import_historical_corpus.py --manifest "$(MANIFEST)" $(if $(TRACKS),--tracks "$(TRACKS)",) $(if $(DOC_TYPE),--doc-type "$(DOC_TYPE)",) $(if $(RECREATE_COLLECTION),--recreate-collection,)

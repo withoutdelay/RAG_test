@@ -200,23 +200,49 @@ export default function ValidationPage() {
               <CardHeader className="pb-3">
                 <CardTitle className="text-lg">System Logs</CardTitle>
               </CardHeader>
-              <CardContent>
-                <ul className="space-y-2">
-                  {report.errors?.map((err, index) => (
-                    <li key={`error-${index}`} className="text-xs bg-red-50 text-red-800 p-2 rounded border border-red-100">
-                      <strong>[{err.code}]</strong> {err.message}
-                    </li>
-                  ))}
-                  {report.warnings?.map((warn, index) => (
-                    <li key={`warn-${index}`} className="text-xs bg-amber-50 text-amber-800 p-2 rounded border border-amber-100">
-                      <strong>[{warn.code}]</strong> {warn.message}
-                    </li>
-                  ))}
-                  {!report.errors?.length && !report.warnings?.length && (
-                    <li className="text-xs text-muted-foreground text-center py-4">No system warnings.</li>
-                  )}
-                </ul>
-              </CardContent>
+               <CardContent>
+                 <div className="space-y-4">
+                  <details className="group border rounded-md overflow-hidden bg-white" open={(report.errors?.length || 0) > 0}>
+                    <summary className="p-2.5 bg-red-50 text-red-800 font-semibold cursor-pointer border-b border-red-100 flex items-center focus:outline-none focus:ring-1 focus:ring-red-300 text-sm">
+                      <AlertTriangle className="w-4 h-4 mr-2" />
+                      Critical Errors ({report.errors?.length || 0})
+                    </summary>
+                    <div className="p-3 space-y-2 bg-red-50/30">
+                      {!report.errors?.length ? (
+                        <p className="text-xs text-muted-foreground">No errors found.</p>
+                      ) : (
+                        report.errors.map((err, index) => {
+                          const isHighPriority = err.code === 'VAL008' || err.code === 'VAL009' || err.code === 'VAL104' || err.code === 'VAL105' || err.code === 'VAL106';
+                          return (
+                            <div key={`error-${index}`} className={`text-xs p-2 rounded border ${isHighPriority ? 'bg-red-100 text-red-900 border-red-300 font-bold shadow-sm' : 'bg-white text-red-800 border-red-100'}`}>
+                              <span className="inline-block mr-1">[{err.code}]</span> {err.message}
+                              {isHighPriority && <span className="block mt-1 font-normal opacity-80 text-[10px]">Critical rule violation. Must be corrected in draft section directly.</span>}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </details>
+
+                  <details className="group border rounded-md overflow-hidden bg-white" open={(report.warnings?.length || 0) > 0}>
+                    <summary className="p-2.5 bg-amber-50 text-amber-800 font-semibold cursor-pointer border-b border-amber-100 flex items-center focus:outline-none focus:ring-1 focus:ring-amber-300 text-sm">
+                      <AlertTriangle className="w-4 h-4 mr-2" />
+                      Warnings ({report.warnings?.length || 0})
+                    </summary>
+                    <div className="p-3 space-y-2 bg-amber-50/30">
+                      {!report.warnings?.length ? (
+                        <p className="text-xs text-muted-foreground">No warnings.</p>
+                      ) : (
+                        report.warnings.map((warn, index) => (
+                          <div key={`warn-${index}`} className="text-xs bg-white text-amber-800 p-2 rounded border border-amber-100">
+                            <span className="inline-block mr-1 font-semibold">[{warn.code}]</span> {warn.message}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </details>
+                 </div>
+               </CardContent>
             </Card>
           </div>
 
@@ -364,7 +390,7 @@ function ReviewTaskCard({
             <Button
               size="sm"
               variant="outline"
-              className="text-red-700 border-red-300 hover:bg-red-50"
+              className="text-slate-600 border-slate-300 hover:bg-slate-100"
               onClick={() => onAction(task.id, resolution, 'rejected')}
               disabled={isActing || !resolution.trim()}
             >
@@ -373,7 +399,7 @@ function ReviewTaskCard({
             </Button>
             <Button
               size="sm"
-              className="self-end"
+              className="self-end bg-green-600 hover:bg-green-700 text-white"
               onClick={() => onAction(task.id, resolution, 'resolved')}
               disabled={isActing || !resolution.trim()}
             >

@@ -37,7 +37,6 @@ export default function RequirementPage() {
       setEditContent(stringifyRequirementContent(nextCard.content));
     } catch (error: unknown) {
       if (!isNotFoundError(error)) {
-        console.error(error);
         toast.error(getApiErrorMessage(error, 'Failed to load requirement card'));
       }
       setCard(null);
@@ -60,7 +59,6 @@ export default function RequirementPage() {
       toast.success('Extraction completed');
       await fetchRequirementCard();
     } catch (error: unknown) {
-      console.error(error);
       toast.error(getApiErrorMessage(error, 'Error extracting requirement'));
     } finally {
       setExtracting(false);
@@ -84,7 +82,6 @@ export default function RequirementPage() {
       toast.success('Requirement card saved');
       await fetchRequirementCard();
     } catch (error: unknown) {
-      console.error(error);
       toast.error(getApiErrorMessage(error, 'Error saving requirement card'));
     } finally {
       setSaving(false);
@@ -101,7 +98,6 @@ export default function RequirementPage() {
       toast.success('Clarification resolved');
       await fetchRequirementCard();
     } catch (error: unknown) {
-      console.error(error);
       toast.error(getApiErrorMessage(error, 'Error resolving clarification'));
     }
   };

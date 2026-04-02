@@ -54,6 +54,60 @@ class SafeIngestionFilterTests(unittest.TestCase):
         self.assertFalse(decision.indexable)
         self.assertIn("garbled_formula_text", decision.reasons)
 
+    def test_skips_low_signal_plain_fragment(self) -> None:
+        payload = ChunkPayload(
+            chunk_index=12,
+            chunk_type="PLAIN",
+            content="# 6 Л\n\nof",
+            token_count=2,
+            heading_path="6 Л",
+            metadata={},
+        )
+
+        decision = self.filter.decide(payload)
+
+        self.assertFalse(decision.indexable)
+        self.assertIn("low_signal_plain_fragment", decision.reasons)
+        self.assertFalse(decision.preserve_for_assets)
+
+    def test_skips_numeric_table_fragment_without_preserving_asset(self) -> None:
+        payload = ChunkPayload(
+            chunk_index=20,
+            chunk_type="TABLE",
+            content="| 37.5 | 17.5 | 20.0 |\n|---|---|---|\n| 47.3 | 17.5 | 29.8 |\n| 43.5 | 17.5 | 26 |",
+            token_count=18,
+            heading_path="47.8 17.5",
+            metadata={},
+        )
+
+        decision = self.filter.decide(payload)
+
+        self.assertFalse(decision.indexable)
+        self.assertIn("numeric_table_fragment", decision.reasons)
+        self.assertFalse(decision.preserve_for_assets)
+
+    def test_skips_garbled_table_and_preserves_it_for_asset_review(self) -> None:
+        payload = ChunkPayload(
+            chunk_index=16,
+            chunk_type="TABLE",
+            content=(
+                "| 项目 | 数值 |\n"
+                "|---|---|\n"
+                "| E#77+H | 4Ă TH₴₩÷ |\n"
+                "| ##M*F#H##* | COS Ф 0.95 (đk Hứ) |\n"
+                "| 参数 | ##**@@@ |\n"
+            ),
+            token_count=24,
+            heading_path="参数表",
+            metadata={},
+        )
+
+        decision = self.filter.decide(payload)
+
+        self.assertFalse(decision.indexable)
+        self.assertIn("garbled_table_fragment", decision.reasons)
+        self.assertTrue(decision.preserve_for_assets)
+
     def test_allows_clean_explanatory_text(self) -> None:
         payload = ChunkPayload(
             chunk_index=30,

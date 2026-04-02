@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 CASE_LIBRARY_ROOT = BACKEND_ROOT / "data" / "case_library"
+REPO_ROOT = BACKEND_ROOT.parent
 
 
 class Settings(BaseSettings):
@@ -67,7 +68,10 @@ class Settings(BaseSettings):
     next_public_api_base_url: str = "http://localhost:8000/api/v1"
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(
+            str(REPO_ROOT / ".env"),
+            str(BACKEND_ROOT / ".env"),
+        ),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",

@@ -15,19 +15,29 @@ interface OutlineResponse {
   id: string;
   version: number;
   validator_status: string;
-  outline_json: {
-    title?: string;
-    sections?: OutlineNode[];
-  };
+  outline_json: Record<string, unknown>;
 }
 
 function toOutlineState(payload: OutlineResponse): Outline {
+  const outlineJson = payload.outline_json || {};
+  const title = typeof outlineJson.title === 'string' ? outlineJson.title : 'Proposal Outline';
+  const sections = Array.isArray(outlineJson.sections) ? (outlineJson.sections as OutlineNode[]) : [];
+
   return {
     id: payload.id,
     version: payload.version,
-    title: payload.outline_json?.title || 'Proposal Outline',
-    sections: payload.outline_json?.sections || [],
+    title,
+    sections,
     validator_status: payload.validator_status,
+    outline_status:
+      outlineJson.outline_status === 'candidate' || outlineJson.outline_status === 'approved'
+        ? outlineJson.outline_status
+        : undefined,
+    generation_strategy: typeof outlineJson.generation_strategy === 'string' ? outlineJson.generation_strategy : undefined,
+    approval_required: typeof outlineJson.approval_required === 'boolean' ? outlineJson.approval_required : undefined,
+    approved_by_user: typeof outlineJson.approved_by_user === 'boolean' ? outlineJson.approved_by_user : undefined,
+    approved_at: typeof outlineJson.approved_at === 'string' ? outlineJson.approved_at : undefined,
+    reviewer_notes: typeof outlineJson.reviewer_notes === 'string' ? outlineJson.reviewer_notes : undefined,
   };
 }
 
@@ -39,6 +49,7 @@ export default function OutlinePage() {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [approving, setApproving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [navigating, setNavigating] = useState(false);
 
@@ -50,7 +61,6 @@ export default function OutlinePage() {
       setDirty(false);
     } catch (error: unknown) {
       if (!isNotFoundError(error)) {
-        console.error(error);
         toast.error(getApiErrorMessage(error, 'Failed to load outline'));
       }
       setOutline(null);
@@ -58,6 +68,32 @@ export default function OutlinePage() {
     } finally {
       setLoading(false);
     }
+  }, [projectId]);
+
+  const checkOutlinePrerequisites = useCallback(async (): Promise<string[]> => {
+    const missing: string[] = [];
+
+    try {
+      await api.get(`/projects/${projectId}/requirement-card/latest`);
+    } catch (error: unknown) {
+      if (isNotFoundError(error)) {
+        missing.push('Requirement Card');
+      } else {
+        throw error;
+      }
+    }
+
+    try {
+      await api.get(`/projects/${projectId}/evidence-bundles/latest`);
+    } catch (error: unknown) {
+      if (isNotFoundError(error)) {
+        missing.push('Evidence Bundle');
+      } else {
+        throw error;
+      }
+    }
+
+    return missing;
   }, [projectId]);
 
   useEffect(() => {
@@ -83,11 +119,19 @@ export default function OutlinePage() {
   const handleGenerate = async () => {
     setGenerating(true);
     try {
+      const missing = await checkOutlinePrerequisites();
+      if (missing.length > 0) {
+        toast.error(`Generate Outline requires: ${missing.join(' + ')}`);
+        return;
+      }
       await api.post(`/projects/${projectId}/generate-outline`, {});
       toast.success('Outline generated');
       await fetchOutline();
     } catch (error: unknown) {
-      console.error(error);
+      if (isNotFoundError(error)) {
+        toast.error('Generate Outline requires a ready Requirement Card and Evidence Bundle');
+        return;
+      }
       toast.error(getApiErrorMessage(error, 'Error generating outline'));
     } finally {
       setGenerating(false);
@@ -101,10 +145,7 @@ export default function OutlinePage() {
       setSaving(true);
       try {
         await api.patch(`/projects/${projectId}/outlines/${outline.id}`, {
-          outline_json: {
-            title: outline.title,
-            sections: outline.sections,
-          },
+          outline_json: outline,
         });
         toast.success(successMessage);
         setDirty(false);
@@ -113,7 +154,6 @@ export default function OutlinePage() {
         }
         return true;
       } catch (error: unknown) {
-        console.error(error);
         toast.error(getApiErrorMessage(error, 'Error saving outline'));
         return false;
       } finally {
@@ -129,6 +169,31 @@ export default function OutlinePage() {
       refreshAfterSave: true,
       successMessage: 'Outline saved successfully',
     });
+  };
+
+  const handleApprove = async () => {
+    if (!outline) return;
+    if (dirty) {
+      const saved = await persistOutline({ refreshAfterSave: false, successMessage: 'Outline saved before approval' });
+      if (!saved) return;
+    }
+    
+    setApproving(true);
+    try {
+      await api.post(`/projects/${projectId}/outlines/${outline.id}/approve`, {
+        outline_json: {
+          ...outline,
+          outline_status: 'approved',
+        },
+        approved_by_user: true
+      });
+      toast.success('Outline approved successfully');
+      await fetchOutline();
+    } catch (error: unknown) {
+      toast.error(getApiErrorMessage(error, 'Error approving outline'));
+    } finally {
+      setApproving(false);
+    }
   };
 
   const handleProceedToDrafts = async () => {
@@ -176,13 +241,19 @@ export default function OutlinePage() {
                   Unsaved changes
                 </Badge>
               )}
-              <Button variant="outline" onClick={handleSave} disabled={saving}>
+              <Button variant="outline" onClick={handleSave} disabled={saving || approving}>
                 {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                 Save
               </Button>
-              <Button onClick={handleProceedToDrafts} disabled={saving || navigating}>
+              {outline.outline_status === 'candidate' && (
+                <Button variant="default" onClick={handleApprove} disabled={approving || saving}>
+                  {approving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  Approve Outline
+                </Button>
+              )}
+              <Button onClick={handleProceedToDrafts} disabled={saving || navigating || outline.outline_status === 'candidate'}>
                 {navigating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-2 h-4 w-4" />}
-                {dirty ? 'Save & Go to Drafts' : 'Go to Drafts'}
+                {outline.outline_status === 'candidate' ? 'Approve to Generate' : dirty ? 'Save & Go to Drafts' : 'Go to Drafts'}
               </Button>
             </>
           ) : (
@@ -215,6 +286,16 @@ export default function OutlinePage() {
             <CardTitle className="text-xl flex items-center">
               <FileText className="mr-2 h-5 w-5 text-primary" />
               {outline.title}
+              {outline.outline_status && (
+                <Badge variant={outline.outline_status === 'approved' ? 'default' : 'destructive'} className="ml-3">
+                  {outline.outline_status.toUpperCase()}
+                </Badge>
+              )}
+              {outline.generation_strategy && (
+                <Badge variant="outline" className="ml-2">
+                  Strategy: {outline.generation_strategy}
+                </Badge>
+              )}
             </CardTitle>
             <CardDescription>
               Review and adjust the generated structure before drafting sections.

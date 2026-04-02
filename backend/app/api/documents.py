@@ -90,12 +90,14 @@ async def _parse_and_index_document(
         indexable = True if decision is None else decision.indexable
         indexing_reasons = [] if decision is None else list(decision.reasons)
         review_required = False if decision is None else decision.review_required
+        preserve_for_assets = False if decision is None else decision.preserve_for_assets
         point_id = uuid.uuid4() if indexable else None
         chunk_meta = {
             **payload.metadata,
             "indexable": indexable,
             "indexing_reasons": indexing_reasons,
             "review_required": review_required,
+            "preserve_for_assets": preserve_for_assets,
         }
         chunk = Chunk(
             document_id=document.id,
@@ -137,7 +139,7 @@ async def _parse_and_index_document(
             indexed_chunk_count += 1
         else:
             skipped_chunk_count += 1
-            if payload.chunk_type == "TABLE":
+            if payload.chunk_type == "TABLE" and preserve_for_assets:
                 preserved_table_chunks.append(chunk)
 
     raw_document = await _upsert_raw_document(session=session, document=document, base_metadata=base_metadata)
@@ -184,6 +186,7 @@ async def _upsert_raw_document(
     document: Document,
     base_metadata: dict,
 ) -> RawDocument:
+    corpus_scope = "global" if document.project_id is None else "project"
     raw_document: RawDocument | None = None
     raw_document_id = (document.meta or {}).get("raw_document_id")
     if raw_document_id:
@@ -195,6 +198,7 @@ async def _upsert_raw_document(
     if raw_document is None:
         raw_document = RawDocument(
             project_id=document.project_id,
+            corpus_scope=corpus_scope,
             doc_type=document.doc_type,
             file_uri=document.storage_path,
             file_name=document.filename,
@@ -207,6 +211,7 @@ async def _upsert_raw_document(
         return raw_document
 
     raw_document.project_id = document.project_id
+    raw_document.corpus_scope = corpus_scope
     raw_document.doc_type = document.doc_type
     raw_document.file_uri = document.storage_path
     raw_document.file_name = document.filename

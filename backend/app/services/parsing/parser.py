@@ -41,4 +41,9 @@ class ParserService:
                 assets=assets,
             ).to_metadata()
         )
-        return ParsedDocument(markdown=cleaned_markdown, metadata=metadata, assets=assets)
+        return ParsedDocument(
+            markdown=cleaned_markdown,
+            metadata=metadata,
+            assets=assets,
+            structure=parsed.structure,
+        )

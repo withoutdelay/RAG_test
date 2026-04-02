@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from app.config import get_settings
 from app.services.retrieval.asset_service import AssetCard, _asset_anchor_boost, _asset_noise_penalty, _asset_taxonomy_boost
-from app.services.retrieval.service import build_evidence_items
+from app.services.retrieval.service import build_evidence_items, build_evidence_search_plan, filter_evidence_results
 from app.services.vectorstore.chunker import Chunker
 from app.services.vectorstore.embedder import Embedder
 from app.services.vectorstore.block_taxonomy import infer_target_taxonomy
@@ -68,6 +68,96 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         self.assertGreater(items[0]["reusability_score"], 0.8)
         self.assertEqual(items[0]["section_type"], "overall_solution")
         self.assertEqual(items[0]["equipment_type"], "vfd")
+
+    def test_filter_evidence_results_drops_short_garbled_plain_fragment(self) -> None:
+        results = filter_evidence_results(
+            [
+                {
+                    "chunk_id": "chunk-bad",
+                    "document_id": "doc-1",
+                    "document_name": "历史方案A",
+                    "heading_path": "6 Л",
+                    "chunk_type": "PLAIN",
+                    "content": "# 6 Л\n\nof",
+                    "score": 0.52,
+                    "metadata": {},
+                },
+                {
+                    "chunk_id": "chunk-good",
+                    "document_id": "doc-1",
+                    "document_name": "历史方案A",
+                    "heading_path": "4.2 控制接口",
+                    "chunk_type": "PLAIN",
+                    "content": "## 4.2 控制接口\n\nDCS 至变频器提供 DI/DO、AI/AO 以及 Modbus/RS485 通讯接口。",
+                    "score": 0.61,
+                    "metadata": {},
+                },
+            ]
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["chunk_id"], "chunk-good")
+
+    def test_filter_evidence_results_drops_numeric_table_fragment(self) -> None:
+        results = filter_evidence_results(
+            [
+                {
+                    "chunk_id": "chunk-bad-table",
+                    "document_id": "doc-1",
+                    "document_name": "历史方案A",
+                    "heading_path": "47.8 17.5",
+                    "chunk_type": "TABLE",
+                    "content": "| 37.5 | 17.5 | 20.0 |\n|---|---|---|\n| 47.3 | 17.5 | 29.8 |\n| 43.5 | 17.5 | 26 |",
+                    "score": 0.49,
+                    "metadata": {},
+                },
+                {
+                    "chunk_id": "chunk-good-table",
+                    "document_id": "doc-1",
+                    "document_name": "历史方案A",
+                    "heading_path": "5.1 乙方提供设备清单",
+                    "chunk_type": "TABLE",
+                    "content": "| 编号 | 名称 | 规格 | 数量 |\n|---|---|---|---|\n| 1 | 变频柜 | GB/T-MVSG0900 | 1套 |",
+                    "score": 0.77,
+                    "metadata": {},
+                },
+            ]
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["chunk_id"], "chunk-good-table")
+
+    def test_build_evidence_search_plan_uses_global_scope_for_historical_proposals(self) -> None:
+        plan = build_evidence_search_plan(
+            project_id=uuid4(),
+            industry="钢铁",
+            doc_type="historical_proposal",
+            chunk_types=["PLAIN", "TABLE"],
+            scoped_document_names=["样板A.docx", "样板B.pdf"],
+        )
+
+        self.assertEqual(plan[0][0], "case_first")
+        self.assertIsNone(plan[0][1])
+        self.assertEqual(plan[0][2].document_names, ["样板A.docx", "样板B.pdf"])
+        self.assertEqual(plan[1][0], "case_first_relaxed_industry")
+        self.assertIsNone(plan[1][2].industry)
+        self.assertEqual(plan[2][0], "case_first_fallback_global")
+
+    def test_build_evidence_search_plan_adds_relaxed_global_fallback_without_case_candidates(self) -> None:
+        project_id = uuid4()
+        plan = build_evidence_search_plan(
+            project_id=project_id,
+            industry="电气",
+            doc_type="rfp",
+            chunk_types=["PLAIN"],
+            scoped_document_names=[],
+        )
+
+        self.assertEqual(plan[0][0], "global_fallback")
+        self.assertEqual(plan[0][1], project_id)
+        self.assertEqual(plan[0][2].industry, "电气")
+        self.assertEqual(plan[1][0], "global_fallback_relaxed_industry")
+        self.assertIsNone(plan[1][2].industry)
 
     def test_embedder_returns_configured_dimension(self) -> None:
         embedder = Embedder()

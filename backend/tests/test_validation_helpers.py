@@ -177,6 +177,76 @@ class ValidationHelperTests(unittest.TestCase):
             {"VAL105"},
         )
 
+    def test_collect_validation_findings_accepts_reuse_block_citations(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.9000"),
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_002",
+                        "source_doc_id": "doc_2",
+                        "source_title": "历史方案B",
+                        "type": "section",
+                    }
+                ]
+            },
+        )
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "3",
+                        "title": "技术架构",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section"],
+                        "asset_required": False,
+                        "needs_human_review": False,
+                        "children": [],
+                    }
+                ],
+            }
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="3",
+                title="技术架构",
+                content_md="系统采用分层控制架构，配置上位机接口与联锁回路。",
+                citation_refs=[
+                    {
+                        "evidence_id": "case:sample-b:9",
+                        "source_doc_id": "sample-b",
+                        "source_title": "历史方案B",
+                        "type": "section",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={
+                    "reuse_pack": {
+                        "reusable_blocks": [
+                            {
+                                "block_id": "case:sample-b:9",
+                                "source_title": "历史方案B",
+                                "content_md": "系统采用分层控制架构。",
+                            }
+                        ]
+                    }
+                },
+            )
+        ]
+
+        errors, _, section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+        )
+
+        self.assertNotIn("VAL005", {item["code"] for item in errors})
+        self.assertNotIn("VAL005", {item["code"] for item in section_results["3"]["errors"]})
+
     def test_build_review_task_blueprints_creates_manual_tasks_and_final_review(self) -> None:
         outline = SimpleNamespace(id=uuid4(), outline_json={"title": "测试方案"})
         existing_open_task = SimpleNamespace(

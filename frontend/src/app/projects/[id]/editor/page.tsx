@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { SectionBlock } from '@/components/editor/SectionBlock';
 import api, { getApiErrorMessage, isNotFoundError } from '@/lib/api';
-import { SectionDraft } from '@/lib/types';
+import { EvidenceBundle, EvidenceCard, SectionDraft } from '@/lib/types';
 import { toast } from 'sonner';
 
 export default function EditorPage() {
@@ -15,20 +15,37 @@ export default function EditorPage() {
   const router = useRouter();
   const projectId = params.id as string;
   const [sections, setSections] = useState<SectionDraft[]>([]);
+  const [evidenceMap, setEvidenceMap] = useState<Record<string, EvidenceCard>>({});
   const [loading, setLoading] = useState(true);
   const [generatingAll, setGeneratingAll] = useState(false);
 
   const fetchSections = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await api.get(`/projects/${projectId}/sections`);
-      setSections((res.data as SectionDraft[]) || []);
+      const [sectionsRes, evidenceRes] = await Promise.all([
+        api.get(`/projects/${projectId}/sections`),
+        api.get(`/projects/${projectId}/evidence-bundles/latest`).catch((error: unknown) => {
+          if (isNotFoundError(error)) {
+            return null;
+          }
+          throw error;
+        }),
+      ]);
+      setSections((sectionsRes.data as SectionDraft[]) || []);
+      const nextEvidenceMap: Record<string, EvidenceCard> = {};
+      const evidenceBundle = evidenceRes?.data as EvidenceBundle | undefined;
+      for (const item of evidenceBundle?.content?.results || []) {
+        if (item?.evidence_id) {
+          nextEvidenceMap[item.evidence_id] = item;
+        }
+      }
+      setEvidenceMap(nextEvidenceMap);
     } catch (error: unknown) {
       if (!isNotFoundError(error)) {
-        console.error(error);
         toast.error(getApiErrorMessage(error, 'Failed to load drafts'));
       }
       setSections([]);
+      setEvidenceMap({});
     } finally {
       setLoading(false);
     }
@@ -47,7 +64,6 @@ export default function EditorPage() {
       toast.success('Section drafts generated');
       await fetchSections();
     } catch (error: unknown) {
-      console.error(error);
       toast.error(getApiErrorMessage(error, 'Error generating sections'));
     } finally {
       setGeneratingAll(false);
@@ -69,7 +85,7 @@ export default function EditorPage() {
             <FileText className="mr-2 h-6 w-6" /> Section Drafts
           </h2>
           <p className="text-muted-foreground mt-1 text-sm">
-            Review, edit, and regenerate section drafts produced from the outline and evidence bundle.
+            Review the customer-facing draft, steer it with citations, and refine it without diving into raw Markdown by default.
           </p>
         </div>
         <div className="flex space-x-3">
@@ -121,6 +137,7 @@ export default function EditorPage() {
                 key={section.section_id}
                 section={section}
                 projectId={projectId}
+                evidenceMap={evidenceMap}
                 onRefresh={() => void fetchSections()}
               />
             ))}

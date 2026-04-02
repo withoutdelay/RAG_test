@@ -63,8 +63,20 @@ async def main() -> None:
             "library_track": library_track,
         }
         parsed = await parser.parse_document(entry["file_path"])
-        outline_entries.append(build_outline_library_entry(sample_entry=enriched_entry, markdown=parsed.markdown))
-        block_entries.extend(build_reusable_block_entries(sample_entry=enriched_entry, markdown=parsed.markdown))
+        outline_entries.append(
+            build_outline_library_entry(
+                sample_entry=enriched_entry,
+                markdown=parsed.markdown,
+                structure_hints=parsed.structure,
+            )
+        )
+        block_entries.extend(
+            build_reusable_block_entries(
+                sample_entry=enriched_entry,
+                markdown=parsed.markdown,
+                structure_hints=parsed.structure,
+            )
+        )
 
     summary = summarize_case_library(outline_entries=outline_entries, block_entries=block_entries)
     output_dir = Path(args.output_dir)

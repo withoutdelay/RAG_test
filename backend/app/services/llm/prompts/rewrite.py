@@ -9,6 +9,9 @@ REWRITE_SYSTEM_PROMPT = """你是一位技术文档编辑助手。请根据用�
 2. 仅做必要的统一、替换和轻量润色，不要自行扩写背景或空泛总结
 3. 不得保留旧客户、旧项目、样板来源或任务提示语
 4. 若正文中已包含图表占位符 [[ASSET:...]]，必须保留
+5. 保留原有章节标题、三级小标题、表格和列表结构，非必要不要改写结构
+6. 改写后正文长度原则上不低于原稿的 80%，不要把技术段压缩成一句结论
+7. 章节上下文中的字段标签仅供理解，不得直接复述到输出正文
 """
 
 
@@ -22,10 +25,12 @@ def build_rewrite_prompts(
     params_formatted = _format_global_params(global_params)
     system_prompt = f"{REWRITE_SYSTEM_PROMPT}\n\n全局参数：\n{params_formatted}"
     user_prompt = (
-        f"章节上下文：\n{section_context}\n\n"
-        f"用户选中文本：\n{selected_text}\n\n"
-        f"修改指令：\n{user_instruction}\n\n"
-        "请输出重写后的完整章节内容。"
+        "以下上下文仅供理解，不得直接复述字段标签或说明语。\n"
+        f"<section_context>\n{section_context}\n</section_context>\n\n"
+        "以下为待精修的章节 Markdown，请保留章节标题、子标题、表格、列表和 [[ASSET:...]] 占位符，只做必要改写。\n"
+        f"<draft_markdown>\n{selected_text}\n</draft_markdown>\n\n"
+        f"改写要求：\n{user_instruction}\n\n"
+        "请只输出最终客户可阅读的 Markdown 章节，不要附加解释、说明或完成提示。"
     )
     return system_prompt, user_prompt
 

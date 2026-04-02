@@ -1,41 +1,48 @@
-# Repository Guidelines
+<!-- BEGIN SUPER DEV CODEX -->
+# Super Dev for Codex CLI
 
-## Project Structure & Module Organization
+When a user message starts with `super-dev:` or `super-dev：`, enter Super Dev pipeline mode immediately.
 
-This repository now contains a working Phase 2 backend plus planning documents. Key paths:
+If the repository already contains active Super Dev workflow context, the first natural-language requirement in a new session must also continue Super Dev rather than normal chat.
 
-- `spec.md`, `项目开发计划.md`, `智能系统技术方案设计.md`: product and architecture references
-- `backend/app/`: FastAPI API layer, models, schemas, services, and utilities
-- `backend/alembic/`: database migration config and revisions
-- `backend/tests/`: parsing, retrieval, storage, and API integration tests
-- `gateway/`, `frontend/`: placeholders for later phases
+## Direct Activation Rule
+- Do not spend a turn saying you will read the skill first, explain the skill, or decide whether to enter the workflow.
+- Treat the current trigger as already authorized to execute the full Super Dev pipeline.
+- If a compatibility skill under `~/.codex/skills/` is loaded, treat it as the same Super Dev contract, not a fallback mode.
 
-Keep new backend logic in `backend/app/services/` and API contracts in `backend/app/schemas/`.
+## Required execution
+1. First reply: state that Super Dev pipeline mode is active and the current phase is `research`.
+2. Read `knowledge/` and `output/knowledge-cache/*-knowledge-bundle.json` when available.
+3. Use Codex native web/search/edit/terminal capabilities to perform similar-product research and write `output/*-research.md` into the repository workspace.
+4. Draft `output/*-prd.md`, `output/*-architecture.md`, and `output/*-uiux.md` in the same Codex session and save them as actual project files.
+5. Stop after the three core documents, summarize them, and wait for explicit confirmation.
+6. Only after confirmation, create `.super-dev/changes/*/proposal.md` and `.super-dev/changes/*/tasks.md`, then continue with frontend-first implementation.
 
-## Build, Test, and Development Commands
+## Constraints
+- Do not start coding directly after `super-dev:` or `super-dev：`.
+- Do not create Spec before document confirmation.
+- If the user requests architecture changes, first update `output/*-architecture.md`, then realign Spec/tasks and implementation.
+- If the user requests quality or security remediation, first fix the issues, rerun quality gate and `super-dev release proof-pack`, and only then continue.
+- 开始任何 UI 实现前，必须先锁定 `output/*-uiux.md` 中冻结的图标库、字体系统、design token system、组件生态和页面骨架。
+- Before any UI implementation, first lock the icon library, typography, design token system, component ecosystem, and page skeleton from `output/*-uiux.md`.
+- Do not use emoji as functional icons or placeholders.
+- For non-conversational AI products, avoid Claude / ChatGPT-style sidebar chat shells unless the UI plan explicitly justifies them.
+- Keep using the component ecosystem and design token direction defined in `output/*-uiux.md` rather than switching ad hoc.
+- If a required artifact is only described in chat and not written into the repository, treat the step as incomplete.
+- Codex remains the execution host; Super Dev is the local governance workflow.
+- Use local `super-dev` CLI only for governance actions such as doctor, review, quality, release readiness, or update; do not outsource the main coding workflow to the CLI.
 
-Use a local virtual environment for backend work:
+## Conversation Continuity Contract
+- If `.super-dev/SESSION_BRIEF.md` exists, read it before responding and treat it as the active workflow state.
+- If the workflow is waiting for docs confirmation, preview confirmation, UI revision, architecture revision, or quality revision, then user replies like `修改`, `补充`, `继续改`, `确认`, `通过`, `继续`, or detailed feedback remain inside the current Super Dev stage.
+- After each requested revision inside a gate, stay in the same stage, update the required artifacts, summarize what changed, and wait again for explicit confirmation.
+- Do not silently exit Super Dev mode because the user asked for several edits, follow-up questions, or extra constraints.
+- Only leave the current Super Dev workflow if the user explicitly says to cancel the workflow, restart from scratch, or switch back to normal chat.
 
-- `make backend-install`: install the lightweight backend
-- `make backend-install-full`: install optional Docling and sentence-transformers support
-- `docker compose up -d postgres qdrant minio`: start local dependencies
-- `make backend-migrate`: apply Alembic migrations
-- `make backend-run`: run FastAPI with reload
-- `make phase2-test`: run service-level tests
-- `make phase2-test-api`: run the Postgres-backed Phase 2 API integration test
-
-## Coding Style & Naming Conventions
-
-Use Python 3.11+ style, 4-space indentation, `snake_case` modules, and type hints on public functions. Keep FastAPI route handlers thin and move parsing, storage, and retrieval logic into services. Use `PascalCase` for classes and Pydantic models.
-
-Environment-driven backend switches should stay explicit and predictable, for example `PARSER_BACKEND=fallback` and `EMBEDDING_BACKEND=fallback`.
-
-## Testing Guidelines
-
-Add tests under `backend/tests/test_*.py`. Prefer fast unit tests for service logic, then targeted integration tests for API flows. For retrieval and parsing work, cover both fallback mode and explicit backend-selection behavior.
-
-When tests need infrastructure, prefer isolated local resources such as `QDRANT_LOCATION=:memory:` and a disposable PostgreSQL container.
-
-## Commit & Pull Request Guidelines
-
-Use short imperative commit subjects, for example `backend: add phase2 api integration test`. PRs should summarize behavior changes, config changes, test coverage, and any required local services or environment variables.
+## Super Dev System Flow Contract
+- SUPER_DEV_FLOW_CONTRACT_V1
+- PHASE_CHAIN: research>docs>docs_confirm>spec>frontend>preview_confirm>backend>quality>delivery
+- DOC_CONFIRM_GATE: required
+- PREVIEW_CONFIRM_GATE: required
+- HOST_PARITY: required
+<!-- END SUPER DEV CODEX -->

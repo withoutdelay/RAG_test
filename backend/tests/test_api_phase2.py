@@ -287,6 +287,66 @@ class Phase2ApiTests(unittest.TestCase):
             self.assertEqual(payload["total"], 1)
             self.assertIn("LCU 负责与 DCS 系统通信", payload["results"][0]["content"])
 
+    def test_document_upload_drops_numeric_table_fragments_before_asset_preservation(self) -> None:
+        with self._make_client() as client:
+            project_response = client.post(
+                "/api/v1/projects",
+                json={"name": "数字表残片过滤项目", "industry": "电气", "description": "Phase 2 numeric table fragment filter"},
+            )
+            project_id = project_response.json()["data"]["id"]
+
+            markdown = (
+                "# 技术说明\n\n"
+                "系统采用一拖一高压变频方案，支持 DCS 联锁和状态监测。\n\n"
+                "## 47.8 17.5\n\n"
+                "| 37.5 | 17.5 | 20.0 |\n"
+                "|---|---|---|\n"
+                "| 47.3 | 17.5 | 29.8 |\n"
+                "| 43.5 | 17.5 | 26 |\n"
+            )
+
+            with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
+                handle.write(markdown)
+                upload_path = Path(handle.name)
+
+            try:
+                with upload_path.open("rb") as file_handle:
+                    upload_response = client.post(
+                        f"/api/v1/projects/{project_id}/documents/upload",
+                        files={"file": ("sample.md", file_handle, "text/markdown")},
+                        data={"doc_type": "historical_proposal", "metadata": '{"industry":"电气"}'},
+                    )
+            finally:
+                upload_path.unlink(missing_ok=True)
+
+            self.assertEqual(upload_response.status_code, 202)
+            document_id = upload_response.json()["data"]["id"]
+
+            document_response = client.get(f"/api/v1/documents/{document_id}")
+            self.assertEqual(document_response.status_code, 200)
+            document_payload = document_response.json()["data"]
+            self.assertEqual(document_payload["metadata"]["chunk_count"], 3)
+            self.assertEqual(document_payload["metadata"]["indexed_chunk_count"], 1)
+            self.assertEqual(document_payload["metadata"]["skipped_chunk_count"], 2)
+            self.assertEqual(document_payload["metadata"]["preserved_table_asset_count"], 0)
+
+            chunks_response = client.get(f"/api/v1/documents/{document_id}/chunks")
+            self.assertEqual(chunks_response.status_code, 200)
+            chunks = chunks_response.json()["data"]
+
+            skipped = [chunk for chunk in chunks if not chunk["metadata"]["indexable"]]
+            self.assertEqual(len(skipped), 2)
+            self.assertTrue(any("numeric_table_fragment" in chunk["metadata"]["indexing_reasons"] for chunk in skipped))
+            self.assertTrue(any("heading_only" in chunk["metadata"]["indexing_reasons"] for chunk in skipped))
+            numeric_table_chunk = next(
+                chunk for chunk in skipped if "numeric_table_fragment" in chunk["metadata"]["indexing_reasons"]
+            )
+            self.assertFalse(numeric_table_chunk["metadata"]["preserve_for_assets"])
+
+            table_assets_response = client.get(f"/api/v1/documents/{document_id}/table-assets")
+            self.assertEqual(table_assets_response.status_code, 200)
+            self.assertEqual(table_assets_response.json()["data"], [])
+
     def test_document_upload_persists_figure_assets(self) -> None:
         with self._make_client() as client:
             project_response = client.post(

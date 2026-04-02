@@ -25,7 +25,8 @@ class Retriever:
         filters = request.filters.model_dump(exclude_none=True) if request.filters else {}
         if request.project_id:
             filters["project_id"] = str(request.project_id)
-        hits = self.qdrant.search(query_vector=query_vector, top_k=request.top_k, filters=filters)
+        search_limit = max(request.top_k * 8, request.top_k)
+        hits = self.qdrant.search(query_vector=query_vector, top_k=search_limit, filters=filters)
 
         results: list[RetrievalResult] = []
         for hit in hits:
@@ -52,5 +53,7 @@ class Retriever:
                     metadata=chunk.meta,
                 )
             )
+            if len(results) >= request.top_k:
+                break
 
         return RetrievalSearchResponse(results=results, total=len(results))

@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 
 DOC_LING_TEXT_TYPES = tuple(item for item in (TextItem, SectionHeaderItem) if item is not None)
 DOC_LING_ASSET_TYPES = tuple(item for item in (PictureItem, TableItem) if item is not None)
+DOC_LING_HEADING_TYPES = tuple(item for item in (SectionHeaderItem, TextItem) if item is not None)
 
 
 @dataclass
@@ -56,6 +57,7 @@ class ParsedDocument:
     markdown: str
     metadata: dict
     assets: list[ParsedAsset] = field(default_factory=list)
+    structure: dict[str, Any] = field(default_factory=dict)
 
 
 class DoclingParser:
@@ -113,8 +115,10 @@ class DoclingParser:
                         }
                 converter = self._build_converter(effective_path.suffix.lower())
                 result = converter.convert(str(effective_path))
+                items = list(result.document.iterate_items())
                 markdown = result.document.export_to_markdown()
-                assets = self._extract_assets(result.document)
+                assets = self._extract_assets(result.document, items=items)
+                structure = self._extract_structure_hints(items)
                 return ParsedDocument(
                     markdown=self._normalize_text(markdown, path.name),
                     metadata={
@@ -124,10 +128,12 @@ class DoclingParser:
                         "parser_backend_used": "docling",
                         "docling_libreoffice_cmd": self.resolved_libreoffice_cmd,
                         "docling_libreoffice_available": bool(self.resolved_libreoffice_cmd),
+                        "parser_structure_heading_count": len(structure.get("heading_hints") or []),
                         "format": suffix.lstrip("."),
                         **conversion_note,
                     },
                     assets=assets,
+                    structure=structure,
                 )
             except Exception:
                 if self.backend_mode == "docling":
@@ -151,6 +157,7 @@ class DoclingParser:
                 "docling_libreoffice_available": bool(self.resolved_libreoffice_cmd),
                 "format": suffix.lstrip("."),
             },
+            structure={},
         )
 
     def _configure_docling_environment(self) -> None:
@@ -252,11 +259,11 @@ class DoclingParser:
             return f"# {filename}\n\n文档内容为空或暂未能解析出可用文本。"
         return stripped if stripped.startswith("#") else f"# {filename}\n\n{stripped}"
 
-    def _extract_assets(self, document: Any) -> list[ParsedAsset]:
+    def _extract_assets(self, document: Any, *, items: list[tuple[Any, int]] | None = None) -> list[ParsedAsset]:
         if not DOC_LING_ASSET_TYPES:
             return []
 
-        items = list(document.iterate_items())
+        items = items or list(document.iterate_items())
         assets: list[ParsedAsset] = []
         current_heading: str | None = None
 
@@ -315,6 +322,32 @@ class DoclingParser:
             )
 
         return assets
+
+    def _extract_structure_hints(self, items: list[tuple[Any, int]]) -> dict[str, Any]:
+        if not DOC_LING_HEADING_TYPES:
+            return {}
+
+        heading_hints: list[dict[str, Any]] = []
+        for index, (element, level) in enumerate(items):
+            if not isinstance(element, DOC_LING_HEADING_TYPES):
+                continue
+            text = self._extract_text(element)
+            if not text:
+                continue
+            page_no, _bbox = self._extract_page_and_bbox(element)
+            heading_hints.append(
+                {
+                    "index": index,
+                    "text": text,
+                    "parser_level": int(level) if level is not None else None,
+                    "item_type": type(element).__name__,
+                    "page_no": page_no,
+                    "source_ref": str(getattr(element, "self_ref", "") or ""),
+                }
+            )
+        return {
+            "heading_hints": heading_hints,
+        }
 
     def _extract_text(self, element: Any) -> str | None:
         text = getattr(element, "text", None)

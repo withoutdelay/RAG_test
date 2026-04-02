@@ -89,6 +89,29 @@ SECTION_TEMPLATE_HEADINGS: dict[str, dict[str, tuple[str, ...]]] = {
         "关键参数与配置说明": ("参数", "规格", "配置", "说明"),
     },
 }
+EXTRACTIVE_SECTION_OPENINGS = {
+    "main_circuit_scheme": "本项目主回路按照安全隔离、旁路切换和连续运行要求进行配置，具体结构如下。",
+    "communication_interface": "本项目控制系统接口按照上位机协同、信号闭环和调试可实施的原则进行配置，具体如下。",
+    "supply_scope": "以下内容用于说明本项目主要设备供货边界和系统组成，最终以双方确认的供货清单为准。",
+    "bom_or_supply_list": "以下内容用于说明本项目主要设备供货边界和系统组成，最终以双方确认的供货清单为准。",
+}
+EXTRACTIVE_TABLE_LEADS: dict[str, dict[str, str]] = {
+    "main_circuit_scheme": {
+        "设备选型与容量配置": "主要设备配置如下表所示。",
+        "关键技术参数": "主要技术参数如下表所示。",
+    },
+    "communication_interface": {
+        "接口与信号清单": "建议接口与信号清单如下表所示。",
+    },
+    "supply_scope": {
+        "主要设备及供货范围": "主要设备供货范围如下表所示。",
+        "关键参数与配置说明": "关键参数与配置说明如下表所示。",
+    },
+    "bom_or_supply_list": {
+        "主要设备及供货范围": "主要设备供货范围如下表所示。",
+        "关键参数与配置说明": "关键参数与配置说明如下表所示。",
+    },
+}
 GENERIC_REUSE_HEADINGS = {
     "产品简介",
     "技术方案",
@@ -138,12 +161,14 @@ def build_section_context(
     evidence_bundle: EvidenceBundle,
     global_params: dict[str, Any] | None = None,
     limit: int = 3,
+    preferred_evidence_ids: set[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     selected = _select_evidence_items(
         section=section,
         evidence_bundle=evidence_bundle,
         global_params=global_params,
         limit=limit,
+        preferred_evidence_ids=preferred_evidence_ids,
     )
 
     context_lines = []
@@ -161,6 +186,7 @@ def build_section_context(
                 "heading_path": heading_path,
                 "relevance_score": item.get("relevance_score"),
                 "type": item.get("type"),
+                "excerpt": raw_excerpt,
             }
         )
     return "\n".join(context_lines), citations
@@ -183,6 +209,7 @@ def build_reuse_citations(reusable_blocks: list[dict[str, Any]], *, limit: int =
                 "heading_path": heading_path,
                 "relevance_score": block.get("selection_score") or block.get("reusability_score"),
                 "type": block.get("block_type") or "section",
+                "excerpt": _build_citation_excerpt(str(block.get("content_md") or "")),
             }
         )
     return citations
@@ -442,6 +469,30 @@ def build_extractive_reuse_section_content(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def polish_extractive_reuse_section_content(*, section: dict[str, Any], content_md: str) -> str:
+    section_title = str(section.get("title") or "未命名章节")
+    polished = sanitize_generated_section_content(content_md=content_md, section_title=section_title)
+    target_section_type = str(infer_target_taxonomy(section).get("section_type") or "unknown").lower()
+    opening_sentence = EXTRACTIVE_SECTION_OPENINGS.get(target_section_type)
+    if opening_sentence and opening_sentence not in polished:
+        polished = re.sub(
+            r"^(## [^\n]+\n\n)(?=(### |\||\[\[ASSET:|- \[\[ASSET:))",
+            lambda match: f"{match.group(1)}{opening_sentence}\n\n",
+            polished,
+            count=1,
+        )
+    for label, lead_sentence in (EXTRACTIVE_TABLE_LEADS.get(target_section_type) or {}).items():
+        if lead_sentence in polished:
+            continue
+        polished = re.sub(
+            rf"(### {re.escape(label)}\n\n)(?=\|)",
+            lambda match: f"{match.group(1)}{lead_sentence}\n\n",
+            polished,
+            count=1,
+        )
+    return polished.rstrip() + "\n"
+
+
 def _build_supply_scope_reuse_section_content(
     *,
     title: str,
@@ -572,6 +623,8 @@ def build_reuse_refinement_instruction(*, section: dict[str, Any], reuse_pack: d
     lines = [
         "请将给定章节草稿整理成客户可阅读的正式技术章节。",
         "优先保留现有技术细节、设备构成、接口逻辑和参数表达，不要压缩信息密度。",
+        "保持现有章节标题、三级小标题、表格和列表结构，非必要不要改写结构。",
+        "改写后正文长度原则上不低于原稿的 80%，不要把技术段压缩成一句结论。",
         "只做必要的统一、去重和替换，不要自由扩写背景，不要补充空泛套话。",
         "删除旧客户、旧项目和样板来源痕迹，严格使用当前项目字段。",
     ]
@@ -582,29 +635,43 @@ def build_reuse_refinement_instruction(*, section: dict[str, Any], reuse_pack: d
     return "\n".join(f"{index}. {line}" for index, line in enumerate(lines, start=1))
 
 
+def resolve_reuse_refinement_content(
+    *,
+    assembled_content: str,
+    rewritten_content: str | None,
+    section_title: str,
+) -> tuple[str, str, str | None]:
+    assembled = sanitize_generated_section_content(content_md=assembled_content, section_title=section_title)
+    if not rewritten_content:
+        return assembled, "fallback_assembled", "rewrite_missing"
+    rewritten = sanitize_generated_section_content(content_md=rewritten_content, section_title=section_title)
+    assembled_body = _strip_section_heading(assembled)
+    rewritten_body = _strip_section_heading(rewritten)
+    if not rewritten_body.strip():
+        return assembled, "fallback_assembled", "rewrite_empty"
+    if any(token in rewritten_body for token in REWRITE_LEAKAGE_TOKENS):
+        return assembled, "fallback_assembled", "rewrite_leakage"
+    if len(rewritten_body) < max(260, int(len(assembled_body) * 0.68)):
+        return assembled, "fallback_assembled", "rewrite_too_thin"
+    if _technical_density(rewritten_body) < (_technical_density(assembled_body) * 0.72):
+        return assembled, "fallback_assembled", "rewrite_low_density"
+    if rewritten_body.count("\n\n") + 1 < max(2, (assembled_body.count("\n\n") + 1) // 2):
+        return assembled, "fallback_assembled", "rewrite_structure_collapse"
+    return rewritten, "rewrite_applied", None
+
+
 def select_preferred_reuse_content(
     *,
     assembled_content: str,
     rewritten_content: str | None,
     section_title: str,
 ) -> str:
-    assembled = sanitize_generated_section_content(content_md=assembled_content, section_title=section_title)
-    if not rewritten_content:
-        return assembled
-    rewritten = sanitize_generated_section_content(content_md=rewritten_content, section_title=section_title)
-    assembled_body = _strip_section_heading(assembled)
-    rewritten_body = _strip_section_heading(rewritten)
-    if not rewritten_body.strip():
-        return assembled
-    if any(token in rewritten_body for token in REWRITE_LEAKAGE_TOKENS):
-        return assembled
-    if len(rewritten_body) < max(260, int(len(assembled_body) * 0.68)):
-        return assembled
-    if _technical_density(rewritten_body) < (_technical_density(assembled_body) * 0.72):
-        return assembled
-    if rewritten_body.count("\n\n") + 1 < max(2, (assembled_body.count("\n\n") + 1) // 2):
-        return assembled
-    return rewritten
+    content, _, _ = resolve_reuse_refinement_content(
+        assembled_content=assembled_content,
+        rewritten_content=rewritten_content,
+        section_title=section_title,
+    )
+    return content
 
 
 def _strip_section_heading(text: str) -> str:
@@ -1042,6 +1109,7 @@ def _select_evidence_items(
     evidence_bundle: EvidenceBundle,
     global_params: dict[str, Any] | None = None,
     limit: int,
+    preferred_evidence_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     expected_types = {str(item) for item in (section.get("expected_evidence_types") or [])}
     results = (evidence_bundle.content or {}).get("results") or []
@@ -1073,7 +1141,86 @@ def _select_evidence_items(
         ),
         reverse=True,
     )
-    return [item for _, item in ranked[:limit]]
+    prioritized = [item for _, item in ranked]
+    if preferred_evidence_ids:
+        prioritized.sort(
+            key=lambda item: (
+                not _matches_preferred_citation(item, preferred_evidence_ids),
+                -float(item.get("reusability_score") or item.get("relevance_score") or 0),
+            )
+        )
+    return prioritized[:limit]
+
+
+def _build_citation_excerpt(text: str, *, limit: int = 220) -> str:
+    normalized = _normalize_reuse_block_body(text)
+    normalized = re.sub(r"<!--.*?-->", " ", normalized, flags=re.DOTALL)
+    normalized = re.sub(r"\[\[ASSET:[^\]]+\]\]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[: limit - 1].rstrip()}…"
+
+
+def _normalize_preferred_citation_ids(preferred_citation_ids: list[str] | None) -> set[str]:
+    return {
+        str(item).strip()
+        for item in (preferred_citation_ids or [])
+        if str(item).strip()
+    }
+
+
+def _citation_identity_values(item: dict[str, Any]) -> set[str]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    values = {
+        str(item.get("evidence_id") or "").strip(),
+        str(item.get("block_id") or "").strip(),
+        str(item.get("source_doc_id") or "").strip(),
+        str(item.get("sample_id") or "").strip(),
+        str(item.get("source_title") or "").strip(),
+        str(metadata.get("sample_id") or "").strip(),
+        str(metadata.get("document_name") or "").strip(),
+    }
+    return {value for value in values if value}
+
+
+def _matches_preferred_citation(item: dict[str, Any], preferred_citation_ids: set[str]) -> bool:
+    if not preferred_citation_ids:
+        return False
+    return bool(_citation_identity_values(item) & preferred_citation_ids)
+
+
+def prioritize_reusable_blocks_for_citations(
+    reusable_blocks: list[dict[str, Any]],
+    *,
+    preferred_citation_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    preferred_ids = _normalize_preferred_citation_ids(preferred_citation_ids)
+    if not reusable_blocks or not preferred_ids:
+        return reusable_blocks
+
+    primary: list[dict[str, Any]] = []
+    secondary: list[dict[str, Any]] = []
+    remainder: list[dict[str, Any]] = []
+    anchor_sources: set[str] = set()
+
+    for block in reusable_blocks:
+        if _matches_preferred_citation(block, preferred_ids):
+            primary.append(block)
+            anchor_sources.update(_citation_identity_values(block))
+
+    if not primary:
+        return reusable_blocks
+
+    primary_ids = {id(block) for block in primary}
+    for block in reusable_blocks:
+        if id(block) in primary_ids:
+            continue
+        if _citation_identity_values(block) & anchor_sources:
+            secondary.append(block)
+        else:
+            remainder.append(block)
+    return [*primary, *secondary, *remainder]
 
 
 def _collect_replace_fields(*, raw_content: str, global_params: dict[str, Any]) -> list[str]:
@@ -1632,6 +1779,70 @@ def _looks_customer_specific(content: str) -> bool:
     return any(token in text for token in ("买方", "卖方", "客户", "项目名称", "用户"))
 
 
+def _select_section_scope_candidates(section_candidates: list[dict[str, Any]], *, limit: int = 4) -> list[dict[str, Any]]:
+    if not section_candidates:
+        return []
+    candidates = [item for item in section_candidates if str(item.get("section_path") or item.get("heading_path") or "").strip()]
+    if not candidates:
+        return []
+    selected: list[dict[str, Any]] = []
+    selected_paths: list[str] = []
+
+    anchor_candidates = [
+        item
+        for item in candidates
+        if int(item.get("level") or 1) <= 2
+        and any(
+            token in str(item.get("reason") or "")
+            for token in (
+                "normalized_section_title_match",
+                "section_path_title_match",
+                "heading_alias_match",
+                "section_title_match",
+            )
+        )
+    ]
+    if anchor_candidates:
+        anchor = sorted(
+            anchor_candidates,
+            key=lambda item: (
+                float(item.get("score") or 0),
+                -int(item.get("level") or 0),
+                len(str(item.get("section_path") or item.get("heading_path") or "")),
+            ),
+            reverse=True,
+        )[0]
+        path = str(anchor.get("section_path") or anchor.get("heading_path") or "").strip()
+        if path:
+            selected.append(anchor)
+            selected_paths.append(path)
+
+    specific_candidates = [item for item in candidates if int(item.get("level") or 1) >= 2]
+    scoped = specific_candidates or candidates
+    scoped = sorted(
+        scoped,
+        key=lambda item: (
+            float(item.get("score") or 0),
+            int(item.get("level") or 0),
+            len(str(item.get("section_path") or item.get("heading_path") or "")),
+        ),
+        reverse=True,
+    )
+    for item in scoped:
+        path = str(item.get("section_path") or item.get("heading_path") or "").strip()
+        if not path:
+            continue
+        if path in selected_paths:
+            continue
+        if any(existing.startswith(f"{path} >") or existing == path for existing in selected_paths):
+            continue
+        selected.append(item)
+        selected_paths.append(path)
+        if len(selected) >= limit:
+            break
+    return selected or candidates[:limit]
+
+
 class SectionDraftService:
     def __init__(
         self,
@@ -1798,6 +2009,7 @@ class SectionDraftService:
         project_id: UUID,
         section_id: str,
         outline_id: UUID | None = None,
+        preferred_citation_ids: list[str] | None = None,
     ) -> tuple[Job, SectionDraft]:
         project = await session.get(Project, project_id)
         if not project:
@@ -1830,11 +2042,13 @@ class SectionDraftService:
         await session.flush()
 
         generation_mode = str(section.get("generation_mode") or "baseline")
+        normalized_preferred_citation_ids = _normalize_preferred_citation_ids(preferred_citation_ids)
         global_params = build_section_global_params(requirement_card.content)
         context, citations = build_section_context(
             section=section,
             evidence_bundle=evidence_bundle,
             global_params=global_params,
+            preferred_evidence_ids=normalized_preferred_citation_ids,
         )
         reusable_blocks = build_reusable_blocks(
             section=section,
@@ -1846,11 +2060,19 @@ class SectionDraftService:
                 global_params=global_params,
             ),
         )
+        reusable_blocks = prioritize_reusable_blocks_for_citations(
+            reusable_blocks,
+            preferred_citation_ids=preferred_citation_ids,
+        )
         reusable_blocks = self._expand_reusable_blocks_from_neighbors(
             section=section,
             reusable_blocks=reusable_blocks,
             global_params=global_params,
             limit=DEFAULT_REUSE_LIMIT,
+        )
+        reusable_blocks = prioritize_reusable_blocks_for_citations(
+            reusable_blocks,
+            preferred_citation_ids=preferred_citation_ids,
         )
         recommended_assets = await self._search_recommended_assets(
             session=session,
@@ -1885,7 +2107,10 @@ class SectionDraftService:
             "recommended_assets": recommended_assets,
             "generation_mode": generation_mode,
             "reuse_pack": reuse_pack,
-            "generation_details": generation_details,
+            "generation_details": {
+                **generation_details,
+                "selected_citation_ids": sorted(normalized_preferred_citation_ids),
+            },
         }
         project.status = "DRAFT_READY"
 
@@ -1956,6 +2181,7 @@ class SectionDraftService:
             top_k=12,
             asset_types=build_section_asset_types(section),
             section_context=_build_asset_search_context(section=section, reusable_blocks=reusable_blocks),
+            include_global_historical=True,
         )
         assets = [item.model_dump(mode="json") for item in response.results]
         assets = filter_recommended_assets_for_section(assets, section=section)
@@ -1988,13 +2214,41 @@ class SectionDraftService:
         if not sample_ids:
             return []
         query = build_section_reuse_query(section=section, global_params=global_params)
+        section_candidates = self.case_library.retrieve_sections(
+            query=query,
+            section_title=str(section.get("title") or ""),
+            top_k=4,
+            sample_ids=sample_ids,
+            library_tracks=library_tracks or None,
+        )
+        scoped_sections = _select_section_scope_candidates(section_candidates, limit=4)
+        section_ids = {
+            str(item.get("section_id") or "").strip()
+            for item in scoped_sections
+            if str(item.get("section_id") or "").strip()
+        }
+        section_path_prefixes = {
+            str(item.get("section_path") or item.get("heading_path") or "").strip()
+            for item in scoped_sections
+            if str(item.get("section_path") or item.get("heading_path") or "").strip()
+        }
         base_matches = self.case_library.retrieve_blocks(
             query=query,
             section_title=str(section.get("title") or ""),
             top_k=max(DEFAULT_REUSE_LIMIT * REUSE_CANDIDATE_MULTIPLIER, REUSE_MIN_CANDIDATES),
             sample_ids=sample_ids,
             library_tracks=library_tracks or None,
+            section_ids=section_ids or None,
+            section_path_prefixes=section_path_prefixes or None,
         )
+        if not base_matches:
+            base_matches = self.case_library.retrieve_blocks(
+                query=query,
+                section_title=str(section.get("title") or ""),
+                top_k=max(DEFAULT_REUSE_LIMIT * REUSE_CANDIDATE_MULTIPLIER, REUSE_MIN_CANDIDATES),
+                sample_ids=sample_ids,
+                library_tracks=library_tracks or None,
+            )
         neighbor_matches = self.case_library.expand_related_blocks(
             seed_blocks=base_matches[: max(DEFAULT_REUSE_LIMIT, 3)],
             section_title=str(section.get("title") or ""),
@@ -2092,8 +2346,13 @@ class SectionDraftService:
                 global_params=global_params,
             )
             assembled_content = ensure_required_asset_placeholders(content_md=assembled_content, reuse_pack=assembly_reuse_pack)
+            assembled_content = polish_extractive_reuse_section_content(
+                section=section,
+                content_md=assembled_content,
+            )
             rewritten_content: str | None = None
             refinement_status = "fallback_assembled"
+            refinement_fallback_reason: str | None = "rewrite_missing"
             refinement_error: str | None = None
             try:
                 response = await self.executor.rewrite_section(
@@ -2108,15 +2367,22 @@ class SectionDraftService:
                     global_params=global_params,
                 )
                 rewritten_content = response.content
-                refinement_status = "rewrite_applied"
+                _, refinement_status, refinement_fallback_reason = resolve_reuse_refinement_content(
+                    assembled_content=assembled_content,
+                    rewritten_content=rewritten_content,
+                    section_title=section_title,
+                )
             except Exception as exc:  # noqa: BLE001
                 refinement_error = str(exc)
-            content_md = select_preferred_reuse_content(
+                refinement_fallback_reason = "rewrite_error"
+            content_md, refinement_status, selection_fallback_reason = resolve_reuse_refinement_content(
                 assembled_content=assembled_content,
                 rewritten_content=rewritten_content,
                 section_title=section_title,
             )
+            refinement_fallback_reason = refinement_fallback_reason or selection_fallback_reason
             content_md = ensure_required_asset_placeholders(content_md=content_md, reuse_pack=assembly_reuse_pack)
+            content_md = polish_extractive_reuse_section_content(section=section, content_md=content_md)
             return (
                 content_md,
                 "generated",
@@ -2124,6 +2390,7 @@ class SectionDraftService:
                 {
                     "effective_path": "extractive_reuse",
                     "refinement_status": refinement_status,
+                    "refinement_fallback_reason": refinement_fallback_reason,
                     "refinement_error": refinement_error,
                     "assembled_block_count": len(assembly_blocks),
                 },

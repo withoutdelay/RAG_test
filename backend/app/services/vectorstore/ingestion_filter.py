@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import re
 
 from app.services.parsing.formula_candidates import has_garbled_formula_text, is_formula_like_text
+from app.services.vectorstore.chunk_quality import assess_chunk_quality
 from app.services.vectorstore.chunker import ChunkPayload
 
 
@@ -20,6 +21,7 @@ class ChunkIngestionDecision:
     indexable: bool
     reasons: tuple[str, ...]
     review_required: bool = False
+    preserve_for_assets: bool = False
 
 
 class SafeIngestionFilter:
@@ -38,6 +40,7 @@ class SafeIngestionFilter:
         content = payload.content.strip()
         normalized = " ".join(content.split())
         reasons: list[str] = []
+        preserve_for_assets = False
 
         if self._is_front_matter(payload, normalized):
             reasons.append("front_matter_noise")
@@ -47,17 +50,33 @@ class SafeIngestionFilter:
             reasons.append("page_furniture")
         if self._is_oversized_table(payload):
             reasons.append("oversized_table")
+            preserve_for_assets = True
         if has_garbled_formula_text(normalized):
             reasons.append("garbled_formula_text")
         if self._is_figure_reference_chunk(payload, normalized):
             reasons.append("figure_reference_only")
+        quality_assessment = assess_chunk_quality(
+            chunk_type=payload.chunk_type,
+            raw_content=payload.content,
+            heading_path=payload.heading_path,
+        )
+        if quality_assessment.reasons:
+            reasons.extend(quality_assessment.reasons)
+        if quality_assessment.preserve_for_assets:
+            preserve_for_assets = True
 
         review_required = bool(
             reasons
             or FIGURE_KEYWORD_PATTERN.search(normalized)
             or is_formula_like_text(normalized)
         )
-        return ChunkIngestionDecision(indexable=not reasons, reasons=tuple(reasons), review_required=review_required)
+        deduped_reasons = tuple(dict.fromkeys(reasons))
+        return ChunkIngestionDecision(
+            indexable=not deduped_reasons,
+            reasons=deduped_reasons,
+            review_required=review_required,
+            preserve_for_assets=preserve_for_assets,
+        )
 
     def _is_front_matter(self, payload: ChunkPayload, normalized: str) -> bool:
         if payload.chunk_index > 6:

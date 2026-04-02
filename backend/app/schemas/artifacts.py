@@ -144,6 +144,7 @@ class SectionDraftUpdateRequest(BaseModel):
 
 class SectionRegenerateRequest(BaseModel):
     outline_id: UUID | None = None
+    preferred_citation_ids: list[str] | None = None
 
 
 class ValidationTriggerRequest(BaseModel):

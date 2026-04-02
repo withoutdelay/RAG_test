@@ -193,6 +193,11 @@ def collect_validation_findings(
         citations = draft.citation_refs if isinstance(draft.citation_refs, list) else []
         validator_result = draft.validator_result if isinstance(draft.validator_result, dict) else {}
         reuse_pack = validator_result.get("reuse_pack") if isinstance(validator_result.get("reuse_pack"), dict) else {}
+        valid_reuse_ids = {
+            str(item.get("block_id") or "").strip()
+            for item in (reuse_pack.get("reusable_blocks") or [])
+            if isinstance(item, dict) and str(item.get("block_id") or "").strip()
+        }
 
         if _is_technical_section(section=section, draft=draft) and not citations:
             issue = make_issue(
@@ -217,7 +222,7 @@ def collect_validation_findings(
             if not evidence_id or not source_doc_id or not source_title:
                 invalid_citations.append({"reason": "missing_required_fields", "citation": citation})
                 continue
-            if valid_evidence_ids and str(evidence_id) not in valid_evidence_ids:
+            if valid_evidence_ids and str(evidence_id) not in valid_evidence_ids and str(evidence_id) not in valid_reuse_ids:
                 invalid_citations.append({"reason": "unknown_evidence_id", "citation": citation})
         if invalid_citations:
             issue = make_issue(

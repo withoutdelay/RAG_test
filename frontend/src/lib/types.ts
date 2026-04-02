@@ -77,10 +77,21 @@ export interface EvidenceCard {
   source_doc_id: string;
   heading_path: string[];
   summary: string;
+  raw_content?: string;
   relevance_score: number;
   recommended_use?: string;
   risk_note?: string | null;
   metadata?: Record<string, unknown>;
+}
+
+export interface CaseCandidate {
+  sample_id: string;
+  file_name: string;
+  score: number;
+  reason?: string;
+  profile?: string;
+  library_track?: string;
+  top_level_titles?: string[];
 }
 
 export interface EvidenceBundle {
@@ -91,6 +102,8 @@ export interface EvidenceBundle {
   content: {
     query?: string;
     filters?: Record<string, unknown>;
+    retrieval_strategy?: string;
+    case_candidates?: CaseCandidate[];
     results: EvidenceCard[];
     source_requirement_card_id?: string;
   };
@@ -106,6 +119,12 @@ export interface OutlineNode {
   expected_evidence_types: string[];
   needs_human_review: boolean;
   children: OutlineNode[];
+  section_class?: string;
+  reuse_level?: string;
+  generation_mode?: 'baseline' | 'reuse_first' | 'manual_only' | string;
+  asset_required?: boolean;
+  parameter_sensitive?: boolean;
+  customer_specificity?: string;
 }
 
 export interface Outline {
@@ -114,6 +133,12 @@ export interface Outline {
   title: string;
   sections: OutlineNode[];
   validator_status: string;
+  outline_status?: 'candidate' | 'approved';
+  generation_strategy?: string;
+  approval_required?: boolean;
+  approved_by_user?: boolean;
+  approved_at?: string;
+  reviewer_notes?: string;
 }
 
 export interface Citation {
@@ -123,6 +148,25 @@ export interface Citation {
   heading_path?: string[];
   relevance_score?: number;
   type?: string;
+  excerpt?: string;
+  source_content?: string;
+}
+
+export interface RecommendedAsset {
+  asset_id?: string;
+  asset_type: string;
+  title: string;
+  document_name: string;
+  page_no?: number | null;
+  heading_path?: string;
+  caption?: string | null;
+  reason?: string;
+  preview_text: string;
+  review_required: boolean;
+  visual_role?: string | null;
+  asset_uri?: string;
+  score?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface SectionDraft {
@@ -135,7 +179,11 @@ export interface SectionDraft {
   citation_refs: Citation[];
   assumptions: unknown[];
   global_param_snapshot: Record<string, unknown>;
-  status: 'generated' | 'edited' | 'review_required' | 'approved' | 'rejected';
+  status: 'generated' | 'edited' | 'review_required' | 'approved' | 'rejected' | string;
+  generation_mode?: string;
+  reuse_level?: string;
+  asset_required?: boolean;
+  recommended_assets?: RecommendedAsset[];
   validator_result?: Record<string, unknown>;
   created_at?: string;
   updated_at?: string;
