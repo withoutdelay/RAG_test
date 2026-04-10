@@ -66,6 +66,8 @@ Phase 2 backend plus Phase 3 gateway scaffold for the presales AI system describ
 - OpenAI-compatible relay endpoints use `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
 - For development with a GPT-style proxy, point `OPENAI_BASE_URL` at the relay host; the client will normalize an empty path to `/v1`.
 - The backend currently targets each provider's chat-completions interface and keeps the masking gateway in front of outbound prompts.
+- Current development default: keep using the `OpenAI-compatible` path for generation and multimodal validation.
+- Production planning note: if the final deployment chooses Qwen as the primary model family, evaluate `DashScope SDK` first for OCR, file-native parsing, and vision-heavy asset enrichment instead of forcing everything through the OpenAI-compatible bridge.
 
 ## Test Commands
 

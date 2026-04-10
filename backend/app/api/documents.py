@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import mimetypes
 import uuid
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.background import BackgroundTask
 
 from app.config import get_settings
 from app.db import get_db_session
@@ -646,6 +649,30 @@ async def get_document_figure_assets(
         code=200,
         message="success",
         data=[FigureAssetRead.model_validate(asset) for asset in result.all()],
+    )
+
+
+@router.get("/assets/{asset_id}/content")
+async def get_asset_content(
+    asset_id: UUID,
+    session: AsyncSession = Depends(get_db_session),
+) -> FileResponse:
+    asset = await session.get(FigureAsset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+
+    storage = get_object_storage()
+    try:
+        materialized = storage.materialize(asset.asset_uri)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset content not found") from exc
+
+    media_type = mimetypes.guess_type(materialized.path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        path=materialized.path,
+        media_type=media_type,
+        filename=Path(materialized.path.name).name,
+        background=BackgroundTask(materialized.cleanup),
     )
 
 

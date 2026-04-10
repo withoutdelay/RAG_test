@@ -182,7 +182,7 @@ def _render_asset_reference_block(*, placeholder_type: str, asset_id: str, asset
             ]
         )
 
-    title = str(asset.get("title") or asset.get("caption") or asset.get("preview_text") or "参考资产").strip()
+    title = str(asset.get("display_title") or asset.get("title") or asset.get("caption") or asset.get("preview_text") or "参考资产").strip()
     document_name = str(asset.get("document_name") or "未知文档").strip()
     page_no = asset.get("page_no")
     heading_path = str(asset.get("heading_path") or "").strip()

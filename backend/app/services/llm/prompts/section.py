@@ -115,16 +115,22 @@ def _format_recommended_assets(recommended_assets: list[dict]) -> str:
 
     lines: list[str] = []
     for item in recommended_assets[:5]:
-        label = str(item.get("title") or item.get("caption") or item.get("asset_type") or "参考资产")
+        label = str(item.get("display_title") or item.get("title") or item.get("caption") or item.get("asset_type") or "参考资产")
         page_no = item.get("page_no")
         heading = item.get("heading_path")
+        document_name = item.get("document_name")
         usage_mode = item.get("usage_mode")
         reason = item.get("reason")
+        preview_text = str(item.get("preview_text") or "").strip()
         parts = [label]
         if page_no:
             parts.append(f"页码 {page_no}")
+        if document_name:
+            parts.append(f"来源 {document_name}")
         if heading:
             parts.append(f"章节 {heading}")
+        if preview_text and preview_text != label:
+            parts.append(f"摘要 {preview_text[:120]}")
         if usage_mode:
             parts.append(f"使用方式 {usage_mode}")
         if reason:

@@ -3,6 +3,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 import zipfile
 
@@ -99,6 +100,22 @@ class ParsingTests(unittest.TestCase):
             self.assertFalse(parser._docx_prefers_pdf_conversion(path))
         finally:
             path.unlink(missing_ok=True)
+
+    def test_docling_parser_marks_footer_banner_as_page_furniture_even_with_figure_context(self) -> None:
+        parser = DoclingParser()
+
+        role = parser._classify_visual_role(
+            asset_type="figure",
+            heading_path="变压器一次侧和二次侧绕组间屏蔽层",
+            caption=None,
+            context_before="变压器一次侧和二次侧绕组间屏蔽层 | 为实现一次侧和二次侧绕组的解耦，接地屏蔽层如下图所示。",
+            context_after="HV: 高压侧正弦波电压",
+            bbox=SimpleNamespace(l=57.29, r=134.47, b=20.51, t=45.55),
+            page_size=(595.32, 841.92),
+            image_size=(154, 50),
+        )
+
+        self.assertEqual(role, "page_furniture")
 
 
 if __name__ == "__main__":

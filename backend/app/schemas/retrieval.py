@@ -61,6 +61,7 @@ class AssetSearchResult(BaseModel):
     page_no: int | None = None
     heading_path: str | None = None
     title: str | None = None
+    display_title: str | None = None
     caption: str | None = None
     source_ref: str | None = None
     asset_uri: str

@@ -31,6 +31,13 @@ ENGINEERING_VISUAL_PATTERN = re.compile(
 )
 FORMULA_VISUAL_PATTERN = re.compile(r"(公式|equation|latex|math|推导|算式)", re.IGNORECASE)
 KEYWORD_PATTERN = re.compile(r"[A-Za-z0-9_+-]{2,}|[\u4e00-\u9fff]{2,}")
+PAGE_FURNITURE_PATTERN = re.compile(r"(版本|页码|总页数|目录|dayu electric|买方|卖方)", re.IGNORECASE)
+TITLE_NOISE_PATTERN = re.compile(r"(?:\[[A-Za-z]\]\s*){3,}|(?:\d[\d .,*_\-\[\]()]{10,})")
+GENERIC_ASSET_TITLE_PATTERN = re.compile(
+    r"^(系统功能描述|系统方案|系统构成|性能要求|整体要求|项目名称|技术方案|图|附图|page\s*\d+|figure\s*\d+)$",
+    re.IGNORECASE,
+)
+GENERIC_DIAGRAM_TYPE_PATTERN = re.compile(r"^(other|工程示意图|图示|图形资产|主图|系统图|示意图)$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,7 @@ class AssetCard:
     page_no: int | None
     heading_path: str | None
     title: str | None
+    display_title: str | None
     caption: str | None
     source_ref: str | None
     asset_uri: str
@@ -59,6 +67,8 @@ class AssetCard:
     equipment_type: str
     content_form: str
     metadata: dict[str, Any]
+    semantic_summary_text: str | None = None
+    semantic_summary_confidence: float = 0.0
 
 
 class AssetRetrievalService:
@@ -113,6 +123,7 @@ class AssetRetrievalService:
             semantic_score = max(0.0, _cosine_similarity(query_vector, retrieval_vector))
             metadata_boost = _keyword_overlap_boost(query, card.retrieval_text)
             section_boost = _keyword_overlap_boost(section_title, f"{card.heading_path or ''} {card.title or ''} {card.caption or ''}")
+            summary_boost = _asset_summary_boost(query=query, section_title=section_title, card=card)
             type_boost = _expected_type_boost(card.asset_type, expected_types)
             taxonomy_boost = _asset_taxonomy_boost(card=card, target_taxonomy=target_taxonomy)
             anchor_boost = _asset_anchor_boost(
@@ -122,7 +133,17 @@ class AssetRetrievalService:
             )
             noise_penalty = _asset_noise_penalty(card=card, target_section_type=str(target_taxonomy.get("section_type") or "unknown"))
             risk_penalty = {"high": 0.08, "medium": 0.03}.get(card.risk_level, 0.0)
-            final_score = semantic_score + metadata_boost + section_boost + type_boost + taxonomy_boost + anchor_boost - risk_penalty - noise_penalty
+            final_score = (
+                semantic_score
+                + metadata_boost
+                + section_boost
+                + summary_boost
+                + type_boost
+                + taxonomy_boost
+                + anchor_boost
+                - risk_penalty
+                - noise_penalty
+            )
             scored_cards.append((final_score, card))
 
         scored_cards.sort(key=lambda item: item[0], reverse=True)
@@ -181,6 +202,8 @@ class AssetRetrievalService:
         fallback_cards: list[AssetCard] = []
         for asset, raw_document in rows:
             card = _build_asset_card(asset=asset, raw_document=raw_document, document_map=document_map)
+            if card.asset_type == "figure" and card.visual_role == "page_furniture":
+                continue
             if normalized_doc_types and (card.doc_type or "") not in normalized_doc_types:
                 continue
             if normalized_asset_types and card.asset_type not in normalized_asset_types:
@@ -236,6 +259,16 @@ def _build_asset_card(
         review_required=review_required,
     )
     usage_mode = "reference_only" if review_required else str(asset.reuse_mode or "reference_only")
+    semantic_summary = _normalize_semantic_summary(metadata.get("semantic_summary"))
+    semantic_summary_text = _build_semantic_summary_text(semantic_summary)
+    semantic_summary_confidence = _coerce_confidence((semantic_summary or {}).get("confidence"))
+    display_title = _build_asset_display_title(
+        title=title,
+        heading_path=heading_path,
+        caption=caption,
+        page_no=asset.page_no,
+        semantic_summary=semantic_summary,
+    )
     preview_text = _build_preview_text(
         title=title,
         caption=caption,
@@ -290,6 +323,7 @@ def _build_asset_card(
         page_no=asset.page_no,
         heading_path=heading_path,
         title=title,
+        display_title=display_title,
         caption=caption,
         source_ref=_normalize_text(metadata.get("source_ref")),
         asset_uri=asset.asset_uri,
@@ -298,6 +332,8 @@ def _build_asset_card(
         section_type=str(taxonomy.get("section_type") or "unknown"),
         equipment_type=str(taxonomy.get("equipment_type") or "generic"),
         content_form=str(taxonomy.get("content_form") or ("figure" if asset_type == "figure" else "parameter_table")),
+        semantic_summary_text=semantic_summary_text,
+        semantic_summary_confidence=semantic_summary_confidence,
         metadata=metadata,
     )
 
@@ -307,6 +343,8 @@ def _to_result(*, card: AssetCard, score: float, section_title: str) -> AssetSea
     metadata.setdefault("section_type", card.section_type)
     metadata.setdefault("equipment_type", card.equipment_type)
     metadata.setdefault("content_form", card.content_form)
+    metadata.setdefault("raw_title", card.title)
+    metadata.setdefault("display_title", card.display_title or card.title)
     return AssetSearchResult(
         asset_card_id=card.asset_card_id,
         asset_id=card.asset_id,
@@ -321,7 +359,8 @@ def _to_result(*, card: AssetCard, score: float, section_title: str) -> AssetSea
         review_required=card.review_required,
         page_no=card.page_no,
         heading_path=card.heading_path,
-        title=card.title,
+        title=card.display_title or card.title,
+        display_title=card.display_title,
         caption=card.caption,
         source_ref=card.source_ref,
         asset_uri=card.asset_uri,
@@ -345,6 +384,7 @@ def _build_retrieval_text(
     doc_type: str | None,
     metadata: dict[str, Any],
 ) -> str:
+    semantic_summary_text = _build_semantic_summary_text(_normalize_semantic_summary(metadata.get("semantic_summary")))
     parts = [
         f"asset_type:{asset_type}",
         f"visual_role:{visual_role}" if visual_role else "",
@@ -355,6 +395,7 @@ def _build_retrieval_text(
         f"caption:{caption}" if caption else "",
         f"context_before:{context_before}" if context_before else "",
         f"context_after:{context_after}" if context_after else "",
+        f"semantic_summary:{semantic_summary_text}" if semantic_summary_text else "",
     ]
     table_profile = metadata.get("table_profile") or {}
     if table_profile:
@@ -384,7 +425,7 @@ def _asset_taxonomy_boost(*, card: AssetCard, target_taxonomy: dict[str, Any]) -
         score -= 0.1
     heading_adjustment, _ = heading_focus_adjustment(
         target_section_type=target_section_type,
-        heading_text=" ".join(part for part in (card.heading_path, card.title, card.caption) if part),
+        heading_text=" ".join(part for part in (card.heading_path, card.display_title, card.title, card.caption) if part),
     )
     score += heading_adjustment
     return score
@@ -411,7 +452,7 @@ def _asset_anchor_boost(
 
 
 def _asset_noise_penalty(*, card: AssetCard, target_section_type: str) -> float:
-    text = " ".join(part for part in (card.heading_path, card.title, card.caption, card.preview_text) if part).casefold()
+    text = " ".join(part for part in (card.heading_path, card.display_title, card.title, card.caption, card.preview_text) if part).casefold()
     penalty = 0.0
     if card.visual_role == "page_furniture":
         penalty += 0.32
@@ -432,6 +473,7 @@ def _build_preview_text(
     context_after: str | None,
     metadata: dict[str, Any],
 ) -> str:
+    semantic_summary = _build_semantic_summary_text(_normalize_semantic_summary(metadata.get("semantic_summary")))
     table_profile = metadata.get("table_profile") or {}
     header_fields = table_profile.get("header_fields") or []
     candidates = [
@@ -439,6 +481,7 @@ def _build_preview_text(
         caption,
         context_before,
         context_after,
+        semantic_summary,
         " / ".join(str(item) for item in header_fields[:4]) if header_fields else None,
     ]
     for item in candidates:
@@ -456,16 +499,54 @@ def _derive_visual_role(
     context_before: str | None,
     context_after: str | None,
 ) -> str | None:
-    if metadata.get("visual_role"):
-        return str(metadata["visual_role"])
     if asset.asset_type == "table":
         return "table_asset"
     combined = " ".join(item for item in (title, caption, context_before, context_after) if item)
+    if _looks_like_page_furniture_asset(metadata=metadata, text=combined):
+        return "page_furniture"
+    if metadata.get("visual_role"):
+        return str(metadata["visual_role"])
     if FORMULA_VISUAL_PATTERN.search(combined):
         return "formula_candidate"
     if ENGINEERING_VISUAL_PATTERN.search(combined):
         return "engineering_figure"
     return "reference_figure"
+
+
+def _looks_like_page_furniture_asset(*, metadata: dict[str, Any], text: str) -> bool:
+    if PAGE_FURNITURE_PATTERN.search(text):
+        return True
+
+    bbox = metadata.get("bbox") or {}
+    page_width = float(metadata.get("page_width") or 0)
+    page_height = float(metadata.get("page_height") or 0)
+    image_width = int(metadata.get("width") or 0)
+    image_height = int(metadata.get("height") or 0)
+    if not bbox or page_width <= 0 or page_height <= 0:
+        return False
+
+    try:
+        left = float(bbox.get("l") or 0.0)
+        right = float(bbox.get("r") or 0.0)
+        top = float(bbox.get("t") or 0.0)
+        bottom = float(bbox.get("b") or 0.0)
+    except (TypeError, ValueError):
+        return False
+
+    box_width = max(0.0, right - left)
+    box_height = max(0.0, top - bottom)
+    if box_width <= 0 or box_height <= 0:
+        return False
+
+    near_top = top >= page_height * 0.88
+    near_bottom = bottom <= page_height * 0.12
+    narrow_band = box_height <= page_height * 0.12
+    slim_band = box_height <= page_height * 0.08
+    small_area = box_width * box_height <= page_width * page_height * 0.02
+    wide_banner = box_width >= box_height * 1.6
+    small_image = image_width > 0 and image_height > 0 and image_width * image_height <= 40000
+
+    return (near_top or near_bottom) and narrow_band and (slim_band or small_area or wide_banner or small_image)
 
 
 def _derive_asset_type(*, asset: FigureAsset, visual_role: str | None) -> str:
@@ -536,10 +617,19 @@ def _expected_type_boost(asset_type: str, expected_types: list[str]) -> float:
     return 0.0
 
 
+def _asset_summary_boost(*, query: str, section_title: str, card: AssetCard) -> float:
+    if not card.semantic_summary_text:
+        return 0.0
+    query_overlap = _semantic_phrase_overlap_boost(query, card.semantic_summary_text)
+    section_overlap = _semantic_phrase_overlap_boost(section_title, card.semantic_summary_text)
+    confidence_factor = 0.65 + (card.semantic_summary_confidence * 0.35)
+    return min(0.3, (query_overlap * 1.8 + section_overlap * 1.2) * confidence_factor)
+
+
 def _build_reason(*, card: AssetCard, section_title: str) -> str:
     parts: list[str] = []
     if section_title:
-        if _keyword_overlap_boost(section_title, f"{card.heading_path or ''} {card.title or ''}") > 0:
+        if _keyword_overlap_boost(section_title, f"{card.heading_path or ''} {card.display_title or card.title or ''}") > 0:
             parts.append(f"与当前章节“{section_title}”主题接近")
         else:
             parts.append(f"可为当前章节“{section_title}”提供参考素材")
@@ -558,6 +648,134 @@ def _normalize_text(value: Any) -> str | None:
     if value in (None, "", [], {}):
         return None
     return str(value).strip() or None
+
+
+def _normalize_semantic_summary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    if str(value.get("status") or "") not in {"summarized", "reviewed"}:
+        return None
+    return value
+
+
+def _build_semantic_summary_text(summary: dict[str, Any] | None) -> str | None:
+    if not summary:
+        return None
+    parts: list[str] = []
+    for key in ("title_hint", "diagram_type", "summary", "problem_solved", "principle_summary", "review_notes"):
+        value = _normalize_text(summary.get(key))
+        if value:
+            parts.append(value)
+    for key in ("key_components", "signals_or_loops", "applicable_sections", "retrieval_keywords"):
+        values = summary.get(key) or []
+        if isinstance(values, list):
+            normalized = [str(item).strip() for item in values if str(item).strip()]
+            if normalized:
+                parts.append(" ".join(normalized))
+    if not parts:
+        return None
+    return "；".join(parts)
+
+
+def _coerce_confidence(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _semantic_phrase_overlap_boost(query: str, text: str) -> float:
+    if not query or not text:
+        return 0.0
+    normalized_text = text.lower()
+    fragments: set[str] = set()
+    for keyword in KEYWORD_PATTERN.findall(query):
+        lowered = keyword.lower()
+        if len(lowered) >= 2:
+            fragments.add(lowered)
+        if any("\u4e00" <= char <= "\u9fff" for char in lowered):
+            max_size = min(6, len(lowered))
+            for size in range(2, max_size + 1):
+                for index in range(0, len(lowered) - size + 1):
+                    fragments.add(lowered[index : index + size])
+    hits = sum(1 for fragment in fragments if fragment in normalized_text)
+    return min(0.36, hits * 0.03)
+
+
+def _build_asset_display_title(
+    *,
+    title: str | None,
+    heading_path: str | None,
+    caption: str | None,
+    page_no: int | None,
+    semantic_summary: dict[str, Any] | None,
+) -> str | None:
+    if title and not _looks_like_low_value_title(title=title, heading_path=heading_path):
+        return title
+
+    title_hint = _normalize_text((semantic_summary or {}).get("title_hint"))
+    if title_hint and not _looks_like_generic_diagram_type(title_hint):
+        return title_hint
+
+    diagram_type = _normalize_text((semantic_summary or {}).get("diagram_type"))
+    if diagram_type and not _looks_like_generic_diagram_type(diagram_type):
+        return diagram_type
+
+    summary = _normalize_text((semantic_summary or {}).get("summary"))
+    if summary:
+        compact = _compact_summary_title(summary)
+        if compact:
+            return compact
+
+    for fallback in (caption, title, heading_path):
+        normalized = _normalize_text(fallback)
+        if normalized:
+            return normalized
+    if page_no is not None:
+        return f"参考图 {page_no}"
+    return "参考图"
+
+
+def _looks_like_low_value_title(*, title: str, heading_path: str | None) -> bool:
+    normalized = title.strip()
+    if not normalized:
+        return True
+    compact = re.sub(r"\s+", "", normalized)
+    if len(compact) <= 2:
+        return True
+    if TITLE_NOISE_PATTERN.search(normalized):
+        return True
+    if GENERIC_ASSET_TITLE_PATTERN.fullmatch(normalized):
+        return True
+    if heading_path and compact == re.sub(r"\s+", "", heading_path):
+        return True
+    digit_count = sum(char.isdigit() for char in normalized)
+    alpha_count = sum(char.isalpha() for char in normalized)
+    chinese_count = sum("\u4e00" <= char <= "\u9fff" for char in normalized)
+    if digit_count >= 8 and chinese_count == 0 and alpha_count <= 6:
+        return True
+    if re.fullmatch(r"[0-9A-Za-z .,*_\-\[\]()]+", normalized) and chinese_count == 0 and digit_count >= 4:
+        return True
+    return False
+
+
+def _looks_like_generic_diagram_type(value: str) -> bool:
+    normalized = value.strip()
+    if not normalized:
+        return True
+    return bool(GENERIC_DIAGRAM_TYPE_PATTERN.fullmatch(normalized))
+
+
+def _compact_summary_title(summary: str) -> str | None:
+    normalized = summary.strip().strip("。；;")
+    normalized = re.sub(r"^(该图|该资产|本图)\s*(为|是|用于|展示|说明)?", "", normalized)
+    normalized = re.split(r"[，。；;：:]", normalized, maxsplit=1)[0].strip()
+    normalized = normalized[:48]
+    if not normalized:
+        return None
+    if not any(token in normalized for token in ("图", "回路", "系统", "波形", "结构", "接线", "示意", "联锁", "接口")):
+        normalized = f"{normalized}示意图"
+    return normalized
 
 
 def _cosine_similarity(left: list[float], right: list[float]) -> float:

@@ -407,6 +407,11 @@ class Phase2ApiTests(unittest.TestCase):
             self.assertEqual(figure_assets[0]["metadata"]["heading_path"], "5.1.1 变频器系统示意图")
             self.assertEqual(figure_assets[0]["metadata"]["context_before"], "本系统一次原理图如下：")
 
+            asset_content_response = client.get(f"/api/v1/assets/{figure_assets[0]['id']}/content")
+            self.assertEqual(asset_content_response.status_code, 200)
+            self.assertEqual(asset_content_response.content, b"fake-png-bytes")
+            self.assertTrue(asset_content_response.headers["content-type"].startswith("image/png"))
+
             asset_search_response = client.post(
                 f"/api/v1/projects/{project_id}/assets/search",
                 json={

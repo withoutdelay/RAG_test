@@ -98,9 +98,11 @@ def build_outline_library_entry(
     markdown: str,
     structure_hints: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    catalog = build_section_catalog(markdown, structure_hints=structure_hints)
-    sections = catalog.get("sections") or []
-    flattened = flatten_section_catalog(sections)
+    catalog, sections, flattened, _chunks = _build_enriched_section_catalog(
+        sample_entry=sample_entry,
+        markdown=markdown,
+        structure_hints=structure_hints,
+    )
     outline_tree = [_section_to_outline_dict(section) for section in sections]
     document_title = str(catalog.get("document_title") or "").strip()
     top_level_titles = [str(section.get("title") or "").strip() for section in sections if str(section.get("title") or "").strip()]
@@ -130,11 +132,13 @@ def build_reusable_block_entries(
     structure_hints: dict[str, Any] | None = None,
     chunker: Chunker | None = None,
 ) -> list[dict[str, Any]]:
-    chunker = chunker or Chunker(max_chars=1200)
-    catalog = build_section_catalog(markdown, structure_hints=structure_hints)
-    flat_sections = flatten_section_catalog(catalog.get("sections") or [])
-    promoted_markdown = promote_body_headings(markdown, structure_hints=structure_hints)
-    chunks = chunker.split(promoted_markdown)
+    chunker = chunker or Chunker()
+    _catalog, _sections, flat_sections, chunks = _build_enriched_section_catalog(
+        sample_entry=sample_entry,
+        markdown=markdown,
+        structure_hints=structure_hints,
+        chunker=chunker,
+    )
     blocks: list[dict[str, Any]] = []
     current_section_index = -1
     current_section: dict[str, Any] | None = None
@@ -195,6 +199,21 @@ def build_reusable_block_entries(
                 "heading_aliases": section_aliases,
                 "section_path": current_section.get("section_path") if current_section else (section_heading_path or chunk.heading_path),
                 "normalized_section_path": current_section.get("normalized_section_path") if current_section else None,
+                "heading_family": list(current_section.get("heading_family") or []) if current_section else [],
+                "page_span": current_section.get("page_span") if current_section else None,
+                "content_span": current_section.get("content_span") if current_section else None,
+                "section_summary": current_section.get("section_summary") if current_section else None,
+                "section_retrieval_text": current_section.get("section_retrieval_text") if current_section else None,
+                "contextualized_block_text": "\n".join(
+                    part
+                    for part in (
+                        sample_entry.get("file_name"),
+                        current_section.get("section_path") if current_section else (section_heading_path or chunk.heading_path),
+                        current_section.get("section_summary") if current_section else None,
+                        chunk.content,
+                    )
+                    if part
+                ).strip(),
                 "section_level": current_section.get("level") if current_section else None,
                 "section_class": section_class,
                 "customer_specificity": customer_specificity,
@@ -327,6 +346,11 @@ def _section_to_outline_dict(section: dict[str, Any]) -> dict[str, Any]:
         "level": section.get("level"),
         "heading_path": section.get("section_path"),
         "normalized_heading": section.get("normalized_heading"),
+        "heading_family": list(section.get("heading_family") or []),
+        "page_span": section.get("page_span"),
+        "content_span": section.get("content_span"),
+        "section_summary": section.get("section_summary"),
+        "section_retrieval_text": section.get("section_retrieval_text"),
         "source_signals": section.get("source_signals") or [],
         "children": [_section_to_outline_dict(child) for child in (section.get("children") or [])],
     }
@@ -369,3 +393,177 @@ def _section_matches_heading(*, section: dict[str, Any], heading_text: str, norm
 
 def promote_heading_match_key(text: str) -> str:
     return normalize_section_heading(text)
+
+
+def _build_enriched_section_catalog(
+    *,
+    sample_entry: dict[str, Any],
+    markdown: str,
+    structure_hints: dict[str, Any] | None = None,
+    chunker: Chunker | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[ChunkPayload]]:
+    chunker = chunker or Chunker()
+    catalog = build_section_catalog(markdown, structure_hints=structure_hints)
+    sections = catalog.get("sections") or []
+    flat_sections = _flatten_section_refs(sections)
+    promoted_markdown = promote_body_headings(markdown, structure_hints=structure_hints)
+    chunks = chunker.split(promoted_markdown)
+
+    for section in flat_sections:
+        section["_direct_chunk_indexes"] = []
+        section["_direct_chunk_texts"] = []
+
+    current_section_index = -1
+    current_section: dict[str, Any] | None = None
+    for chunk in chunks:
+        matched_section_index, matched_section = _match_chunk_to_section(
+            chunk=chunk,
+            flat_sections=flat_sections,
+            start_index=max(current_section_index, 0),
+        )
+        if matched_section is not None:
+            current_section_index = matched_section_index
+            current_section = matched_section
+        if current_section is None:
+            continue
+        current_section["_direct_chunk_indexes"].append(int(chunk.chunk_index))
+        current_section["_direct_chunk_texts"].append(str(chunk.content or ""))
+
+    document_title = str(catalog.get("document_title") or "").strip()
+    file_name = str(sample_entry.get("file_name") or "").strip()
+    for section in sections:
+        _finalize_section_enrichment(
+            section=section,
+            document_title=document_title,
+            file_name=file_name,
+        )
+    return catalog, sections, flatten_section_catalog(sections), chunks
+
+
+def _flatten_section_refs(sections: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        flattened.append(section)
+        children = section.get("children") or []
+        if children:
+            flattened.extend(_flatten_section_refs(children))
+    return flattened
+
+
+def _finalize_section_enrichment(
+    *,
+    section: dict[str, Any],
+    document_title: str,
+    file_name: str,
+) -> tuple[list[int], list[int], list[str]]:
+    direct_chunk_indexes = [int(item) for item in (section.get("_direct_chunk_indexes") or [])]
+    direct_chunk_texts = [str(item) for item in (section.get("_direct_chunk_texts") or []) if str(item).strip()]
+    subtree_chunk_indexes = list(direct_chunk_indexes)
+    subtree_page_nos: list[int] = []
+    subtree_texts = list(direct_chunk_texts)
+
+    page_no = section.get("page_no")
+    if page_no is not None:
+        try:
+            subtree_page_nos.append(int(page_no))
+        except (TypeError, ValueError):
+            pass
+
+    for child in section.get("children") or []:
+        child_chunk_indexes, child_page_nos, child_texts = _finalize_section_enrichment(
+            section=child,
+            document_title=document_title,
+            file_name=file_name,
+        )
+        subtree_chunk_indexes.extend(child_chunk_indexes)
+        subtree_page_nos.extend(child_page_nos)
+        subtree_texts.extend(child_texts)
+
+    heading_family = [
+        item.strip()
+        for item in str(section.get("normalized_section_path") or "").split(">")
+        if item.strip()
+    ]
+    if heading_family:
+        section["heading_family"] = heading_family
+    elif section.get("normalized_heading"):
+        section["heading_family"] = [str(section.get("normalized_heading"))]
+
+    if subtree_page_nos:
+        section["page_span"] = [min(subtree_page_nos), max(subtree_page_nos)]
+    if subtree_chunk_indexes:
+        section["content_span"] = {
+            "chunk_start": min(subtree_chunk_indexes),
+            "chunk_end": max(subtree_chunk_indexes),
+        }
+
+    section_summary = _build_section_summary(
+        source_heading=str(section.get("source_heading") or section.get("title") or ""),
+        chunk_texts=subtree_texts,
+    )
+    if section_summary:
+        section["section_summary"] = section_summary
+
+    section["section_retrieval_text"] = "\n".join(
+        part
+        for part in (
+            document_title,
+            file_name,
+            str(section.get("section_path") or ""),
+            " ".join(str(item) for item in (section.get("heading_aliases") or []) if item),
+            section_summary,
+        )
+        if part
+    ).strip()
+
+    section.pop("_direct_chunk_indexes", None)
+    section.pop("_direct_chunk_texts", None)
+    return subtree_chunk_indexes, subtree_page_nos, subtree_texts
+
+
+def _build_section_summary(*, source_heading: str, chunk_texts: list[str]) -> str:
+    normalized_heading = normalize_section_heading(source_heading)
+    snippets: list[str] = []
+    for text in chunk_texts:
+        snippet = _normalize_section_summary_text(text)
+        if not snippet:
+            continue
+        if normalized_heading and normalize_section_heading(snippet) == normalized_heading:
+            continue
+        snippets.append(snippet)
+        if len(snippets) >= 2:
+            break
+    if not snippets:
+        return ""
+    summary = " ".join(snippets).strip()
+    if len(summary) > 260:
+        summary = summary[:259].rstrip() + "…"
+    return summary
+
+
+def _normalize_section_summary_text(text: str) -> str:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    filtered_lines = [line for line in lines if not line.startswith("#")]
+    if not filtered_lines:
+        return ""
+    table_lines = [line for line in filtered_lines if "|" in line]
+    if len(table_lines) >= 2:
+        cells: list[str] = []
+        for line in table_lines[:3]:
+            for cell in line.split("|"):
+                normalized = re.sub(r"\s+", " ", cell).strip()
+                if not normalized or set(normalized) <= {"-", ":"}:
+                    continue
+                if normalized not in cells:
+                    cells.append(normalized)
+            if len(cells) >= 6:
+                break
+        return " ".join(cells[:6])
+    normalized = re.sub(r"\s+", " ", " ".join(filtered_lines)).strip()
+    if len(normalized) > 180:
+        normalized = normalized[:179].rstrip() + "…"
+    return normalized

@@ -8,7 +8,13 @@ ALEMBIC ?= $(ROOT_DIR)$(VENV)/bin/alembic
 POSTGRES_TEST_URL ?= postgresql+asyncpg://copilot:copilot@localhost:55432/copilot_db
 PHASE2_ENV = DATABASE_URL=$(POSTGRES_TEST_URL) QDRANT_LOCATION=:memory: EMBEDDING_DIMENSION=16 EMBEDDING_BACKEND=fallback PARSER_BACKEND=fallback PYTHONPYCACHEPREFIX=/tmp/pycache
 
-.PHONY: backend-install backend-install-full backend-migrate backend-run gateway-run phase2-test phase2-test-api phase3-test phase4-test phaseb-test phasec-test phased-test phasee-test phasev2-test-api pdf-audit sample-manifest case-library historical-corpus
+.PHONY: dev-up dev-restart backend-install backend-install-full backend-migrate backend-run gateway-run phase2-test phase2-test-api phase3-test phase4-test phaseb-test phasec-test phased-test phasee-test phasev2-test-api pdf-audit sample-manifest case-library historical-corpus
+
+dev-up:
+	./scripts/dev-up.sh
+
+dev-restart:
+	./scripts/dev-up.sh restart
 
 backend-install:
 	python3 -m venv $(VENV)

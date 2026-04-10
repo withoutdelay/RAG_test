@@ -12,6 +12,7 @@ import {
   RotateCcw,
   Save,
   Sparkles,
+  Target,
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -29,8 +30,17 @@ import {
 import { Input } from '@/components/ui/input';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
-import api, { getApiErrorMessage } from '@/lib/api';
-import { Citation, EvidenceCard, RecommendedAsset, SectionDraft } from '@/lib/types';
+import api, { buildAssetContentUrl, getApiErrorMessage } from '@/lib/api';
+import type {
+  Citation,
+  EvidenceCard,
+  RecommendedAsset,
+  ReuseBlockLike,
+  ReuseRetrievalTrace,
+  SectionDraft,
+  SectionGenerationDetails,
+  SectionValidatorResult,
+} from '@/lib/types';
 import { toast } from 'sonner';
 
 type EditableBlockKind = 'heading' | 'table' | 'list' | 'quote' | 'paragraph' | 'placeholder';
@@ -54,13 +64,6 @@ interface PreviewAssetSegment {
 }
 
 type PreviewSegment = PreviewMarkdownSegment | PreviewAssetSegment;
-
-interface ReusableBlockLike {
-  block_id?: string;
-  source_title?: string;
-  heading_path?: string[] | string;
-  content_md?: string;
-}
 
 function getStatusVariant(status: SectionDraft['status']): 'default' | 'secondary' | 'warning' | 'success' | 'destructive' {
   if (status === 'approved') return 'success';
@@ -173,37 +176,148 @@ function buildPreviewSegments(content: string): PreviewSegment[] {
   return segments;
 }
 
-function getReusableBlocks(section: SectionDraft): ReusableBlockLike[] {
-  const validatorResult = section.validator_result;
-  if (!validatorResult || typeof validatorResult !== 'object') {
-    return [];
+function getReusableBlocks(section: SectionDraft): ReuseBlockLike[] {
+  const reusePack = section.validator_result?.reuse_pack;
+  return Array.isArray(reusePack?.reusable_blocks) ? reusePack.reusable_blocks : [];
+}
+
+function getSectionValidatorResult(section: SectionDraft): SectionValidatorResult | undefined {
+  return section.validator_result;
+}
+
+function getGenerationDetails(section: SectionDraft): SectionGenerationDetails | undefined {
+  return getSectionValidatorResult(section)?.generation_details;
+}
+
+function getReuseTrace(section: SectionDraft): ReuseRetrievalTrace | undefined {
+  return getSectionValidatorResult(section)?.reuse_pack?.retrieval_trace;
+}
+
+function reusableBlockOrder(block: ReuseBlockLike, fallbackIndex: number): number {
+  if (typeof block.chunk_index === 'number' && Number.isFinite(block.chunk_index)) {
+    return block.chunk_index;
   }
-  const reusePack = (validatorResult as Record<string, unknown>).reuse_pack;
-  if (!reusePack || typeof reusePack !== 'object') {
-    return [];
+  return 10000 + fallbackIndex;
+}
+
+function findMatchingReusableBlocks(
+  section: SectionDraft,
+  citationOrAsset: { evidence_id?: string; source_title?: string; heading_path?: string[] | string; document_name?: string },
+): ReuseBlockLike[] {
+  const targetSource = citationOrAsset.source_title || citationOrAsset.document_name || '';
+  const normalizedHeading = normalizeHeadingPath(citationOrAsset.heading_path);
+  const exactMatch = citationOrAsset.evidence_id
+    ? getReusableBlocks(section).find(
+        (block) => citationOrAsset.evidence_id && block.block_id && block.block_id === citationOrAsset.evidence_id && block.content_md,
+      )
+    : undefined;
+
+  if (exactMatch?.content_md) {
+    return [exactMatch];
   }
-  const blocks = (reusePack as Record<string, unknown>).reusable_blocks;
-  return Array.isArray(blocks) ? (blocks as ReusableBlockLike[]) : [];
+
+  return getReusableBlocks(section)
+    .map((block, index) => ({ block, index }))
+    .filter(
+      ({ block }) =>
+        Boolean(block.content_md) &&
+        (block.source_title || '') === targetSource &&
+        normalizeHeadingPath(block.heading_path) === normalizedHeading,
+    )
+    .sort((left, right) => reusableBlockOrder(left.block, left.index) - reusableBlockOrder(right.block, right.index))
+    .map(({ block }) => block)
+    .filter((block, index, blocks) => {
+      const signature = `${block.block_id || ''}|${block.content_md || ''}`;
+      return blocks.findIndex((candidate) => `${candidate.block_id || ''}|${candidate.content_md || ''}` === signature) === index;
+    });
+}
+
+function parseMarkdownTableParts(markdown: string): { header: string; delimiter: string; rows: string[] } | null {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const header = lines[index].trim();
+    const delimiter = lines[index + 1].trim();
+    if (!header.includes('|')) {
+      continue;
+    }
+    if (!/^\|?[\s:|-]+\|?$/.test(delimiter) || !delimiter.includes('-')) {
+      continue;
+    }
+    const rows: string[] = [];
+    for (let rowIndex = index + 2; rowIndex < lines.length; rowIndex += 1) {
+      const row = lines[rowIndex].trim();
+      if (!row) {
+        continue;
+      }
+      if (!row.includes('|')) {
+        break;
+      }
+      rows.push(row);
+    }
+    return { header, delimiter, rows };
+  }
+  return null;
+}
+
+function mergeMarkdownTableBlocks(blocks: ReuseBlockLike[]): string | undefined {
+  const mergedRows: string[] = [];
+  let header = '';
+  let delimiter = '';
+
+  for (const block of blocks) {
+    const content = block.content_md?.trim();
+    if (!content) {
+      continue;
+    }
+    const table = parseMarkdownTableParts(content);
+    if (!table) {
+      return undefined;
+    }
+    if (!header) {
+      header = table.header;
+      delimiter = table.delimiter;
+    }
+    mergedRows.push(...table.rows);
+  }
+
+  if (!header || !delimiter) {
+    return undefined;
+  }
+
+  return [header, delimiter, ...mergedRows].join('\n');
 }
 
 function findReusableBlockContent(
   section: SectionDraft,
   citationOrAsset: { evidence_id?: string; source_title?: string; heading_path?: string[] | string; document_name?: string },
 ): string | undefined {
-  const normalizedHeading = normalizeHeadingPath(citationOrAsset.heading_path);
-  for (const block of getReusableBlocks(section)) {
-    if (citationOrAsset.evidence_id && block.block_id && block.block_id === citationOrAsset.evidence_id && block.content_md) {
-      return block.content_md;
-    }
-    if (
-      block.content_md &&
-      (block.source_title || '') === (citationOrAsset.source_title || citationOrAsset.document_name || '') &&
-      normalizeHeadingPath(block.heading_path) === normalizedHeading
-    ) {
-      return block.content_md;
-    }
+  const matches = findMatchingReusableBlocks(section, citationOrAsset);
+  return matches[0]?.content_md;
+}
+
+function findReusableBlockPreviewContent(section: SectionDraft, asset: RecommendedAsset): string | undefined {
+  const matches = findMatchingReusableBlocks(section, {
+    document_name: asset.document_name,
+    heading_path: asset.heading_path,
+  }).filter((block) => block.content_md?.trim());
+
+  if (!matches.length) {
+    return undefined;
   }
-  return undefined;
+
+  if (asset.asset_type !== 'table') {
+    return matches[0]?.content_md?.trim();
+  }
+
+  const tableBlocks = matches.filter((block) => block.block_type === 'table' || markdownTableCandidate(block.content_md || ''));
+  if (!tableBlocks.length) {
+    return matches[0]?.content_md?.trim();
+  }
+  if (tableBlocks.length === 1) {
+    return tableBlocks[0].content_md?.trim();
+  }
+
+  return mergeMarkdownTableBlocks(tableBlocks) || tableBlocks.map((block) => block.content_md?.trim()).filter(Boolean).join('\n\n');
 }
 
 function resolveCitationSourceContent(
@@ -223,6 +337,10 @@ function resolveCitationSourceContent(
 
 function markdownTableCandidate(text: string): boolean {
   return text.includes('|') && /\n\|?[-: ]+\|[-|: ]+/.test(text);
+}
+
+function isVisualAsset(asset?: RecommendedAsset): boolean {
+  return asset?.asset_type === 'figure' || asset?.asset_type === 'formula_candidate';
 }
 
 function MarkdownArticle({ markdown, compact = false }: { markdown: string; compact?: boolean }) {
@@ -258,9 +376,18 @@ function AssetPreviewCard({
   section: SectionDraft;
   embedded?: boolean;
 }) {
-  const supportContent = asset ? findReusableBlockContent(section, { document_name: asset.document_name, heading_path: asset.heading_path }) : undefined;
+  const [imageState, setImageState] = useState<{ assetId: string; failed: boolean }>({
+    assetId: asset?.asset_id || '',
+    failed: false,
+  });
+  const visualAsset = isVisualAsset(asset);
+  const supportContent = asset && !visualAsset ? findReusableBlockPreviewContent(section, asset) : undefined;
   const previewMarkdown = supportContent?.trim() || asset?.preview_text || '';
-  const title = placeholderLabel || asset?.title || asset?.caption || '已插入图表引用';
+  const title = placeholderLabel || asset?.display_title || asset?.title || asset?.caption || '已插入图表引用';
+  const currentAssetId = asset?.asset_id || '';
+  const imageFailed = imageState.assetId === currentAssetId ? imageState.failed : false;
+  const assetContentUrl = asset?.asset_id && visualAsset ? buildAssetContentUrl(asset.asset_id) : null;
+  const summaryText = (asset?.caption || asset?.preview_text || '').trim();
 
   return (
     <div className={`rounded-2xl border ${embedded ? 'border-emerald-200 bg-emerald-50/70' : asset?.review_required ? 'border-amber-300 bg-amber-50/70' : 'border-slate-200 bg-slate-50/70'} p-4`}>
@@ -276,17 +403,59 @@ function AssetPreviewCard({
           {[asset?.document_name, asset?.heading_path].filter(Boolean).join(' / ')}
         </p>
       )}
-      <div className="mt-3 rounded-xl border border-white/70 bg-white/80 p-3">
-        {previewMarkdown ? (
-          markdownTableCandidate(previewMarkdown) ? (
-            <MarkdownArticle markdown={previewMarkdown} compact />
+      {visualAsset && assetContentUrl && !imageFailed ? (
+        <div className="mt-3 overflow-hidden rounded-[1.25rem] border border-white/80 bg-white/90 p-3 shadow-[0_20px_50px_-28px_rgba(15,23,42,0.45)]">
+          <div className="relative overflow-hidden rounded-[1rem] border border-slate-200/80 bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.14),_rgba(255,255,255,0.96)_48%,_rgba(241,245,249,1)_100%)]">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={assetContentUrl}
+              alt={title}
+              loading="lazy"
+              className={`block w-full bg-transparent object-contain ${embedded ? 'max-h-[300px]' : 'max-h-[420px]'}`}
+              onError={() => setImageState({ assetId: currentAssetId, failed: true })}
+            />
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-slate-950/10 to-transparent" />
+          </div>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-2.5 py-1 font-medium text-emerald-700">
+                <Eye className="h-3.5 w-3.5" />
+                原图预览
+              </span>
+              {asset?.visual_role ? <span>{asset.visual_role}</span> : null}
+            </div>
+            <a
+              href={assetContentUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-xs font-medium text-slate-600 transition hover:text-slate-900"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              新窗口查看
+            </a>
+          </div>
+          {summaryText ? (
+            <p className="mt-3 text-sm leading-6 text-slate-700 whitespace-pre-wrap">{summaryText}</p>
           ) : (
-            <p className="text-sm leading-6 text-slate-700 whitespace-pre-wrap">{previewMarkdown}</p>
-          )
-        ) : (
-          <p className="text-sm text-slate-500">该位置已绑定图表资产，导出时会继续引用对应资源。</p>
-        )}
-      </div>
+            <p className="mt-3 text-xs text-slate-500">当前展示的是原图预览，导出时会继续引用这张历史图形资产。</p>
+          )}
+        </div>
+      ) : (
+        <div className="mt-3 rounded-xl border border-white/70 bg-white/80 p-3">
+          {previewMarkdown ? (
+            markdownTableCandidate(previewMarkdown) ? (
+              <MarkdownArticle markdown={previewMarkdown} compact />
+            ) : (
+              <p className="text-sm leading-6 text-slate-700 whitespace-pre-wrap">{previewMarkdown}</p>
+            )
+          ) : (
+            <p className="text-sm text-slate-500">该位置已绑定图表资产，导出时会继续引用对应资源。</p>
+          )}
+          {visualAsset && assetContentUrl && imageFailed ? (
+            <p className="mt-3 text-xs text-amber-700">原图加载失败，当前已回退到文本摘要视图。</p>
+          ) : null}
+        </div>
+      )}
       {asset?.reason ? <p className="mt-3 text-xs font-medium text-slate-600">命中原因：{asset.reason}</p> : null}
     </div>
   );
@@ -364,6 +533,11 @@ export function SectionBlock({
   const selectedCitationCount = selectedCitationIds.length;
   const hasEditableContent = Boolean(content.trim());
   const assetCount = section.recommended_assets?.length || 0;
+  const generationDetails = getGenerationDetails(section);
+  const reuseTrace = getReuseTrace(section);
+  const selectedSections = generationDetails?.selected_sections || reuseTrace?.scoped_sections || [];
+  const selectedBlocks = generationDetails?.selected_blocks || [];
+  const tokenBudget = generationDetails?.token_budget;
   const previewSegments = useMemo(() => buildPreviewSegments(content), [content]);
   const assetLookup = useMemo(
     () =>
@@ -726,6 +900,98 @@ export function SectionBlock({
               ) : (
                 <p className="text-xs text-slate-500">No citations</p>
               )}
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-900">Retrieval Trace</h4>
+                  <p className="text-xs text-slate-500">查看本章是按章节包还是整章材料生成，以及命中的来源章节。</p>
+                </div>
+                <Target className="h-4 w-4 text-slate-400" />
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <Badge variant="outline">{generationDetails?.retrieval_mode || 'unknown'}</Badge>
+                  {generationDetails?.effective_path ? (
+                    <Badge variant="secondary" className="bg-slate-100 text-slate-700">
+                      {generationDetails.effective_path}
+                    </Badge>
+                  ) : null}
+                  {tokenBudget ? (
+                    <Badge variant={tokenBudget.within_budget ? 'success' : 'warning'}>
+                      {tokenBudget.within_budget ? 'within budget' : 'over budget'}
+                    </Badge>
+                  ) : null}
+                </div>
+
+                {reuseTrace?.query ? (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Query</p>
+                    <p className="mt-1 text-sm leading-6 text-slate-700">{reuseTrace.query}</p>
+                  </div>
+                ) : null}
+
+                {tokenBudget ? (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Section Tokens</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-900">{tokenBudget.section_material_tokens ?? 0}</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Asset Tokens</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-900">{tokenBudget.asset_tokens ?? 0}</p>
+                    </div>
+                  </div>
+                ) : null}
+
+                {selectedSections.length > 0 ? (
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Selected Sections</p>
+                    {selectedSections.map((item, index) => (
+                      <div key={`${item.section_id || item.section_path || 'section'}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-slate-900">{item.file_name || item.source_heading || '历史章节'}</p>
+                            <p className="mt-1 text-xs leading-5 text-slate-500">{item.section_path || '未标注章节路径'}</p>
+                          </div>
+                          {typeof item.score === 'number' ? (
+                            <Badge variant="outline">{item.score.toFixed(2)}</Badge>
+                          ) : null}
+                        </div>
+                        {item.reason ? <p className="mt-2 text-xs text-slate-600">{item.reason}</p> : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-xs text-slate-500">
+                    当前还没有章节级 trace。重新生成后，这里会显示命中的历史章节。
+                  </div>
+                )}
+
+                {selectedBlocks.length > 0 ? (
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Prompt Blocks</p>
+                    {selectedBlocks.map((item, index) => (
+                      <div key={`${item.block_id || item.section_path || 'block'}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-slate-900">{item.source_title || '复用块'}</p>
+                            <p className="mt-1 text-xs leading-5 text-slate-500">{item.section_path || normalizeHeadingPath(item.heading_path)}</p>
+                          </div>
+                          {typeof item.selection_score === 'number' ? (
+                            <Badge variant="outline">{item.selection_score.toFixed(2)}</Badge>
+                          ) : null}
+                        </div>
+                        {item.selection_reasons?.length ? (
+                          <p className="mt-2 text-xs text-slate-600">{item.selection_reasons.join(' / ')}</p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </div>
 
             <div className="rounded-2xl border border-slate-200 bg-white p-4">

@@ -18,6 +18,9 @@ backend/data/case_library/
 
 frontend/node_modules/
 frontend/.next/
+.run/
+scripts/*.log
+scripts/*.pid
 
 private_samples/real_proposals/*
 !private_samples/real_proposals/.gitkeep

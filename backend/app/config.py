@@ -29,6 +29,17 @@ class Settings(BaseSettings):
     case_library_block_path: str = str(CASE_LIBRARY_ROOT / "block_library.json")
     parser_backend: Literal["auto", "docling", "fallback"] = "auto"
     docling_libreoffice_cmd: str | None = None
+    parser_llm_asset_review_enabled: bool = False
+    parser_llm_asset_review_max_assets: int = 6
+    parser_llm_asset_review_confidence_threshold: float = 0.72
+    parser_llm_asset_review_use_vision: bool = True
+    parser_llm_asset_review_image_detail: Literal["auto", "low", "high"] = "auto"
+    parser_llm_asset_review_max_image_bytes: int = 800000
+    parser_llm_asset_summary_enabled: bool = False
+    parser_llm_asset_summary_max_assets: int = 6
+    parser_llm_asset_summary_use_vision: bool = True
+    parser_llm_asset_summary_image_detail: Literal["auto", "low", "high"] = "auto"
+    parser_llm_asset_summary_max_image_bytes: int = 800000
     safe_ingestion_enabled: bool = True
     formula_ocr_backend: Literal["none", "pix2tex"] = "none"
     formula_ocr_max_assets: int = 3
@@ -56,6 +67,9 @@ class Settings(BaseSettings):
         validation_alias="QWEN_BASE_URL",
     )
     qwen_model_name: str = Field(default="qwen-plus", validation_alias="QWEN_MODEL")
+    doubao_api_key: str | None = Field(default=None, validation_alias="DOUBAO_API_KEY")
+    doubao_base_url: str = Field(default="https://ark.cn-beijing.volces.com/api/v3", validation_alias="DOUBAO_BASE_URL")
+    doubao_model_name: str = Field(default="doubao-seed-1-6-250615", validation_alias="DOUBAO_MODEL")
     azure_openai_api_key: str | None = Field(default=None, validation_alias="AZURE_OPENAI_API_KEY")
     azure_openai_endpoint: str | None = Field(default=None, validation_alias="AZURE_OPENAI_ENDPOINT")
     azure_openai_deployment: str | None = Field(default=None, validation_alias="AZURE_OPENAI_DEPLOYMENT")

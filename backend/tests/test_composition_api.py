@@ -143,7 +143,7 @@ class _FakeSectionDraftService:
             ),
         ]
 
-    async def regenerate_section(self, *, session, project_id, section_id, outline_id=None):
+    async def regenerate_section(self, *, session, project_id, section_id, outline_id=None, preferred_citation_ids=None):
         return (
             SimpleNamespace(id=self.job_id, status="succeeded"),
             self._make_draft(

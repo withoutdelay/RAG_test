@@ -473,6 +473,13 @@ class DoclingParser:
         if any(marker in joined_context for marker in ("版本", "页码", "总页数", "目录", "DAYU ELECTRIC", "买方", "卖方")):
             return "page_furniture"
 
+        if self._looks_like_page_furniture_asset(
+            bbox=bbox,
+            page_size=page_size,
+            image_size=image_size,
+        ):
+            return "page_furniture"
+
         if any(
             marker in joined_context
             for marker in ("原理图", "接线图", "示意图", "波形", "电压", "电流", "circuit", "waveform", "schematic")
@@ -495,6 +502,35 @@ class DoclingParser:
             return "engineering_figure"
 
         return "illustration"
+
+    def _looks_like_page_furniture_asset(
+        self,
+        *,
+        bbox: Any | None,
+        page_size: tuple[float, float] | None,
+        image_size: tuple[int, int] | None,
+    ) -> bool:
+        if bbox is None or page_size is None:
+            return False
+
+        page_width, page_height = page_size
+        if page_width <= 0 or page_height <= 0:
+            return False
+
+        box_width = max(0.0, float(bbox.r) - float(bbox.l))
+        box_height = max(0.0, float(bbox.t) - float(bbox.b))
+        if box_width <= 0 or box_height <= 0:
+            return False
+
+        near_top = float(bbox.t) >= page_height * 0.88
+        near_bottom = float(bbox.b) <= page_height * 0.12
+        narrow_band = box_height <= page_height * 0.12
+        slim_band = box_height <= page_height * 0.08
+        small_area = box_width * box_height <= page_width * page_height * 0.02
+        wide_banner = box_width >= box_height * 1.6
+        small_image = image_size is not None and image_size[0] * image_size[1] <= 40000
+
+        return (near_top or near_bottom) and narrow_band and (slim_band or small_area or wide_banner or small_image)
 
     def _to_png_bytes(self, image: Any | None) -> bytes | None:
         if image is None:

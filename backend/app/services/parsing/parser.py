@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from app.config import get_settings
+from app.services.parsing.asset_review import AssetReviewService
+from app.services.parsing.asset_semantic_summary import AssetSemanticSummaryService
 from app.services.parsing.document_profile import build_document_profile
 from app.services.parsing.docling_parser import DoclingParser, ParsedDocument
 from app.services.parsing.image_extractor import ImageExtractor
@@ -16,9 +19,12 @@ class ParserService:
     """
 
     def __init__(self) -> None:
+        self.settings = get_settings()
         self.docling_parser = DoclingParser()
         self.table_parser = TableParser()
         self.image_extractor = ImageExtractor()
+        self.asset_review_service = AssetReviewService(settings=self.settings)
+        self.asset_summary_service = AssetSemanticSummaryService(settings=self.settings)
 
     async def parse_document(self, file_path: str) -> ParsedDocument:
         parsed = await self.docling_parser.parse(file_path)
@@ -26,6 +32,8 @@ class ParserService:
         tables = await self.table_parser.extract(cleaned_markdown)
         native_assets = await self.image_extractor.extract(file_path)
         assets = [*parsed.assets, *native_assets]
+        assets, asset_review_stats = await self.asset_review_service.review_assets(assets)
+        assets, asset_summary_stats = await self.asset_summary_service.summarize_assets(assets)
 
         metadata = {
             **parsed.metadata,
@@ -33,7 +41,21 @@ class ParserService:
             "table_count": len(tables),
             "image_count": sum(1 for asset in assets if asset.asset_type != "table"),
             "figure_asset_count": len(assets),
+            "asset_llm_review_enabled": self.settings.parser_llm_asset_review_enabled,
+            "asset_llm_reviewed_count": asset_review_stats.reviewed_count,
+            "asset_llm_override_count": asset_review_stats.overridden_count,
+            "asset_llm_title_refined_count": asset_review_stats.title_refined_count,
+            "asset_llm_vision_attached_count": asset_review_stats.vision_attached_count,
+            "asset_llm_summary_enabled": self.settings.parser_llm_asset_summary_enabled,
+            "asset_llm_summary_candidate_count": asset_summary_stats.candidate_count,
+            "asset_llm_summarized_count": asset_summary_stats.summarized_count,
+            "asset_llm_summary_vision_attached_count": asset_summary_stats.vision_attached_count,
+            "asset_llm_summary_request_count": asset_summary_stats.request_count,
         }
+        if asset_review_stats.error:
+            metadata["asset_llm_review_error"] = asset_review_stats.error
+        if asset_summary_stats.error:
+            metadata["asset_llm_summary_error"] = asset_summary_stats.error
         metadata.update(
             build_document_profile(
                 markdown=cleaned_markdown,

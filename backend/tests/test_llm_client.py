@@ -15,6 +15,7 @@ from app.services.llm.client import (
     BaseLLMProvider,
     HTTPChatCompletionsProvider,
     LLMClient,
+    LLMInputImage,
     LLMRequest,
     LLMResponse,
     ModelType,
@@ -100,7 +101,7 @@ class LLMClientTests(unittest.TestCase):
         response = asyncio.run(
             client.invoke(
                 LLMRequest(
-                    task_type=TaskType.OUTLINE,
+                    task_type=TaskType.EXTRACTION,
                     session_id="llm-test-session",
                     system_prompt="system",
                     user_prompt="请为上海电气集团生成技术方案。",
@@ -118,7 +119,7 @@ class LLMClientTests(unittest.TestCase):
             chunks: list[str] = []
             async for chunk in client.invoke_stream(
                 LLMRequest(
-                    task_type=TaskType.SECTION_WRITE,
+                    task_type=TaskType.EXTRACTION,
                     session_id="stream-session",
                     system_prompt="system",
                     user_prompt="请为上海电气集团生成实施章节。",
@@ -130,7 +131,7 @@ class LLMClientTests(unittest.TestCase):
         content = asyncio.run(collect())
         self.assertEqual(content, "根据分析，上海电气集团需要新的实施方案。")
 
-    def test_mock_provider_routes_section_write_to_qwen(self) -> None:
+    def test_mock_provider_routes_section_write_to_doubao(self) -> None:
         client = self._make_client(MockLLMProvider(chunk_size=12))
 
         response = asyncio.run(
@@ -145,10 +146,10 @@ class LLMClientTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(response.model_used, "qwen:mock")
+        self.assertEqual(response.model_used, "doubao:mock")
         self.assertIn("项目概述", response.content)
 
-    def test_live_provider_falls_back_from_deepseek_to_qwen(self) -> None:
+    def test_live_provider_falls_back_from_deepseek_to_qwen_for_extraction(self) -> None:
         seen_hosts: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -198,7 +199,7 @@ class LLMClientTests(unittest.TestCase):
             response = asyncio.run(
                 client.invoke(
                     LLMRequest(
-                        task_type=TaskType.OUTLINE,
+                        task_type=TaskType.EXTRACTION,
                         session_id="live-fallback-session",
                         system_prompt="请输出 JSON。",
                         user_prompt="请为上海电气集团生成结构化摘要。",
@@ -214,6 +215,89 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(seen_hosts, ["deepseek", "qwen"])
         self.assertEqual(response.content, '{"company":"上海电气集团"}')
         self.assertEqual(response.model_used, "qwen-plus")
+
+    def test_live_client_uses_doubao_responses_endpoint_for_generation(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content.decode("utf-8"))
+            self.assertEqual(request.url.host, "ark.test")
+            self.assertEqual(request.url.path, "/api/v3/responses")
+            self.assertEqual(request.headers["Authorization"], "Bearer doubao-key")
+            self.assertEqual(payload["model"], "doubao-model")
+            self.assertTrue(payload["stream"])
+            result_text = '{"title":"豆包大纲","sections":[{"index":1,"title":"项目概述","subsections":[{"index":1,"title":"背景"}]}]}'
+            stream_body = (
+                "event: response.created\n"
+                f"data: {json.dumps({'type': 'response.created', 'response': {'id': 'resp-doubao', 'model': 'doubao-model'}}, ensure_ascii=False)}\n\n"
+                "event: response.output_text.delta\n"
+                f"data: {json.dumps({'type': 'response.output_text.delta', 'delta': result_text}, ensure_ascii=False)}\n\n"
+                "event: response.completed\n"
+                f"data: {json.dumps({'type': 'response.completed', 'response': {'id': 'resp-doubao', 'model': 'doubao-model', 'usage': {'input_tokens': 18, 'output_tokens': 7, 'total_tokens': 25}}}, ensure_ascii=False)}\n\n"
+            )
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=stream_body)
+
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER_BACKEND": "live",
+                "DEEPSEEK_API_KEY": "",
+                "QWEN_API_KEY": "",
+                "AZURE_OPENAI_API_KEY": "",
+                "AZURE_OPENAI_ENDPOINT": "",
+                "AZURE_OPENAI_DEPLOYMENT": "",
+                "OPENAI_API_KEY": "",
+                "OPENAI_BASE_URL": "",
+                "DOUBAO_API_KEY": "doubao-key",
+                "DOUBAO_BASE_URL": "https://ark.test/api/v3",
+                "DOUBAO_MODEL": "doubao-model",
+            },
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            provider = HTTPChatCompletionsProvider(transport=httpx.MockTransport(handler))
+            client = self._make_client(provider)
+            response = asyncio.run(
+                client.invoke(
+                    LLMRequest(
+                        task_type=TaskType.OUTLINE,
+                        session_id="doubao-outline-session",
+                        system_prompt="请输出 JSON。",
+                        user_prompt="请为上海电气集团生成结构化摘要。",
+                        json_schema={
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "sections": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "index": {"type": "integer"},
+                                            "title": {"type": "string"},
+                                            "subsections": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "index": {"type": "integer"},
+                                                        "title": {"type": "string"},
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                            "required": ["title", "sections"],
+                        },
+                    )
+                )
+            )
+
+        self.assertEqual(
+            response.content,
+            '{"title":"豆包大纲","sections":[{"index":1,"title":"项目概述","subsections":[{"index":1,"title":"背景"}]}]}',
+        )
+        self.assertEqual(response.model_used, "doubao-model")
 
     def test_live_provider_calls_azure_chat_completions_endpoint(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -400,6 +484,81 @@ class LLMClientTests(unittest.TestCase):
             content = asyncio.run(collect())
 
         self.assertEqual(content, "Hello world")
+
+    def test_live_client_includes_input_images_for_responses_api(self) -> None:
+        seen_payload: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal seen_payload
+            seen_payload = json.loads(request.content.decode("utf-8"))
+            result_text = '{"items":[{"candidate_index":0,"visual_role":"page_furniture","confidence":0.9,"reason":"logo","title_hint":""}]}'
+            stream_body = (
+                "event: response.created\n"
+                f"data: {json.dumps({'type': 'response.created', 'response': {'id': 'resp-openai-vision', 'model': 'gpt-4.1-mini'}}, ensure_ascii=False)}\n\n"
+                "event: response.output_text.delta\n"
+                f"data: {json.dumps({'type': 'response.output_text.delta', 'delta': result_text}, ensure_ascii=False)}\n\n"
+                "event: response.completed\n"
+                f"data: {json.dumps({'type': 'response.completed', 'response': {'id': 'resp-openai-vision', 'model': 'gpt-4.1-mini', 'usage': {'input_tokens': 18, 'output_tokens': 7, 'total_tokens': 25}}}, ensure_ascii=False)}\n\n"
+            )
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=stream_body)
+
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER_BACKEND": "live",
+                "DEEPSEEK_API_KEY": "",
+                "QWEN_API_KEY": "",
+                "DOUBAO_API_KEY": "",
+                "AZURE_OPENAI_API_KEY": "",
+                "AZURE_OPENAI_ENDPOINT": "",
+                "AZURE_OPENAI_DEPLOYMENT": "",
+                "OPENAI_API_KEY": "relay-key",
+                "OPENAI_BASE_URL": "https://relay.test",
+                "OPENAI_MODEL": "gpt-4.1-mini",
+                "GATEWAY_MASKING_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            provider = HTTPChatCompletionsProvider(transport=httpx.MockTransport(handler))
+            client = self._make_client(provider)
+            response = asyncio.run(
+                client.invoke(
+                    LLMRequest(
+                        task_type=TaskType.ASSET_REVIEW,
+                        system_prompt="请输出 JSON。",
+                        user_prompt="请审核图片资产。",
+                        input_images=[LLMInputImage(image_url="data:image/png;base64,ZmFrZQ==", detail="low")],
+                        json_schema={
+                            "type": "object",
+                            "properties": {
+                                "items": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "candidate_index": {"type": "integer"},
+                                            "visual_role": {"type": "string"},
+                                            "confidence": {"type": "number"},
+                                            "reason": {"type": "string"},
+                                            "title_hint": {"type": "string"},
+                                        },
+                                        "required": ["candidate_index", "visual_role", "confidence", "reason", "title_hint"],
+                                    },
+                                }
+                            },
+                            "required": ["items"],
+                        },
+                    )
+                )
+            )
+
+        user_content = seen_payload["input"][1]["content"]
+        self.assertEqual(user_content[0]["type"], "input_text")
+        self.assertEqual(user_content[1]["type"], "input_image")
+        self.assertEqual(user_content[1]["image_url"], "data:image/png;base64,ZmFrZQ==")
+        self.assertEqual(user_content[1]["detail"], "low")
+        self.assertIn('"visual_role":"page_furniture"', response.content)
 
 
 if __name__ == "__main__":

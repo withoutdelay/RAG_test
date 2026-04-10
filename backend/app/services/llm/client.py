@@ -19,12 +19,15 @@ from app.services.gateway_client import GatewayClient
 class ModelType(str, Enum):
     DEEPSEEK = "deepseek"
     QWEN = "qwen"
+    DOUBAO = "doubao"
     AZURE = "azure"
     OPENAI = "openai"
 
 
 class TaskType(str, Enum):
     EXTRACTION = "extraction"
+    ASSET_REVIEW = "asset_review"
+    ASSET_SUMMARY = "asset_summary"
     OUTLINE = "outline"
     SECTION_WRITE = "section_write"
     HOLISTIC = "holistic"
@@ -34,18 +37,21 @@ class TaskType(str, Enum):
 
 ROUTING_TABLE = {
     TaskType.EXTRACTION: ModelType.DEEPSEEK,
-    TaskType.OUTLINE: ModelType.DEEPSEEK,
-    TaskType.SECTION_WRITE: ModelType.QWEN,
-    TaskType.HOLISTIC: ModelType.QWEN,
-    TaskType.REWRITE: ModelType.QWEN,
+    TaskType.ASSET_REVIEW: ModelType.DOUBAO,
+    TaskType.ASSET_SUMMARY: ModelType.DOUBAO,
+    TaskType.OUTLINE: ModelType.DOUBAO,
+    TaskType.SECTION_WRITE: ModelType.DOUBAO,
+    TaskType.HOLISTIC: ModelType.DOUBAO,
+    TaskType.REWRITE: ModelType.DOUBAO,
     TaskType.QUESTION_GEN: ModelType.DEEPSEEK,
 }
 
 FALLBACK_TABLE = {
     ModelType.DEEPSEEK: ModelType.QWEN,
-    ModelType.QWEN: ModelType.DEEPSEEK,
+    ModelType.QWEN: ModelType.DOUBAO,
+    ModelType.DOUBAO: ModelType.QWEN,
     ModelType.AZURE: ModelType.QWEN,
-    ModelType.OPENAI: ModelType.QWEN,
+    ModelType.OPENAI: ModelType.DOUBAO,
 }
 
 
@@ -60,7 +66,14 @@ class LLMRequest:
     stream: bool = False
     session_id: str | None = None
     entity_types: list[str] | None = None
+    input_images: list["LLMInputImage"] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class LLMInputImage:
+    image_url: str
+    detail: str = "auto"
 
 
 @dataclass(slots=True)
@@ -107,6 +120,7 @@ class MockLLMProvider(BaseLLMProvider):
     MODEL_RATES = {
         ModelType.DEEPSEEK: 0.000002,
         ModelType.QWEN: 0.000003,
+        ModelType.DOUBAO: 0.000003,
         ModelType.AZURE: 0.000004,
         ModelType.OPENAI: 0.000004,
     }
@@ -151,6 +165,10 @@ class MockLLMProvider(BaseLLMProvider):
             return self._render_rewrite(model_type, request)
         if request.task_type == TaskType.EXTRACTION:
             return json.dumps({"summary": request.user_prompt[:120]}, ensure_ascii=False)
+        if request.task_type == TaskType.ASSET_REVIEW:
+            return self._render_asset_review(request)
+        if request.task_type == TaskType.ASSET_SUMMARY:
+            return self._render_asset_summary(request)
         if request.task_type == TaskType.QUESTION_GEN:
             return "1. 关键参数是否已经最终确认？\n2. 现场实施窗口是否已锁定？"
         return request.user_prompt
@@ -238,6 +256,58 @@ class MockLLMProvider(BaseLLMProvider):
         if section_context:
             return f"{section_context}\n\n{revised_paragraph}"
         return revised_paragraph
+
+    def _render_asset_review(self, request: LLMRequest) -> str:
+        candidates = request.metadata.get("candidates") or []
+        items: list[dict[str, Any]] = []
+        for item in candidates:
+            candidate_index = int(item.get("candidate_index") or 0)
+            current_role = str(item.get("current_visual_role") or "illustration")
+            title = str(item.get("title") or item.get("heading_path") or "")
+            items.append(
+                {
+                    "candidate_index": candidate_index,
+                    "visual_role": current_role,
+                    "confidence": 0.55,
+                    "reason": "mock asset review kept the current classification",
+                    "title_hint": title[:80],
+                }
+            )
+        return json.dumps({"items": items}, ensure_ascii=False)
+
+    def _render_asset_summary(self, request: LLMRequest) -> str:
+        candidates = request.metadata.get("candidates") or []
+        items: list[dict[str, Any]] = []
+        for item in candidates:
+            candidate_index = int(item.get("candidate_index") or 0)
+            title = str(item.get("title") or item.get("heading_path") or "方案图")
+            context = " ".join(
+                part
+                for part in (
+                    str(item.get("caption") or "").strip(),
+                    str(item.get("context_before") or "").strip(),
+                    str(item.get("context_after") or "").strip(),
+                )
+                if part
+            )
+            items.append(
+                {
+                    "candidate_index": candidate_index,
+                    "title_hint": title[:48],
+                    "diagram_type": "工程示意图",
+                    "summary": f"{title}，用于说明系统结构、关键设备关系或控制逻辑。",
+                    "problem_solved": context[:120] or "用于辅助解释系统方案中的关键技术问题。",
+                    "principle_summary": f"{title}展示主要设备、接口与控制关系，便于章节复用时说明工作原理。",
+                    "key_components": [title[:48]] if title else [],
+                    "signals_or_loops": [],
+                    "applicable_sections": ["总体方案", "系统方案", "控制系统方案"],
+                    "retrieval_keywords": [title[:32]] if title else [],
+                    "confidence": 0.66,
+                    "review_required": False,
+                    "review_notes": "mock semantic summary",
+                }
+            )
+        return json.dumps({"items": items}, ensure_ascii=False)
 
 
 class HTTPChatCompletionsProvider(BaseLLMProvider):
@@ -330,6 +400,16 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
                 model_name=settings.qwen_model_name,
             )
 
+        if settings.doubao_api_key:
+            configs[ModelType.DOUBAO] = ProviderEndpointConfig(
+                provider_name="doubao",
+                base_url=_normalize_openai_base_url(settings.doubao_base_url),
+                api_key=settings.doubao_api_key,
+                model_name=settings.doubao_model_name,
+                path="/responses",
+                api_style="responses",
+            )
+
         if settings.azure_openai_api_key and settings.azure_openai_endpoint and settings.azure_openai_deployment:
             configs[ModelType.AZURE] = ProviderEndpointConfig(
                 provider_name="azure",
@@ -373,6 +453,15 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
     def _build_payload(self, model_type: ModelType, request: LLMRequest, *, stream: bool) -> dict[str, Any]:
         config = self._get_config(model_type)
         if config.api_style == "responses":
+            user_content: list[dict[str, Any]] = [{"type": "input_text", "text": request.user_prompt}]
+            for image in request.input_images:
+                user_content.append(
+                    {
+                        "type": "input_image",
+                        "image_url": image.image_url,
+                        "detail": image.detail,
+                    }
+                )
             payload: dict[str, Any] = {
                 "input": [
                     {
@@ -381,7 +470,7 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
                     },
                     {
                         "role": "user",
-                        "content": [{"type": "input_text", "text": request.user_prompt}],
+                        "content": user_content,
                     },
                 ],
                 "temperature": request.temperature,
@@ -396,10 +485,26 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
                 payload["stream"] = True
             return payload
 
+        user_content: str | list[dict[str, Any]]
+        if request.input_images:
+            user_content = [{"type": "text", "text": request.user_prompt}]
+            for image in request.input_images:
+                user_content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image.image_url,
+                            "detail": image.detail,
+                        },
+                    }
+                )
+        else:
+            user_content = request.user_prompt
+
         payload: dict[str, Any] = {
             "messages": [
                 {"role": "system", "content": request.system_prompt},
-                {"role": "user", "content": request.user_prompt},
+                {"role": "user", "content": user_content},
             ],
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
@@ -739,6 +844,8 @@ class LLMClient:
         ordered = [primary]
         if fallback and fallback != primary:
             ordered.append(fallback)
+        if ModelType.DOUBAO not in ordered:
+            ordered.append(ModelType.DOUBAO)
         if ModelType.AZURE not in ordered:
             ordered.append(ModelType.AZURE)
         if ModelType.OPENAI not in ordered:

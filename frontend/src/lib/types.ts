@@ -156,6 +156,7 @@ export interface RecommendedAsset {
   asset_id?: string;
   asset_type: string;
   title: string;
+  display_title?: string | null;
   document_name: string;
   page_no?: number | null;
   heading_path?: string;
@@ -167,6 +168,95 @@ export interface RecommendedAsset {
   asset_uri?: string;
   score?: number;
   metadata?: Record<string, unknown>;
+}
+
+export interface RetrievalSectionTrace {
+  sample_id?: string;
+  file_name?: string;
+  section_id?: string;
+  section_path?: string;
+  source_heading?: string;
+  level?: number;
+  score?: number;
+  reason?: string;
+}
+
+export interface RetrievalBlockTrace {
+  block_id?: string;
+  source_title?: string;
+  source_section_id?: string;
+  section_path?: string;
+  heading_path?: string[];
+  selection_score?: number;
+  selection_reasons?: string[];
+}
+
+export interface RetrievalTokenBudget {
+  section_material_tokens?: number;
+  asset_tokens?: number;
+  within_budget?: boolean;
+}
+
+export interface RetrievalQueryIntents {
+  title_text?: string;
+  detail_text?: string;
+  context_text?: string;
+  title_terms?: string[];
+  detail_terms?: string[];
+  context_terms?: string[];
+}
+
+export interface ReuseRetrievalTrace {
+  query?: string;
+  query_intents?: RetrievalQueryIntents;
+  section_candidates?: RetrievalSectionTrace[];
+  scoped_sections?: RetrievalSectionTrace[];
+}
+
+export interface ReuseBlockLike {
+  block_id?: string;
+  block_type?: string;
+  chunk_index?: number;
+  source_title?: string;
+  source_section_id?: string;
+  section_path?: string;
+  heading_path?: string[] | string;
+  content_md?: string;
+}
+
+export interface ReusePack {
+  generation_mode?: string;
+  reuse_level?: string;
+  reusable_blocks?: ReuseBlockLike[];
+  recommended_assets?: RecommendedAsset[];
+  must_replace_fields?: string[];
+  banned_terms?: string[];
+  replacement_hints?: Record<string, unknown>;
+  required_asset_placeholders?: Array<Record<string, unknown>>;
+  parameter_candidates?: Record<string, unknown>;
+  risk_flags?: string[];
+  retrieval_trace?: ReuseRetrievalTrace;
+}
+
+export interface SectionGenerationDetails {
+  effective_path?: string;
+  retrieval_mode?: 'baseline_fallback' | 'section_pack' | 'full_section' | string;
+  selected_sections?: RetrievalSectionTrace[];
+  selected_blocks?: RetrievalBlockTrace[];
+  token_budget?: RetrievalTokenBudget;
+  refinement_status?: string;
+  refinement_fallback_reason?: string | null;
+  refinement_error?: string | null;
+  assembled_block_count?: number;
+  selected_citation_ids?: string[];
+}
+
+export interface SectionValidatorResult {
+  recommended_assets?: RecommendedAsset[];
+  generation_mode?: string;
+  reuse_pack?: ReusePack;
+  generation_details?: SectionGenerationDetails;
+  [key: string]: unknown;
 }
 
 export interface SectionDraft {
@@ -184,7 +274,7 @@ export interface SectionDraft {
   reuse_level?: string;
   asset_required?: boolean;
   recommended_assets?: RecommendedAsset[];
-  validator_result?: Record<string, unknown>;
+  validator_result?: SectionValidatorResult;
   created_at?: string;
   updated_at?: string;
 }

@@ -18,13 +18,16 @@ from app.services.composition.section_service import (
     build_reusable_blocks,
     build_reuse_refinement_instruction,
     build_section_asset_query,
+    build_section_asset_types,
     build_section_context,
     build_section_global_params,
+    build_section_reuse_query_intents,
     ensure_required_asset_placeholders,
     filter_recommended_assets_for_section,
     polish_extractive_reuse_section_content,
     prioritize_reusable_blocks_for_citations,
     prioritize_recommended_assets,
+    resolve_reuse_generation_strategy,
     resolve_reuse_refinement_content,
     sanitize_generated_section_content,
     select_preferred_reuse_content,
@@ -369,6 +372,19 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("技术架构", query)
         self.assertIn("IEC 61850", query)
         self.assertIn("湛江中纸项目", query)
+        self.assertIn("工程示意图", query)
+
+    def test_build_section_asset_types_infers_table_for_parameter_sections(self) -> None:
+        asset_types = build_section_asset_types(
+            {
+                "title": "设备技术参数与性能指标",
+                "purpose": "汇总主要技术参数、容量与性能数据。",
+                "keywords": ["技术参数", "性能指标", "额定容量"],
+                "expected_evidence_types": ["section"],
+            }
+        )
+
+        self.assertEqual(asset_types, ["table"])
 
     def test_build_rewrite_prompts_enforces_structure_preservation(self) -> None:
         system_prompt, user_prompt = build_rewrite_prompts(
@@ -808,7 +824,47 @@ class CompositionHelperTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual([item["asset_id"] for item in tightened], ["asset_main"])
+        self.assertEqual([item["asset_id"] for item in tightened], ["asset_main", "asset_transformer"])
+
+    def test_tighten_recommended_assets_for_reuse_keeps_multiple_candidates_when_anchor_is_weak(self) -> None:
+        tightened = tighten_recommended_assets_for_reuse(
+            [
+                {
+                    "asset_id": "asset_scheme",
+                    "document_name": "案例A.docx",
+                    "heading_path": "4.1 LCI 变频软起系统方案",
+                    "title": "4.1 LCI 变频软起系统方案",
+                    "metadata": {"section_type": "vfd_spec"},
+                },
+                {
+                    "asset_id": "asset_control",
+                    "document_name": "案例A.docx",
+                    "heading_path": "3 高浓磨机电机控制及电机辅助设备监控系统方案",
+                    "title": "3 高浓磨机电机控制及电机辅助设备监控系统方案",
+                    "metadata": {"section_type": "protection_interlock"},
+                },
+                {
+                    "asset_id": "asset_curve",
+                    "document_name": "案例B.docx",
+                    "heading_path": "4.4.2 变频启动曲线",
+                    "title": "4.4.2 变频启动曲线",
+                    "metadata": {"section_type": "control_logic"},
+                },
+            ],
+            section={
+                "title": "控制系统及联锁保护方案",
+                "purpose": "说明启停逻辑、联锁和信号交互方式。",
+                "expected_evidence_types": ["section", "figure"],
+            },
+            reusable_blocks=[
+                {
+                    "source_title": "案例A.docx",
+                    "heading_path": ["4", "与本节无强同族关系的标题"],
+                }
+            ],
+        )
+
+        self.assertEqual([item["asset_id"] for item in tightened], ["asset_scheme", "asset_control", "asset_curve"])
 
     def test_filter_recommended_assets_for_section_skips_document_index_table(self) -> None:
         filtered = filter_recommended_assets_for_section(
@@ -936,6 +992,45 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("[[ASSET:TABLE:asset-001]]", content)
         self.assertIn("历史方案B", content)
 
+    def test_build_section_reuse_query_intents_splits_title_detail_and_context(self) -> None:
+        intents = build_section_reuse_query_intents(
+            section={
+                "title": "控制接口与通讯方案",
+                "purpose": "说明 DCS/PLC 接口、信号点表与通讯边界。",
+                "keywords": ["DCS", "PLC", "通信接口"],
+                "expected_evidence_types": ["section", "table"],
+                "section_class": "architecture",
+            },
+            global_params={"project_name": "测试项目", "product_line": "hv_vfd", "industry": "钢铁"},
+        )
+
+        self.assertIn("控制接口与通讯方案", intents["title_text"])
+        self.assertIn("DCS/PLC", intents["detail_text"])
+        self.assertIn("hv_vfd", intents["context_text"])
+        self.assertIn("钢铁", intents["context_terms"])
+
+    def test_build_reuse_pack_keeps_retrieval_trace(self) -> None:
+        reuse_pack = build_reuse_pack(
+            section={"title": "技术架构", "generation_mode": "reuse_first"},
+            global_params={"project_name": "测试项目"},
+            reusable_blocks=[],
+            recommended_assets=[],
+            retrieval_trace={
+                "query": "技术架构 站控层 网络层",
+                "scoped_sections": [
+                    {
+                        "section_id": "4.1",
+                        "section_path": "第四章 技术架构 > 4.1 总体架构",
+                        "score": 0.84,
+                        "reason": "normalized_section_title_match",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(reuse_pack["retrieval_trace"]["query"], "技术架构 站控层 网络层")
+        self.assertEqual(reuse_pack["retrieval_trace"]["scoped_sections"][0]["section_id"], "4.1")
+
     def test_ensure_required_asset_placeholders_appends_missing_placeholders(self) -> None:
         content = ensure_required_asset_placeholders(
             content_md="## 技术架构\n\n正文内容。",
@@ -1046,6 +1141,87 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("本项目主回路按照安全隔离、旁路切换和连续运行要求进行配置", polished)
         self.assertIn("主要设备配置如下表所示。", polished)
 
+    def test_resolve_reuse_generation_strategy_prefers_full_section_for_clear_winner(self) -> None:
+        strategy = resolve_reuse_generation_strategy(
+            section={
+                "title": "技术架构",
+                "generation_mode": "reuse_first",
+            },
+            reuse_pack={
+                "retrieval_trace": {
+                    "section_candidates": [
+                        {
+                            "sample_id": "sample-arch",
+                            "file_name": "历史方案A.docx",
+                            "section_id": "4.1",
+                            "section_path": "第四章 技术架构 > 4.1 总体架构",
+                            "score": 0.86,
+                            "reason": "normalized_section_title_match",
+                        },
+                        {
+                            "sample_id": "sample-other",
+                            "file_name": "历史方案B.docx",
+                            "section_id": "2.1",
+                            "section_path": "第二章 项目概述 > 2.1 项目背景",
+                            "score": 0.61,
+                            "reason": "heading_family_match",
+                        },
+                    ],
+                    "scoped_sections": [
+                        {
+                            "sample_id": "sample-arch",
+                            "file_name": "历史方案A.docx",
+                            "section_id": "4.1",
+                            "section_path": "第四章 技术架构 > 4.1 总体架构",
+                            "score": 0.86,
+                            "reason": "normalized_section_title_match",
+                        }
+                    ],
+                }
+            },
+            reusable_blocks=[
+                {
+                    "block_id": "case:sample-arch:7",
+                    "sample_id": "sample-arch",
+                    "source_title": "历史方案A.docx",
+                    "source_section_id": "4.1",
+                    "section_path": "第四章 技术架构 > 4.1 总体架构",
+                    "heading_path": ["第四章 技术架构", "4.1 总体架构"],
+                    "content_md": "系统采用站控层、网络层和装置层分层设计，支持 IEC 61850。",
+                    "selection_score": 0.91,
+                    "reusability_score": 0.84,
+                },
+                {
+                    "block_id": "case:sample-arch:8",
+                    "sample_id": "sample-arch",
+                    "source_title": "历史方案A.docx",
+                    "source_section_id": "4.1",
+                    "section_path": "第四章 技术架构 > 4.1 总体架构",
+                    "heading_path": ["第四章 技术架构", "4.1 总体架构"],
+                    "content_md": "各子系统通过工业以太网互联，控制边界与接口职责明确。",
+                    "selection_score": 0.88,
+                    "reusability_score": 0.82,
+                },
+                {
+                    "block_id": "case:sample-other:3",
+                    "sample_id": "sample-other",
+                    "source_title": "历史方案B.docx",
+                    "source_section_id": "2.1",
+                    "section_path": "第二章 项目概述 > 2.1 项目背景",
+                    "heading_path": ["第二章 项目概述", "2.1 项目背景"],
+                    "content_md": "项目背景与建设意义说明。",
+                    "selection_score": 0.63,
+                    "reusability_score": 0.60,
+                },
+            ],
+            recommended_assets=[],
+        )
+
+        self.assertEqual(strategy["retrieval_mode"], "full_section")
+        self.assertEqual(len(strategy["prompt_blocks"]), 2)
+        self.assertEqual(strategy["selected_sections"][0]["section_id"], "4.1")
+        self.assertTrue(strategy["token_budget"]["within_budget"])
+
     def test_build_extractive_reuse_section_content_simplifies_supply_scope_output(self) -> None:
         content = build_extractive_reuse_section_content(
             section={
@@ -1110,6 +1286,8 @@ class CompositionHelperTests(unittest.TestCase):
         context = _build_asset_search_context(
             section={
                 "title": "主回路系统方案",
+                "purpose": "说明主回路结构与一次接线方案。",
+                "section_class": "architecture",
                 "expected_evidence_types": ["section", "figure"],
                 "keywords": ["主回路", "旁路切换"],
             },
@@ -1126,11 +1304,14 @@ class CompositionHelperTests(unittest.TestCase):
         )
 
         self.assertEqual(context["section_title"], "主回路系统方案")
+        self.assertEqual(context["purpose"], "说明主回路结构与一次接线方案。")
+        self.assertEqual(context["section_class"], "architecture")
         self.assertEqual(
             context["anchor_document_names"],
             ["临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx"],
         )
         self.assertIn("2.2 > 高压变频器主回路方案说明", context["anchor_heading_paths"])
+        self.assertIn("主回路图", context["keywords"])
 
     def test_select_preferred_reuse_content_falls_back_when_rewrite_too_thin(self) -> None:
         assembled = (

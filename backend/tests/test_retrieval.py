@@ -1,11 +1,21 @@
 import os
 import asyncio
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
 from app.config import get_settings
-from app.services.retrieval.asset_service import AssetCard, _asset_anchor_boost, _asset_noise_penalty, _asset_taxonomy_boost
+from app.services.retrieval.asset_service import (
+    AssetCard,
+    _asset_anchor_boost,
+    _asset_noise_penalty,
+    _asset_summary_boost,
+    _asset_taxonomy_boost,
+    _build_asset_display_title,
+    _build_preview_text,
+    _derive_visual_role,
+)
 from app.services.retrieval.service import build_evidence_items, build_evidence_search_plan, filter_evidence_results
 from app.services.vectorstore.chunker import Chunker
 from app.services.vectorstore.embedder import Embedder
@@ -21,16 +31,60 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         self.assertTrue(any(chunk.chunk_type == "TABLE" for chunk in chunks))
         self.assertTrue(all("content_risk_level" in chunk.metadata for chunk in chunks))
 
-    def test_chunker_splits_medium_tables_into_multiple_chunks(self) -> None:
+    def test_chunker_does_not_split_tables_by_default(self) -> None:
         rows = "\n".join(f"| 参数{i} | 数值{i} | 补充说明{i} |" for i in range(12))
         markdown = f"# 参数表\n\n| 名称 | 值 | 说明 |\n|---|---|---|\n{rows}\n"
 
-        chunks = Chunker(max_chars=160, max_table_rows_per_chunk=4).split(markdown, base_metadata={"industry": "电气"})
+        chunks = Chunker(max_chars=160).split(markdown, base_metadata={"industry": "电气"})
+
+        table_chunks = [chunk for chunk in chunks if chunk.chunk_type == "TABLE"]
+        self.assertEqual(len(table_chunks), 1)
+        self.assertIn("| 参数0 | 数值0 | 补充说明0 |", table_chunks[0].content)
+        self.assertIn("| 参数11 | 数值11 | 补充说明11 |", table_chunks[0].content)
+
+    def test_chunker_can_split_tables_when_explicitly_enabled(self) -> None:
+        rows = "\n".join(f"| 参数{i} | 数值{i} | 补充说明{i} |" for i in range(12))
+        markdown = f"# 参数表\n\n| 名称 | 值 | 说明 |\n|---|---|---|\n{rows}\n"
+
+        chunks = Chunker(
+            max_chars=160,
+            max_table_rows_per_chunk=4,
+            split_tables=True,
+        ).split(markdown, base_metadata={"industry": "电气"})
 
         table_chunks = [chunk for chunk in chunks if chunk.chunk_type == "TABLE"]
         self.assertGreaterEqual(len(table_chunks), 3)
         self.assertTrue(all(chunk.token_count > 0 for chunk in table_chunks))
         self.assertTrue(all(chunk.metadata["content_risk_level"] == "medium" for chunk in table_chunks))
+
+    def test_chunker_keeps_nested_subsections_inside_major_section_chunk(self) -> None:
+        markdown = "\n".join(
+            [
+                "# 文档标题",
+                "",
+                "## 4 LCI 变频软起系统方案",
+                "",
+                "### 4.2 启动和同步过程描述",
+                "",
+                "同步电机的启动和同步由变频器控制，达到同步条件后平滑切换至工频运行。",
+                "",
+                "### 4.3 本地控制单元 PLC 对电机辅助设备监控功能描述",
+                "",
+                "本地控制单元负责监控高压柜、低压柜、油站、冷却器和励磁系统信号。",
+                "",
+                "### 4.4 LCI 变频启动特性",
+                "",
+                "系统支持连续启动、转速曲线跟踪和切换过程监测。",
+            ]
+        )
+
+        chunks = Chunker(max_chars=1600).split(markdown, base_metadata={"industry": "电气"})
+
+        section_chunks = [chunk for chunk in chunks if chunk.heading_path == "4 LCI 变频软起系统方案" and chunk.chunk_type == "PLAIN"]
+        self.assertEqual(len(section_chunks), 1)
+        self.assertIn("### 4.2 启动和同步过程描述", section_chunks[0].content)
+        self.assertIn("### 4.3 本地控制单元 PLC 对电机辅助设备监控功能描述", section_chunks[0].content)
+        self.assertIn("### 4.4 LCI 变频启动特性", section_chunks[0].content)
 
     def test_chunker_marks_asset_lookup_for_diagram_references(self) -> None:
         markdown = "# 控制原理\n\n原理图与波形图详见附件，接线图如下。"
@@ -221,6 +275,7 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
             page_no=18,
             heading_path="2.2 高压变频器主回路方案说明",
             title="2.2 高压变频器主回路方案说明",
+            display_title="高压变频器主回路方案说明",
             caption=None,
             source_ref=None,
             asset_uri="s3://asset",
@@ -251,6 +306,7 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
             page_no=1,
             heading_path="4.2 电力工业电气设备质量检验测试中心检测报告",
             title="检测报告",
+            display_title="检测报告",
             caption=None,
             source_ref=None,
             asset_uri="s3://asset",
@@ -281,6 +337,7 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
             page_no=18,
             heading_path="2.2 高压变频器主回路方案说明",
             title="2.2 高压变频器主回路方案说明",
+            display_title="高压变频器主回路方案说明",
             caption=None,
             source_ref=None,
             asset_uri="s3://asset",
@@ -299,6 +356,104 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         )
 
         self.assertGreater(boost, 0.3)
+
+    def test_asset_summary_boost_prefers_semantic_match(self) -> None:
+        card = AssetCard(
+            asset_card_id="asset:test",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="样板.docx",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=6,
+            heading_path="3 高浓磨机电机控制及电机辅助设备监控系统方案",
+            title="系统功能描述",
+            display_title="电机辅助设备监控与联锁图",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/mock.png",
+            preview_text="图摘要",
+            retrieval_text="heading:系统功能描述",
+            section_type="control_system",
+            equipment_type="motor_drive",
+            content_form="figure",
+            metadata={},
+            semantic_summary_text="该图用于说明 LCI PLC、本地控制单元、励磁柜和同步电机辅助设备之间的监控与联锁关系。",
+            semantic_summary_confidence=0.86,
+        )
+
+        strong = _asset_summary_boost(
+            query="电机辅助设备监控与联锁方案",
+            section_title="控制系统及联锁保护方案",
+            card=card,
+        )
+        weak = _asset_summary_boost(
+            query="供货范围表",
+            section_title="供货范围",
+            card=card,
+        )
+
+        self.assertGreater(strong, weak)
+        self.assertGreater(strong, 0.1)
+
+    def test_build_preview_text_uses_semantic_summary_when_context_is_sparse(self) -> None:
+        preview = _build_preview_text(
+            title=None,
+            caption=None,
+            context_before=None,
+            context_after=None,
+            metadata={
+                "semantic_summary": {
+                    "status": "summarized",
+                    "summary": "该图用于说明变频软起装置与同步电机之间的主回路关系。",
+                    "problem_solved": "解释软启动与工频切换逻辑。",
+                    "confidence": 0.82,
+                }
+            },
+        )
+
+        self.assertIn("变频软起装置", preview)
+
+    def test_build_asset_display_title_prefers_title_hint_for_garbled_title(self) -> None:
+        display_title = _build_asset_display_title(
+            title="1508 375 196 108 83 48 36 18 11 3 [A] [A] [A] [A]",
+            heading_path="4.4.2 变频启动曲线",
+            caption=None,
+            page_no=19,
+            semantic_summary={
+                "status": "summarized",
+                "title_hint": "变压器谐波波形图",
+                "diagram_type": "波形图",
+                "summary": "该图用于说明变压器在 LCI 工况下的电压电流波形。",
+            },
+        )
+
+        self.assertEqual(display_title, "变压器谐波波形图")
+
+    def test_derive_visual_role_downgrades_footer_logo_like_asset(self) -> None:
+        role = _derive_visual_role(
+            asset=SimpleNamespace(asset_type="figure", reuse_mode="reference_only"),
+            metadata={
+                "visual_role": "engineering_figure",
+                "bbox": {"l": 57.29, "r": 134.47, "b": 20.51, "t": 45.55},
+                "page_width": 595.32,
+                "page_height": 841.92,
+                "width": 154,
+                "height": 50,
+            },
+            title="变压器一次侧和二次侧绕组间屏蔽层",
+            caption=None,
+            context_before="为实现一次侧和二次侧绕组的解耦，接地屏蔽层如下图所示。",
+            context_after="HV: 高压侧正弦波电压",
+        )
+
+        self.assertEqual(role, "page_furniture")
 
 
 if __name__ == "__main__":

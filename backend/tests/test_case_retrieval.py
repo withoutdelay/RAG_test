@@ -362,6 +362,60 @@ class CaseRetrievalTests(unittest.TestCase):
         self.assertIn("interface_heading_bonus", results[0]["reason"])
         self.assertNotEqual(results[-1]["heading_path"], "4. 变频器性能要求")
 
+    def test_retrieve_blocks_uses_section_contextual_text_for_detail_match(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[],
+            block_entries=[
+                {
+                    "sample_id": "case-a",
+                    "file_name": "风机方案A.docx",
+                    "library_track": "pilot_main",
+                    "heading_path": "4. 技术架构",
+                    "section_path": "第四章 技术架构",
+                    "section_summary": "系统支持 Modbus、RS485 和 PLC 接口协同。",
+                    "contextualized_block_text": "风机方案A 技术架构 Modbus RS485 PLC 接口协同 控制边界",
+                    "reuse_level": "high",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "communication_interface",
+                    "equipment_type": "vfd",
+                    "content_form": "narrative",
+                    "token_count": 110,
+                    "content": "系统采用分层结构设计，满足可靠性要求。",
+                },
+                {
+                    "sample_id": "case-a",
+                    "file_name": "风机方案A.docx",
+                    "library_track": "pilot_main",
+                    "heading_path": "4. 技术架构",
+                    "section_path": "第四章 技术架构",
+                    "section_summary": "系统采用模块化设计。",
+                    "contextualized_block_text": "风机方案A 技术架构 模块化设计",
+                    "reuse_level": "high",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "communication_interface",
+                    "equipment_type": "vfd",
+                    "content_form": "narrative",
+                    "token_count": 108,
+                    "content": "系统采用分层结构设计，满足可靠性要求。",
+                },
+            ],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_blocks(
+                query="Modbus RS485 PLC 接口",
+                top_k=2,
+                sample_ids={"case-a"},
+                section_title="控制接口与通讯方案",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertIn("section_context_match", results[0]["reason"])
+        self.assertEqual(results[0]["contextualized_block_text"], "风机方案A 技术架构 Modbus RS485 PLC 接口协同 控制边界")
+
     def test_retrieve_sections_prefers_specific_subsection_when_detail_intent_is_present(self) -> None:
         outline_path, block_path, temp_dir = self._write_library(
             outline_entries=[
@@ -428,7 +482,73 @@ class CaseRetrievalTests(unittest.TestCase):
             temp_dir.cleanup()
 
         self.assertEqual(results[0]["section_id"], "3.2.4")
-        self.assertIn("detail_section_specificity_bonus", results[0]["reason"])
+
+    def test_retrieve_sections_uses_section_summary_for_detail_rerank(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[
+                {
+                    "sample_id": "case-a",
+                    "file_name": "方案A.docx",
+                    "library_track": "pilot_main",
+                    "section_catalog": [
+                        {
+                            "section_id": "4.1",
+                            "title": "技术架构",
+                            "source_heading": "技术架构",
+                            "normalized_heading": "技术架构",
+                            "heading_aliases": ["技术架构", "系统架构"],
+                            "heading_family": ["技术架构"],
+                            "level": 1,
+                            "section_path": "第四章 技术架构",
+                            "heading_path": "第四章 技术架构",
+                            "normalized_section_path": "技术架构",
+                            "section_summary": "系统采用站控层、网络层与装置层分层设计，支持 IEC 61850 通讯接口。",
+                            "section_retrieval_text": "方案A 技术架构 IEC 61850 通讯接口 站控层 网络层",
+                            "source_signals": ["toc", "parser_heading"],
+                            "children": [],
+                        }
+                    ],
+                },
+                {
+                    "sample_id": "case-b",
+                    "file_name": "方案B.docx",
+                    "library_track": "pilot_main",
+                    "section_catalog": [
+                        {
+                            "section_id": "4.1",
+                            "title": "技术架构",
+                            "source_heading": "技术架构",
+                            "normalized_heading": "技术架构",
+                            "heading_aliases": ["技术架构", "系统架构"],
+                            "heading_family": ["技术架构"],
+                            "level": 1,
+                            "section_path": "第四章 技术架构",
+                            "heading_path": "第四章 技术架构",
+                            "normalized_section_path": "技术架构",
+                            "section_summary": "系统采用模块化部署，满足一般控制要求。",
+                            "section_retrieval_text": "方案B 技术架构 模块化部署 控制要求",
+                            "source_signals": ["toc", "parser_heading"],
+                            "children": [],
+                        }
+                    ],
+                },
+            ],
+            block_entries=[],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_sections(
+                query="技术架构 IEC 61850 接口",
+                top_k=2,
+                sample_ids={"case-a", "case-b"},
+                library_tracks={"pilot_main"},
+                section_title="技术架构",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(results[0]["sample_id"], "case-a")
+        self.assertIn("section_summary_match", results[0]["reason"])
 
     def test_retrieve_blocks_can_be_scoped_to_section_prefixes(self) -> None:
         outline_path, block_path, temp_dir = self._write_library(

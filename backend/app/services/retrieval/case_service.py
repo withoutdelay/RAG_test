@@ -322,6 +322,10 @@ class CaseLibraryService:
                         "source_heading": section.get("source_heading") or section.get("title"),
                         "normalized_heading": section.get("normalized_heading"),
                         "heading_aliases": section.get("heading_aliases") or [],
+                        "heading_family": section.get("heading_family") or [],
+                        "page_span": section.get("page_span"),
+                        "content_span": section.get("content_span"),
+                        "section_summary": section.get("section_summary"),
                         "level": section.get("level"),
                         "source_signals": section.get("source_signals") or [],
                         "score": round(score, 4),
@@ -449,7 +453,18 @@ class CaseLibraryService:
     ) -> tuple[float, list[str]]:
         content = str(entry.get("content") or "")
         heading_path = str(entry.get("heading_path") or entry.get("section_path") or "")
-        haystack = f"{heading_path}\n{content}".casefold()
+        section_summary = str(entry.get("section_summary") or "")
+        contextualized_block_text = str(entry.get("contextualized_block_text") or "")
+        haystack = "\n".join(
+            part
+            for part in (
+                heading_path,
+                section_summary,
+                contextualized_block_text,
+                content,
+            )
+            if part
+        ).casefold()
         score = 0.0
         reasons: list[str] = []
         if heading_looks_like_document_title(heading_path):
@@ -464,6 +479,10 @@ class CaseLibraryService:
         if overlap_terms:
             score += min(0.48, len(overlap_terms) * 0.09)
             reasons.append(f"detail_overlap={','.join(overlap_terms[:6])}")
+            section_context_haystack = f"{section_summary}\n{contextualized_block_text}".casefold()
+            if section_context_haystack.strip() and any(term.casefold() in section_context_haystack for term in overlap_terms):
+                score += min(0.08, len(overlap_terms) * 0.02)
+                reasons.append("section_context_match")
         elif detail_terms:
             score -= 0.04
             reasons.append("detail_mismatch_penalty")
@@ -628,7 +647,18 @@ class CaseLibraryService:
     ) -> tuple[float, list[str]]:
         heading_path = str(section.get("heading_path") or section.get("section_path") or section.get("title") or "")
         normalized_heading = str(section.get("normalized_heading") or normalize_section_heading(heading_path))
-        haystack = f"{heading_path}\n{normalized_heading}".casefold()
+        summary_text = str(section.get("section_summary") or "")
+        retrieval_text = str(section.get("section_retrieval_text") or "")
+        haystack = "\n".join(
+            part
+            for part in (
+                heading_path,
+                normalized_heading,
+                summary_text,
+                retrieval_text,
+            )
+            if part
+        ).casefold()
         detail_terms = [term for term in query_terms if term not in title_terms and term not in context_terms]
         score = 0.0
         reasons: list[str] = []
@@ -654,6 +684,9 @@ class CaseLibraryService:
         if detail_overlap:
             score += min(0.28, len(detail_overlap) * 0.08)
             reasons.append(f"detail_overlap={','.join(detail_overlap[:6])}")
+            if summary_text and any(term.casefold() in summary_text.casefold() for term in detail_overlap):
+                score += min(0.1, len(detail_overlap) * 0.03)
+                reasons.append("section_summary_match")
         elif detail_terms:
             score -= 0.04
             reasons.append("detail_mismatch_penalty")

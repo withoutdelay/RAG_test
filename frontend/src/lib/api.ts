@@ -59,4 +59,8 @@ export function isNotFoundError(error: unknown): boolean {
   return axios.isAxiosError(error) && error.response?.status === 404;
 }
 
+export function buildAssetContentUrl(assetId: string): string {
+  return `${resolveApiBaseURL()}/assets/${assetId}/content`;
+}
+
 export default api;

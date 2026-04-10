@@ -4,8 +4,8 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
-from typing import Iterable
 
+from app.services.parsing.document_sources import iter_document_paths
 from app.services.parsing.parser import ParserService
 from app.services.parsing.sample_manifest import (
     TRACK_NEEDS_REVIEW,
@@ -60,34 +60,6 @@ async def build_entries(paths: list[Path], *, assigned_track: str, with_profile:
             )
         entries.append(entry)
     return entries
-
-
-def iter_document_paths(raw_paths: Iterable[str]) -> list[Path]:
-    allowed_suffixes = {".pdf", ".doc", ".docx"}
-    resolved: list[Path] = []
-    for raw_path in raw_paths:
-        path = Path(raw_path).expanduser()
-        if path.is_dir():
-            for suffix in ("*.pdf", "*.PDF", "*.doc", "*.DOC", "*.docx", "*.DOCX"):
-                resolved.extend(sorted(item for item in path.rglob(suffix) if item.is_file()))
-            continue
-        if path.suffix.lower() not in allowed_suffixes:
-            raise SystemExit(f"Only PDF/DOC/DOCX files are supported for sample manifest generation: {raw_path}")
-        resolved.append(path)
-
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for path in resolved:
-        normalized = path.resolve()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        unique.append(normalized)
-    if not unique:
-        raise SystemExit("No supported document files were found.")
-    return unique
-
-
 async def main() -> None:
     args = parse_args()
     document_paths = iter_document_paths(args.paths)

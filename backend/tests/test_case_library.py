@@ -38,6 +38,46 @@ class CaseLibraryTests(unittest.TestCase):
         self.assertEqual(entry["document_title"], "总标题")
         self.assertEqual(entry["top_level_titles"], ["1 项目概述", "2 技术方案"])
 
+    def test_build_outline_library_entry_enriches_section_spans_and_summary(self) -> None:
+        entry = build_outline_library_entry(
+            sample_entry={"sample_id": "s1", "file_name": "demo.docx", "file_format": "docx", "library_track": "pilot_main", "profile": "text_digital"},
+            markdown="\n".join(
+                [
+                    "# 文档标题",
+                    "",
+                    "## 目录",
+                    "",
+                    "| 第三章 系统及方案介绍 ................................ 9 |",
+                    "| 一、电机配置及参数 ................................ 9 |",
+                    "| 二、系统方案 .................................... 14 |",
+                    "| 2.1 高压变频器选型 .............................. 14 |",
+                    "",
+                    "## 一、电机配置及参数",
+                    "",
+                    "本节说明电机配置和核心参数边界。",
+                    "",
+                    "## 二、系统方案",
+                    "",
+                    "## 2.1 高压变频器选型",
+                    "",
+                    "高压变频器采用一拖一配置，支持接口联动和模块化扩展。",
+                ]
+            ),
+        )
+
+        chapter = entry["section_catalog"][0]
+        subsection = chapter["children"][1]["children"][0]
+
+        self.assertEqual(chapter["page_span"], [9, 14])
+        self.assertEqual(chapter["content_span"]["chunk_start"], 3)
+        self.assertEqual(chapter["content_span"]["chunk_end"], 4)
+        self.assertEqual(chapter["heading_family"], ["系统及方案介绍"])
+        self.assertIn("电机配置", chapter["section_summary"])
+        self.assertEqual(subsection["page_span"], [14, 14])
+        self.assertIsNone(subsection.get("content_span"))
+        self.assertIsNone(subsection.get("section_summary"))
+        self.assertIn("文档标题", subsection["section_retrieval_text"])
+
     def test_build_section_catalog_merges_toc_and_body_headings(self) -> None:
         markdown = "\n".join(
             [
@@ -364,10 +404,31 @@ class CaseLibraryTests(unittest.TestCase):
             markdown=markdown,
         )
 
-        block = next(block for block in blocks if normalize_section_heading(block["heading_path"]).endswith("高压变频器选型"))
-        self.assertEqual(block["source_section_id"], "1.1.1")
-        self.assertEqual(block["heading_path"], "第三章 系统及方案介绍 > 二、系统方案 > 2.1 高压变频器选型")
-        self.assertEqual(block["normalized_heading"], "高压变频器选型")
+        block = next(block for block in blocks if normalize_section_heading(block["heading_path"]).endswith("系统方案"))
+        self.assertEqual(block["source_section_id"], "1.1")
+        self.assertEqual(block["heading_path"], "第三章 系统及方案介绍 > 二、系统方案")
+        self.assertEqual(block["normalized_heading"], "系统方案")
+        self.assertIn("## 2.1 高压变频器选型", block["content"])
+
+    def test_build_reusable_block_entries_keeps_full_table_as_single_block(self) -> None:
+        rows = "\n".join(f"| {index} | 设备{index} | 型号{index} | {index} |" for index in range(1, 13))
+        markdown = "\n\n".join(
+            [
+                "# 文档标题",
+                "## 2 供货范围",
+                "| 序号 | 设备 | 型号 | 数量 |\n| --- | --- | --- | --- |\n" + rows,
+            ]
+        )
+
+        blocks = build_reusable_block_entries(
+            sample_entry={"sample_id": "s1", "file_name": "demo.docx", "file_format": "docx", "library_track": "pilot_main"},
+            markdown=markdown,
+        )
+
+        supply_blocks = [block for block in blocks if block["content_form"] == "bom_table"]
+        self.assertEqual(len(supply_blocks), 1)
+        self.assertIn("| 1 | 设备1 | 型号1 | 1 |", supply_blocks[0]["content"])
+        self.assertIn("| 12 | 设备12 | 型号12 | 12 |", supply_blocks[0]["content"])
 
     def test_summarize_case_library_counts_tracks(self) -> None:
         summary = summarize_case_library(

@@ -1,13 +1,12 @@
 # 任务清单
 
-- [x] 1. (类型系统补齐) 更新 `frontend/src/lib/types.ts` 中的 `OutlineSection`, `OutlineModel` 与 `SectionModel`, `RecommendedAsset` 接口契约
-- [x] 2. (Outline 审批断点) 大纲页新增 `Save Outline` 与 `Approve Outline` 按钮及对应的后端请求逻辑
-- [x] 3. (Outline 审批断点) 未审批大纲（`candidate`）状态下，前端明确阻断“生成章节”相关的点击或跳转
-- [x] 4. (Outline 元数据展示) Outline 树节点中补充渲染 `generation_mode`, `reuse_level` 等徽标标签（Badge）
-- [x] 5. (Outline 元数据透传) 修复 `PATCH /outlines/{id}` 请求，确保不丢失未编辑的 `section_class`, `reuse_level`, `asset_required` 等路由核心参数
-- [x] 6. (章节推荐资产) Section 页面/组件引入 `recommended_assets` 区块，并针对 `review_required: true` 做高亮与黄牌提示
-- [x] 7. (章节分类标注) Section 页面为各个章节打上真实的生成策略标签，特别凸出 `manual_only` 章节防混淆
-- [x] 8. (Validation 视图重构) 将 Validation 的日志基于 `Errors / Warnings / Review Tasks` 进行折叠/分组展现
-- [x] 9. (Validation 问题归因) 对 `VAL008`, `VAL009` 等高频校验异常代码进行文案解释及视觉凸显（如红色高亮 P0 级）
-- [x] 10. (Review Task 操作链路) 为每一个审核任务增加绿色的 `Resolve` 和灰色的 `Reject` 处理入口按钮
-- [x] 11. (产品链路与文案自查) 清理各类文案（将“自动生成”等误导性词汇修正为“参考”、“待确认”），统一各个页面的 Loading态 / Error态 样式
+- [ ] 1. 补齐 `section_catalog` 数据结构，明确 `source_signals`、`content_span`、`page_span`、章节摘要与稳定路径字段
+- [ ] 2. 重构历史方案索引构建流程，让所有 narrative/table/figure/formula block 都显式挂接 `source_section_id`
+- [ ] 3. 在章节与块索引中加入章节上下文化检索文本，避免继续使用脱离章节身份的裸 chunk
+- [ ] 4. 重构 `CaseLibraryService.retrieve_sections` 打分逻辑，提升标题 exact/alias/family 与 detail intent 权重
+- [ ] 5. 把 `CaseLibraryService.retrieve_blocks` 限定为“章节内二阶段选择”，而不是与章节候选并列竞争
+- [ ] 6. 重构 `SectionCompositionService` 查询构造，拆分 `title_intent`、`detail_intent`、`context_intent`
+- [ ] 7. 在 `SectionCompositionService` 中实现 `section-pack mode` 与 `full-section mode` 的运行时切换与 token budget 控制
+- [ ] 8. 为 `reuse_first` 章节输出完整 trace，包括 `selected_sections`、`selected_blocks`、`selection_reason`、`token_budget`
+- [ ] 9. 补充后端测试，覆盖章节目录构建、章节检索排序、章节内 block 选择、模式回退与 trace 输出
+- [ ] 10. 最小化更新前端调试/审阅界面，使其可查看章节候选、装配包与生成 trace
