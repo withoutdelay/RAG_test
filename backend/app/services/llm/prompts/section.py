@@ -24,6 +24,14 @@ REUSE_FIRST_SYSTEM_APPENDIX = """
 6. 如果给定了资产占位符要求，必须在合适位置输出相应的 [[ASSET:...]] 占位
 """
 
+REUSE_FINALIZE_SYSTEM_APPENDIX = """
+当给定“已组装章节草稿”时，请额外遵守：
+1. 必须将该组装稿视为主素材，在其基础上整理成正式客户稿，不要抛开组装稿重新泛化总结
+2. 优先保留组装稿中的技术细节、信息顺序、三级小标题和 [[ASSET:...]] 占位符
+3. 仅做必要的统一、去噪、术语修正和项目字段替换，不要随意删减技术信息
+4. 如组装稿中已经存在图表占位符，应保留并放在对应技术段附近
+"""
+
 
 def build_section_prompts(
     *,
@@ -41,6 +49,8 @@ def build_section_prompts(
     asset_guidance = _format_recommended_assets(recommended_assets or [])
     generation_mode = str(section.get("generation_mode") or reuse_pack.get("generation_mode") or "baseline")
     reuse_guidance = REUSE_FIRST_SYSTEM_APPENDIX if generation_mode == "reuse_first" else ""
+    assembled_draft = str(reuse_pack.get("assembled_draft") or "").strip()
+    finalize_guidance = REUSE_FINALIZE_SYSTEM_APPENDIX if assembled_draft else ""
     reference_material_text = retrieved_context or (
         "复用优先模式：请直接依据下方复用包中的正文块完成最小改写，不要复述素材标题、提示词或任务说明。"
         if reuse_pack.get("reusable_blocks")
@@ -49,6 +59,7 @@ def build_section_prompts(
     system_prompt = (
         f"{EXECUTOR_SYSTEM_PROMPT}\n\n"
         f"{reuse_guidance}\n"
+        f"{finalize_guidance}\n"
         f"方案标题：{outline_title}\n"
         f"当前章节：{section_title}\n"
         f"章节描述：{section.get('description', '')}\n"
@@ -57,10 +68,12 @@ def build_section_prompts(
     )
     reuse_pack_text = _format_reuse_pack(reuse_pack)
     replacement_constraints = _format_replacement_constraints(reuse_pack)
+    assembled_draft_text = _format_assembled_draft(assembled_draft)
     user_prompt = (
         f"目标章节标题：{section_title}\n"
         f"章节关键词：{', '.join(section.get('keywords', [])) or '暂无'}\n\n"
         f"可用参考资料：\n{reference_material_text}\n\n"
+        f"{assembled_draft_text}\n\n"
         f"可用复用包：\n{reuse_pack_text}\n\n"
         f"替换与禁用约束：\n{replacement_constraints}\n\n"
         f"建议参考资产：\n{asset_guidance}\n\n"
@@ -137,6 +150,16 @@ def _format_recommended_assets(recommended_assets: list[dict]) -> str:
             parts.append(f"推荐原因 {reason}")
         lines.append("- " + "；".join(parts))
     return "\n".join(lines)
+
+
+def _format_assembled_draft(assembled_draft: str) -> str:
+    if not assembled_draft:
+        return "已组装章节草稿：\n- 暂无"
+    return (
+        "已组装章节草稿：\n"
+        "请将下面这份基于复用块拼装出的技术草稿整理成正式客户稿，保留技术密度、结构和 [[ASSET:...]] 占位符。\n"
+        f"<assembled_draft>\n{assembled_draft}\n</assembled_draft>"
+    )
 
 
 def _format_reuse_pack(reuse_pack: dict) -> str:

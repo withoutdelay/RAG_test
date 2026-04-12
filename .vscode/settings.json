@@ -1,0 +1,24 @@
+{
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/.venv/**": true,
+    "**/node_modules/**": true,
+    "**/.next/**": true,
+    "**/private_samples/**": true,
+    "**/backend/data/uploads/**": true,
+    "**/backend/data/pdf_audits/**": true,
+    "**/backend/data/sample_manifests/**": true,
+    "**/backend/data/case_library/**": true
+  },
+  "search.exclude": {
+    "**/.venv/**": true,
+    "**/node_modules/**": true,
+    "**/.next/**": true,
+    "**/private_samples/**": true,
+    "**/backend/data/uploads/**": true,
+    "**/backend/data/pdf_audits/**": true,
+    "**/backend/data/sample_manifests/**": true,
+    "**/backend/data/case_library/**": true
+  }
+}

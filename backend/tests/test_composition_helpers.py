@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 from types import SimpleNamespace
@@ -355,6 +356,37 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("[[ASSET:TABLE:asset-001]]", user_prompt)
         self.assertIn("电机参数表", user_prompt)
         self.assertIn("不要复述任务说明", user_prompt)
+
+    def test_build_section_prompts_includes_assembled_draft_for_reuse_finalize(self) -> None:
+        system_prompt, user_prompt = build_section_prompts(
+            section={
+                "title": "总体方案",
+                "description": "说明系统总体方案。",
+                "keywords": ["总体方案", "LCI"],
+                "generation_mode": "reuse_first",
+            },
+            global_params={"project_name": "测试项目"},
+            retrieved_context="",
+            outline_title="测试项目技术方案",
+            recommended_assets=[],
+            reuse_pack={
+                "generation_mode": "reuse_first",
+                "assembled_draft": "## 总体方案\n\n### 系统组成\n\n组装稿内容。",
+                "reusable_blocks": [
+                    {
+                        "source_title": "历史方案A",
+                        "heading_path": ["3", "系统组成"],
+                        "content_md": "组装稿内容。",
+                        "reusability_score": 0.95,
+                    }
+                ],
+            },
+        )
+
+        self.assertIn("必须将该组装稿视为主素材", system_prompt)
+        self.assertIn("已组装章节草稿", user_prompt)
+        self.assertIn("<assembled_draft>", user_prompt)
+        self.assertIn("组装稿内容", user_prompt)
 
     def test_build_section_asset_query_merges_section_and_project_context(self) -> None:
         query = build_section_asset_query(
@@ -1041,9 +1073,75 @@ class CompositionHelperTests(unittest.TestCase):
                 ]
             },
         )
-        self.assertIn("### 建议插入图表", content)
+        self.assertIn("### 相关图表", content)
         self.assertIn("[[ASSET:FIGURE:asset-001]]", content)
         self.assertIn("[[ASSET:TABLE:asset-002]]", content)
+
+    def test_ensure_required_asset_placeholders_inlines_matching_assets_under_subheading(self) -> None:
+        content = ensure_required_asset_placeholders(
+            content_md=(
+                "## 总体方案\n\n"
+                "### 高浓磨机电机控制及电机辅助设备监控系统方案\n\n"
+                "本地控制单元 PLC 负责对辅助设备进行集中监控。\n\n"
+                "### LCI 变频软起系统方案\n\n"
+                "LCI 负责同步电机变频软起动及并网切换控制。\n"
+            ),
+            reuse_pack={
+                "required_asset_placeholders": [
+                    {"placeholder": "[[ASSET:FIGURE:asset-001]]", "title": "高浓磨机电机控制总图"},
+                    {"placeholder": "[[ASSET:FIGURE:asset-002]]", "title": "LCI软起系统主回路"},
+                ],
+                "recommended_assets": [
+                    {
+                        "asset_id": "asset-001",
+                        "display_title": "高浓磨机电机控制总图",
+                        "heading_path": "3 高浓磨机电机控制及电机辅助设备监控系统方案",
+                    },
+                    {
+                        "asset_id": "asset-002",
+                        "display_title": "LCI软起系统主回路",
+                        "heading_path": "4.1 LCI 变频软起系统方案",
+                        "metadata": {
+                            "semantic_summary": {
+                                "applicable_sections": ["LCI变频软起系统方案"],
+                            }
+                        },
+                    },
+                ],
+            },
+        )
+
+        self.assertNotIn("### 相关图表", content)
+        self.assertIn(
+            "### 高浓磨机电机控制及电机辅助设备监控系统方案\n\n本地控制单元 PLC 负责对辅助设备进行集中监控。\n\n[[ASSET:FIGURE:asset-001]]",
+            content,
+        )
+        self.assertIn(
+            "### LCI 变频软起系统方案\n\nLCI 负责同步电机变频软起动及并网切换控制。\n[[ASSET:FIGURE:asset-002]]",
+            content,
+        )
+
+    def test_filter_reuse_blocks_for_assembly_skips_generic_latin_enum_heading(self) -> None:
+        filtered = _filter_reuse_blocks_for_assembly(
+            reusable_blocks=[
+                {
+                    "heading_path": ["3 高浓磨机电机控制及电机辅助设备监控系统方案"],
+                    "metadata": {"section_type": "motor_spec", "content_form": "narrative"},
+                    "selection_score": 1.0,
+                    "content_md": "本地控制单元 PLC 负责对辅助设备进行集中监控。",
+                },
+                {
+                    "heading_path": ["A. 概述"],
+                    "metadata": {"section_type": "motor_spec", "content_form": "narrative"},
+                    "selection_score": 0.96,
+                    "content_md": "负责与用户上位机系统接口，并提供运行界面。",
+                },
+            ],
+            target_taxonomy={"section_type": "overall_solution", "equipment_type": "motor"},
+        )
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["heading_path"], ["3 高浓磨机电机控制及电机辅助设备监控系统方案"])
 
     def test_should_use_extractive_reuse_for_technical_reuse_sections(self) -> None:
         self.assertTrue(
@@ -1387,6 +1485,99 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("不要压缩信息密度", instruction)
         self.assertIn("保留已有 [[ASSET:...]] 占位符", instruction)
         self.assertIn("不得虚构未确认参数", instruction)
+
+    def test_generate_section_content_forces_llm_finalize_after_extractive_assembly(self) -> None:
+        class _FakeExecutor:
+            def __init__(self) -> None:
+                self.write_calls: list[dict] = []
+
+            async def write_section(
+                self,
+                *,
+                task_id,
+                section,
+                global_params,
+                retrieved_context,
+                outline_title,
+                recommended_assets=None,
+                reuse_pack=None,
+                assembled_draft=None,
+            ):
+                self.write_calls.append(
+                    {
+                        "task_id": task_id,
+                        "section": section,
+                        "assembled_draft": assembled_draft,
+                        "retrieved_context": retrieved_context,
+                    }
+                )
+                return SimpleNamespace(content=assembled_draft)
+
+        executor = _FakeExecutor()
+        service = SectionDraftService(executor=executor)
+
+        async def _run():
+            return await service._generate_section_content(
+                task_id="task-001",
+                section={
+                    "title": "主回路系统方案",
+                    "purpose": "说明主回路结构与切换方式。",
+                    "keywords": ["主回路", "旁路切换"],
+                    "generation_mode": "reuse_first",
+                    "section_class": "architecture",
+                    "asset_required": True,
+                },
+                outline_title="测试项目技术方案",
+                global_params={"project_name": "测试项目", "product_line": "hv_vfd"},
+                retrieved_context="",
+                citations=[],
+                recommended_assets=[
+                    {"asset_id": "asset-001", "asset_type": "figure", "display_title": "主回路示意图"}
+                ],
+                reusable_blocks=[
+                    {
+                        "heading_path": ["2.2", "高压变频器主回路方案说明"],
+                        "metadata": {"section_type": "main_circuit_scheme", "content_form": "narrative"},
+                        "selection_score": 0.92,
+                        "content_md": "高压变频器主回路采用移相整流变压器配合功率单元串联结构。",
+                    },
+                    {
+                        "heading_path": ["2.3", "旁路切换逻辑"],
+                        "metadata": {"section_type": "control_logic", "content_form": "narrative"},
+                        "selection_score": 0.84,
+                        "content_md": "旁路切换时系统先确认主回路状态，再投入旁路接触器。",
+                    },
+                ],
+                reuse_pack={
+                    "generation_mode": "reuse_first",
+                    "reusable_blocks": [
+                        {
+                            "heading_path": ["2.2", "高压变频器主回路方案说明"],
+                            "metadata": {"section_type": "main_circuit_scheme", "content_form": "narrative"},
+                            "selection_score": 0.92,
+                            "content_md": "高压变频器主回路采用移相整流变压器配合功率单元串联结构。",
+                        },
+                        {
+                            "heading_path": ["2.3", "旁路切换逻辑"],
+                            "metadata": {"section_type": "control_logic", "content_form": "narrative"},
+                            "selection_score": 0.84,
+                            "content_md": "旁路切换时系统先确认主回路状态，再投入旁路接触器。",
+                        },
+                    ],
+                    "required_asset_placeholders": [
+                        {"placeholder": "[[ASSET:FIGURE:asset-001]]", "title": "主回路示意图"}
+                    ],
+                },
+            )
+
+        content_md, draft_status, _, generation_details = asyncio.run(_run())
+
+        self.assertEqual(draft_status, "generated")
+        self.assertEqual(generation_details["effective_path"], "extractive_reuse_llm_finalize")
+        self.assertEqual(len(executor.write_calls), 1)
+        self.assertEqual(executor.write_calls[0]["task_id"], "task-001-finalize")
+        self.assertIn("## 主回路系统方案", executor.write_calls[0]["assembled_draft"])
+        self.assertIn("[[ASSET:FIGURE:asset-001]]", content_md)
 
     def test_filter_recommended_assets_for_section_drops_certification_noise(self) -> None:
         filtered = filter_recommended_assets_for_section(

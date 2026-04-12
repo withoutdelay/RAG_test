@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 import re
 from typing import Any
 from uuid import UUID
@@ -17,6 +18,7 @@ from app.models.requirement_card import RequirementCard
 from app.models.section_draft import SectionDraft
 from app.services.agents.executor import ExecutorAgent
 from app.services.composition.outline_service import outline_is_approved
+from app.services.composition.section_quality import SectionQualityGateService
 from app.services.retrieval import AssetRetrievalService
 from app.services.retrieval.case_service import CaseLibraryService
 from app.services.validation.service import flatten_outline_sections
@@ -175,6 +177,13 @@ GENERIC_REUSE_HEADINGS = {
     "项目概述",
     "系统方案",
 }
+INTERNAL_REUSE_HEADING_PATTERNS = (
+    re.compile(r"^(建议插入图表|建议图表|建议参考资产|推荐资产|可用参考资料|可用复用包|替换与禁用约束|参考摘要)$", re.IGNORECASE),
+    re.compile(r"^(图表建议|插图建议|图表清单)$", re.IGNORECASE),
+)
+LATIN_ENUM_REUSE_HEADING_PATTERN = re.compile(r"^[A-Z]\.\s*.+$")
+GENERIC_LABEL_REUSE_PATTERN = re.compile(r"^(概述|说明|补充说明|其他|附加说明)$")
+ASSET_PLACEHOLDER_PATTERN = re.compile(r"\[\[ASSET:[A-Z]+:([^\]]+)\]\]")
 BANNED_TERM_PATTERNS = (
     re.compile(r"(?:项目名称|买方|卖方|客户|用户)\s*[:：]\s*([^\n]{2,80})"),
 )
@@ -444,6 +453,15 @@ def sanitize_generated_section_content(*, content_md: str, section_title: str) -
     if not text.lstrip().startswith("#"):
         return f"## {section_title}\n\n{text}\n"
     return text.rstrip() + "\n"
+
+
+def _derive_project_draft_status(drafts: list[SectionDraft]) -> str:
+    statuses = {str(getattr(draft, "status", "") or "").lower() for draft in drafts}
+    if statuses & {"review_required", "rejected", "manual_required"}:
+        return "REVIEW_REQUIRED"
+    if statuses:
+        return "DRAFT_READY"
+    return "OUTLINE_APPROVED"
 
 
 def should_use_extractive_reuse(*, section: dict[str, Any], reuse_pack: dict[str, Any]) -> bool:
@@ -772,6 +790,28 @@ def _normalize_reuse_block_body(text: str) -> str:
     return body.strip()
 
 
+def _extract_terminal_heading_label(heading_text: str) -> str:
+    parts = [segment.strip() for segment in str(heading_text or "").split(">") if segment.strip()]
+    label = parts[-1] if parts else str(heading_text or "").strip()
+    label = re.sub(r"^[一二三四五六七八九十0-9.\-、\s]+", "", label).strip()
+    return label
+
+
+def _heading_should_be_excluded_from_customer_reuse(heading_text: str) -> bool:
+    label = _extract_terminal_heading_label(heading_text)
+    if not label:
+        return False
+    if any(pattern.match(label) for pattern in INTERNAL_REUSE_HEADING_PATTERNS):
+        return True
+    if LATIN_ENUM_REUSE_HEADING_PATTERN.match(label):
+        return True
+    if GENERIC_LABEL_REUSE_PATTERN.match(label):
+        return True
+    if label in GENERIC_REUSE_HEADINGS:
+        return True
+    return False
+
+
 def _extract_reuse_paragraphs(text: str) -> list[str]:
     paragraphs = [segment.strip() for segment in re.split(r"\n\s*\n", text) if segment.strip()]
     if not paragraphs and text.strip():
@@ -796,6 +836,8 @@ def _filter_reuse_blocks_for_assembly(
         content_form = str(metadata.get("content_form") or "narrative").lower()
         heading_text = " > ".join(str(item).strip() for item in (block.get("heading_path") or []) if str(item).strip())
         if score < max(0.38, top_score * 0.5):
+            continue
+        if _heading_should_be_excluded_from_customer_reuse(heading_text):
             continue
         if heading_looks_like_document_title(heading_text) and score < top_score * 0.9:
             continue
@@ -890,6 +932,8 @@ def _augment_with_support_blocks(
         if content_form in {"formula", "page_furniture", "certificate"}:
             continue
         heading_text = " > ".join(str(item).strip() for item in (block.get("heading_path") or []) if str(item).strip())
+        if _heading_should_be_excluded_from_customer_reuse(heading_text):
+            continue
         if heading_looks_like_document_title(heading_text):
             continue
         try:
@@ -1770,10 +1814,152 @@ def ensure_required_asset_placeholders(*, content_md: str, reuse_pack: dict[str,
     if not missing:
         return content_md
 
-    appendix_lines = ["", "### 建议插入图表", ""]
-    for item in missing:
+    content_with_inline_assets = _inline_missing_asset_placeholders(
+        content_md=content_md,
+        missing_placeholders=missing,
+        reuse_pack=reuse_pack,
+    )
+    remaining = [
+        item
+        for item in placeholders
+        if str(item.get("placeholder") or "") and str(item.get("placeholder")) not in content_with_inline_assets
+    ]
+    if not remaining:
+        return content_with_inline_assets
+
+    appendix_lines = ["", "### 相关图表", ""]
+    for item in remaining:
         appendix_lines.append(f"- {item.get('placeholder')} {item.get('title') or '参考资产'}")
-    return content_md.rstrip() + "\n" + "\n".join(appendix_lines).rstrip() + "\n"
+    return content_with_inline_assets.rstrip() + "\n" + "\n".join(appendix_lines).rstrip() + "\n"
+
+
+def _inline_missing_asset_placeholders(
+    *,
+    content_md: str,
+    missing_placeholders: list[dict[str, Any]],
+    reuse_pack: dict[str, Any],
+) -> str:
+    lines = content_md.rstrip().splitlines()
+    if not lines:
+        return content_md
+    asset_lookup = _build_asset_lookup(reuse_pack.get("recommended_assets") or [])
+    for item in missing_placeholders:
+        placeholder = str(item.get("placeholder") or "").strip()
+        if not placeholder or placeholder in "\n".join(lines):
+            continue
+        asset_id = _extract_asset_id_from_placeholder(placeholder)
+        asset = asset_lookup.get(asset_id)
+        heading_index = _find_best_asset_anchor_heading(lines=lines, asset=item if asset is None else asset)
+        if heading_index is None:
+            continue
+        insert_at = _find_asset_insertion_index(lines=lines, heading_index=heading_index)
+        snippet = [placeholder, ""]
+        lines[insert_at:insert_at] = snippet
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _build_asset_lookup(assets: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    for asset in assets:
+        asset_id = str(asset.get("asset_id") or "").strip()
+        if asset_id:
+            lookup[asset_id] = asset
+    return lookup
+
+
+def _extract_asset_id_from_placeholder(placeholder: str) -> str:
+    match = ASSET_PLACEHOLDER_PATTERN.search(str(placeholder or ""))
+    if not match:
+        return ""
+    return str(match.group(1) or "").strip()
+
+
+def _find_best_asset_anchor_heading(*, lines: list[str], asset: dict[str, Any]) -> int | None:
+    headings = [
+        (index, line.strip()[4:].strip())
+        for index, line in enumerate(lines)
+        if line.strip().startswith("### ")
+    ]
+    if not headings:
+        return None
+    anchor_texts = _collect_asset_anchor_texts(asset)
+    best_index: int | None = None
+    best_score = 0.0
+    for heading_index, heading_text in headings:
+        score = _score_asset_heading_match(heading_text=heading_text, anchor_texts=anchor_texts)
+        if score > best_score:
+            best_score = score
+            best_index = heading_index
+    if best_score < 0.62:
+        return None
+    return best_index
+
+
+def _collect_asset_anchor_texts(asset: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+    metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    semantic_summary = metadata.get("semantic_summary") if isinstance(metadata.get("semantic_summary"), dict) else {}
+    for value in (
+        asset.get("display_title"),
+        asset.get("title"),
+        asset.get("heading_path"),
+        metadata.get("display_title"),
+        metadata.get("raw_title"),
+        metadata.get("heading_path"),
+        semantic_summary.get("title_hint"),
+    ):
+        if isinstance(value, str) and value.strip() and value.strip() not in texts:
+            texts.append(value.strip())
+    applicable_sections = semantic_summary.get("applicable_sections") if isinstance(semantic_summary.get("applicable_sections"), list) else []
+    for value in applicable_sections:
+        if isinstance(value, str) and value.strip() and value.strip() not in texts:
+            texts.append(value.strip())
+    return texts
+
+
+def _score_asset_heading_match(*, heading_text: str, anchor_texts: list[str]) -> float:
+    heading_norm = _normalize_asset_anchor_text(heading_text)
+    if not heading_norm:
+        return 0.0
+    best = 0.0
+    for anchor_text in anchor_texts:
+        anchor_norm = _normalize_asset_anchor_text(anchor_text)
+        if not anchor_norm:
+            continue
+        score = SequenceMatcher(None, heading_norm, anchor_norm).ratio()
+        if heading_norm == anchor_norm:
+            score += 0.8
+        elif heading_norm in anchor_norm or anchor_norm in heading_norm:
+            score += 0.45
+        best = max(best, score)
+    return best
+
+
+def _normalize_asset_anchor_text(text: str) -> str:
+    normalized = _extract_terminal_heading_label(text)
+    normalized = normalized.casefold()
+    normalized = re.sub(r"[()（）【】\[\]《》·:：,，/\\\-\s]+", "", normalized)
+    for token in ("系统方案", "方案", "系统图", "总图", "示意图", "框图", "原理图", "图"):
+        normalized = normalized.replace(token, "")
+    return normalized.strip()
+
+
+def _find_asset_insertion_index(*, lines: list[str], heading_index: int) -> int:
+    cursor = heading_index + 1
+    seen_body = False
+    while cursor < len(lines):
+        stripped = lines[cursor].strip()
+        if cursor > heading_index + 1 and stripped.startswith("### "):
+            return cursor
+        if stripped.startswith("[[ASSET:"):
+            cursor += 1
+            continue
+        if stripped:
+            seen_body = True
+        elif seen_body:
+            return cursor + 1
+        cursor += 1
+    return len(lines)
 
 
 def _build_reuse_query_terms(*, section: dict[str, Any], global_params: dict[str, Any]) -> list[str]:
@@ -2182,10 +2368,12 @@ class SectionDraftService:
         executor: ExecutorAgent | None = None,
         asset_retriever: AssetRetrievalService | None = None,
         case_library: CaseLibraryService | None = None,
+        quality_gate: SectionQualityGateService | None = None,
     ) -> None:
         self.executor = executor or ExecutorAgent()
         self.asset_retriever = asset_retriever or AssetRetrievalService()
         self.case_library = case_library or CaseLibraryService()
+        self.quality_gate = quality_gate or SectionQualityGateService(executor=self.executor)
 
     async def generate_sections(
         self,
@@ -2272,6 +2460,17 @@ class SectionDraftService:
                 reusable_blocks=reusable_blocks,
                 reuse_pack=reuse_pack,
             )
+            quality_gate_result: dict[str, Any] = {}
+            if draft_status == "generated":
+                content_md, draft_status, quality_gate_result = await self.quality_gate.review_and_repair(
+                    task_id=str(job.id),
+                    section=section,
+                    outline_title=(outline.outline_json or {}).get("title", "技术方案"),
+                    global_params=global_params,
+                    content_md=content_md,
+                    recommended_assets=recommended_assets,
+                    allow_rewrite=True,
+                )
             draft = SectionDraft(
                 project_id=project_id,
                 draft_version=draft_version,
@@ -2287,13 +2486,14 @@ class SectionDraftService:
                     "generation_mode": generation_mode,
                     "reuse_pack": reuse_pack,
                     "generation_details": generation_details,
+                    "quality_gate": quality_gate_result,
                 },
             )
             session.add(draft)
             generated_drafts.append(draft)
 
         project.current_draft_version = draft_version
-        project.status = "DRAFT_READY"
+        project.status = _derive_project_draft_status(generated_drafts)
         job.status = "succeeded"
         job.output_ref = {"draft_version": draft_version, "section_count": len(generated_drafts)}
         job.completed_at = datetime.now(timezone.utc)
@@ -2319,15 +2519,11 @@ class SectionDraftService:
         if target_draft_version <= 0:
             return []
 
-        result = await session.scalars(
-            select(SectionDraft)
-            .where(
-                SectionDraft.project_id == project_id,
-                SectionDraft.draft_version == target_draft_version,
-            )
-            .order_by(SectionDraft.section_id.asc())
+        drafts = await self._load_section_drafts(
+            session=session,
+            project_id=project_id,
+            draft_version=target_draft_version,
         )
-        drafts = list(result.all())
         if not drafts:
             return []
 
@@ -2434,6 +2630,17 @@ class SectionDraftService:
             reusable_blocks=reusable_blocks,
             reuse_pack=reuse_pack,
         )
+        quality_gate_result: dict[str, Any] = {}
+        if draft_status == "generated":
+            content_md, draft_status, quality_gate_result = await self.quality_gate.review_and_repair(
+                task_id=str(job.id),
+                section=section,
+                outline_title=(outline.outline_json or {}).get("title", "技术方案"),
+                global_params=global_params,
+                content_md=content_md,
+                recommended_assets=recommended_assets,
+                allow_rewrite=True,
+            )
         draft.title = str(section.get("title") or draft.title)
         draft.content_md = content_md
         draft.citation_refs = citations
@@ -2443,12 +2650,18 @@ class SectionDraftService:
             "recommended_assets": recommended_assets,
             "generation_mode": generation_mode,
             "reuse_pack": reuse_pack,
+            "quality_gate": quality_gate_result,
             "generation_details": {
                 **generation_details,
                 "selected_citation_ids": sorted(normalized_preferred_citation_ids),
             },
         }
-        project.status = "DRAFT_READY"
+        project.status = await self._compute_project_draft_status(
+            session=session,
+            project_id=project_id,
+            draft_version=project.current_draft_version,
+            fallback_drafts=[draft],
+        )
 
         job.status = "succeeded"
         job.output_ref = {"draft_version": project.current_draft_version, "section_id": section_id}
@@ -2492,8 +2705,18 @@ class SectionDraftService:
             "recommended_assets": current_result.get("recommended_assets", []),
             "generation_mode": current_result.get("generation_mode", "baseline"),
             "reuse_pack": current_result.get("reuse_pack", {}),
+            "quality_gate": {
+                "status": "stale",
+                "summary": "manual edit pending validation",
+                "issues": [],
+            },
         }
-        project.status = "DRAFT_READY"
+        project.status = await self._compute_project_draft_status(
+            session=session,
+            project_id=project_id,
+            draft_version=project.current_draft_version,
+            fallback_drafts=[draft],
+        )
         await session.commit()
         await session.refresh(draft)
         return draft
@@ -2723,45 +2946,51 @@ class SectionDraftService:
                 section=section,
                 content_md=assembled_content,
             )
-            rewritten_content: str | None = None
+            finalized_content: str | None = None
             refinement_status = "fallback_assembled"
-            refinement_fallback_reason: str | None = "rewrite_missing"
+            refinement_fallback_reason: str | None = "finalize_missing"
             refinement_error: str | None = None
             try:
-                response = await self.executor.rewrite_section(
-                    task_id=task_id,
-                    section_context=build_reuse_refinement_context(
-                        section=section,
-                        reuse_pack=assembly_reuse_pack,
-                        global_params=global_params,
-                    ),
-                    selected_text=assembled_content,
-                    instruction=build_reuse_refinement_instruction(section=section, reuse_pack=assembly_reuse_pack),
+                llm_reuse_pack = dict(assembly_reuse_pack)
+                llm_reuse_pack["reusable_blocks"] = assembly_blocks[:3]
+                response = await self.executor.write_section(
+                    task_id=f"{task_id}-finalize",
+                    section=section_outline_to_executor_payload(section),
                     global_params=global_params,
+                    retrieved_context="",
+                    outline_title=outline_title,
+                    recommended_assets=recommended_assets,
+                    reuse_pack=llm_reuse_pack,
+                    assembled_draft=assembled_content,
                 )
-                rewritten_content = response.content
+                finalized_content = response.content
+                finalized_content = sanitize_generated_section_content(
+                    content_md=finalized_content,
+                    section_title=section_title,
+                )
                 _, refinement_status, refinement_fallback_reason = resolve_reuse_refinement_content(
                     assembled_content=assembled_content,
-                    rewritten_content=rewritten_content,
+                    rewritten_content=finalized_content,
                     section_title=section_title,
                 )
             except Exception as exc:  # noqa: BLE001
                 refinement_error = str(exc)
-                refinement_fallback_reason = "rewrite_error"
+                refinement_fallback_reason = "finalize_error"
             content_md, refinement_status, selection_fallback_reason = resolve_reuse_refinement_content(
                 assembled_content=assembled_content,
-                rewritten_content=rewritten_content,
+                rewritten_content=finalized_content,
                 section_title=section_title,
             )
             refinement_fallback_reason = refinement_fallback_reason or selection_fallback_reason
             content_md = ensure_required_asset_placeholders(content_md=content_md, reuse_pack=assembly_reuse_pack)
             content_md = polish_extractive_reuse_section_content(section=section, content_md=content_md)
+            effective_path = "extractive_reuse_llm_finalize" if finalized_content is not None and refinement_error is None else "extractive_reuse"
             return (
                 content_md,
                 "generated",
                 effective_citations,
                 {
-                    "effective_path": "extractive_reuse",
+                    "effective_path": effective_path,
                     "retrieval_mode": retrieval_mode,
                     "selected_sections": selected_sections,
                     "selected_blocks": selected_blocks,
@@ -2870,6 +3099,40 @@ class SectionDraftService:
         if not draft:
             raise ArtifactNotFoundError("Section draft not found")
         return draft
+
+    async def _load_section_drafts(
+        self,
+        *,
+        session: AsyncSession,
+        project_id: UUID,
+        draft_version: int,
+    ) -> list[SectionDraft]:
+        result = await session.scalars(
+            select(SectionDraft)
+            .where(
+                SectionDraft.project_id == project_id,
+                SectionDraft.draft_version == draft_version,
+            )
+            .order_by(SectionDraft.section_id.asc())
+        )
+        return list(result.all())
+
+    async def _compute_project_draft_status(
+        self,
+        *,
+        session: AsyncSession,
+        project_id: UUID,
+        draft_version: int,
+        fallback_drafts: list[SectionDraft] | None = None,
+    ) -> str:
+        drafts = await self._load_section_drafts(
+            session=session,
+            project_id=project_id,
+            draft_version=draft_version,
+        )
+        if not drafts:
+            drafts = fallback_drafts or []
+        return _derive_project_draft_status(drafts)
 
     def _find_section(self, *, outline: ProposalOutline, section_id: str) -> dict[str, Any]:
         sections = flatten_outline_sections(((outline.outline_json or {}).get("sections") or []))

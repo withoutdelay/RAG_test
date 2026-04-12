@@ -21,11 +21,12 @@ from app.models.requirement_card import RequirementCard
 from app.models.review_task import ReviewTask
 from app.models.section_draft import SectionDraft
 from app.models.validation_report import ValidationReport
+from app.services.composition.section_quality import analyze_section_heading_quality
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
-HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008", "VAL009"}
-CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103", "VAL104", "VAL105", "VAL106"}
+HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008", "VAL009", "VAL010"}
+CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103", "VAL104", "VAL105", "VAL106", "VAL107", "VAL108"}
 ASSUMPTION_HINTS = ("待确认", "待补充", "TBD", "暂定", "后续确认")
 TECHNICAL_SECTION_HINTS = ("技术", "架构", "配置", "参数", "实施", "系统", "方案")
 PARAMETER_REPLACE_FIELDS = {"voltage_level", "power_rating", "quantity", "delivery_scope"}
@@ -266,6 +267,63 @@ def collect_validation_findings(
             )
             errors.append(issue)
             section_results[section_id]["errors"].append(issue)
+
+        heading_quality_issues = analyze_section_heading_quality(
+            section_title=section_title,
+            content_md=draft.content_md,
+        )
+        blocking_heading_issues = [item for item in heading_quality_issues if item.severity == "high"]
+        warning_heading_issues = [item for item in heading_quality_issues if item.severity != "high"]
+        if blocking_heading_issues:
+            issue = make_issue(
+                code="VAL010",
+                level="P0",
+                section_id=section_id,
+                section_title=section_title,
+                message=f"章节《{section_title}》存在不适合直接外发的小标题或内部结构标题。",
+                suggested_action="统一章节小标题风格，删除内部提示性标题后重新校验。",
+                details={"issues": [item.to_dict() for item in blocking_heading_issues]},
+            )
+            errors.append(issue)
+            section_results[section_id]["errors"].append(issue)
+        elif warning_heading_issues:
+            warning = make_issue(
+                code="VAL107",
+                level="P1",
+                section_id=section_id,
+                section_title=section_title,
+                message=f"章节《{section_title}》的小标题风格仍需整理。",
+                suggested_action="将空泛或风格不一致的小标题改成直接表达技术主题的中文标题。",
+                details={"issues": [item.to_dict() for item in warning_heading_issues]},
+            )
+            warnings.append(warning)
+            section_results[section_id]["warnings"].append(warning)
+
+        quality_gate = validator_result.get("quality_gate") if isinstance(validator_result.get("quality_gate"), dict) else {}
+        quality_gate_status = str(quality_gate.get("status") or "").lower()
+        try:
+            quality_gate_score = float(quality_gate.get("score"))
+        except (TypeError, ValueError):
+            quality_gate_score = None
+        if quality_gate_status == "review_required" or (
+            quality_gate_score is not None and quality_gate_score < 0.78
+        ):
+            warning = make_issue(
+                code="VAL108",
+                level="P1",
+                section_id=section_id,
+                section_title=section_title,
+                message=f"章节《{section_title}》未通过自动质量审查，建议人工复核当前表达和结构。",
+                suggested_action="优先根据自动质检意见重写该章节，再重新执行校验。",
+                details={
+                    "quality_gate_status": quality_gate_status or None,
+                    "quality_gate_score": quality_gate_score,
+                    "quality_gate_summary": quality_gate.get("summary"),
+                    "quality_gate_issues": quality_gate.get("issues") or [],
+                },
+            )
+            warnings.append(warning)
+            section_results[section_id]["warnings"].append(warning)
 
         leaked_terms = _find_reuse_leakage_terms(
             content=draft.content_md,

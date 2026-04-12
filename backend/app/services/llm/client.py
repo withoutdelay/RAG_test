@@ -28,6 +28,7 @@ class TaskType(str, Enum):
     EXTRACTION = "extraction"
     ASSET_REVIEW = "asset_review"
     ASSET_SUMMARY = "asset_summary"
+    SECTION_QUALITY = "section_quality"
     OUTLINE = "outline"
     SECTION_WRITE = "section_write"
     HOLISTIC = "holistic"
@@ -39,6 +40,7 @@ ROUTING_TABLE = {
     TaskType.EXTRACTION: ModelType.DEEPSEEK,
     TaskType.ASSET_REVIEW: ModelType.DOUBAO,
     TaskType.ASSET_SUMMARY: ModelType.DOUBAO,
+    TaskType.SECTION_QUALITY: ModelType.DOUBAO,
     TaskType.OUTLINE: ModelType.DOUBAO,
     TaskType.SECTION_WRITE: ModelType.DOUBAO,
     TaskType.HOLISTIC: ModelType.DOUBAO,
@@ -169,6 +171,8 @@ class MockLLMProvider(BaseLLMProvider):
             return self._render_asset_review(request)
         if request.task_type == TaskType.ASSET_SUMMARY:
             return self._render_asset_summary(request)
+        if request.task_type == TaskType.SECTION_QUALITY:
+            return self._render_section_quality(request)
         if request.task_type == TaskType.QUESTION_GEN:
             return "1. 关键参数是否已经最终确认？\n2. 现场实施窗口是否已锁定？"
         return request.user_prompt
@@ -308,6 +312,45 @@ class MockLLMProvider(BaseLLMProvider):
                 }
             )
         return json.dumps({"items": items}, ensure_ascii=False)
+
+    def _render_section_quality(self, request: LLMRequest) -> str:
+        draft_text = str(request.user_prompt or "")
+        issues: list[dict[str, Any]] = []
+        if "建议插入图表" in draft_text:
+            issues.append(
+                {
+                    "code": "SQ001",
+                    "severity": "high",
+                    "target": "建议插入图表",
+                    "message": "章节包含内部图表建议标题，不适合直接给客户展示。",
+                    "suggested_fix": "删除“建议插入图表”这类内部标题，把图表自然融入正文。",
+                }
+            )
+        if "### A. 概述" in draft_text or "\n### A." in draft_text:
+            issues.append(
+                {
+                    "code": "SQ002",
+                    "severity": "medium",
+                    "target": "A. 概述",
+                    "message": "章节小标题存在英文字母编号风格，与中文客户稿不一致。",
+                    "suggested_fix": "改成直接表达技术主题的中文小标题，不要使用 A./B. 编号。",
+                }
+            )
+        passed = not issues
+        return json.dumps(
+            {
+                "pass": passed,
+                "score": 0.9 if passed else 0.62,
+                "summary": "章节标题风格和结构基本合格。" if passed else "章节存在小标题风格或内部提示语问题。",
+                "issues": issues,
+                "rewrite_instruction": (
+                    "统一小标题风格，删除内部图表建议标题，并将 A./B. 样式改为中文技术主题标题。"
+                    if issues
+                    else "保持当前章节结构和技术表达。"
+                ),
+            },
+            ensure_ascii=False,
+        )
 
 
 class HTTPChatCompletionsProvider(BaseLLMProvider):

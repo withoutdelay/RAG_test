@@ -31,6 +31,31 @@ Phase 2 backend plus Phase 3 gateway scaffold for the presales AI system describ
 6. Open `http://localhost:8000/docs`.
 7. Open `http://localhost:8001/docs` for the masking gateway.
 
+## Server Deployment
+
+This repo now includes a production-oriented Docker Compose stack in `docker-compose.prod.yml` and a one-click deployment script in `scripts/deploy.sh`.
+
+1. Copy `.env.example` to `.env` on the server and fill in real production values.
+2. Set `APP_ENV=production`.
+3. Set `NEXT_PUBLIC_API_BASE_URL` to the externally reachable backend API URL, for example `http://your-server-ip:8000/api/v1` or your domain path.
+4. Optionally set `BACKEND_EXTRAS=full` if you want the container image to include Docling and sentence-transformers support.
+5. Run:
+   `./scripts/deploy.sh`
+
+The deploy script intentionally blocks `NEXT_PUBLIC_API_BASE_URL=localhost` or `127.0.0.1` by default, because that would break browser access for external users. If you are only doing a same-machine deployment test, run with `DEPLOY_ALLOW_LOCAL_API=1 ./scripts/deploy.sh`.
+
+Useful commands:
+- `./scripts/deploy.sh restart`
+- `./scripts/deploy.sh status`
+- `./scripts/deploy.sh logs`
+- `./scripts/deploy.sh down`
+
+The production stack exposes only the frontend and backend ports by default:
+- Frontend: `3000`
+- Backend: `8000`
+
+Infrastructure services stay on the internal Docker network in the production compose file.
+
 ## Phase 2 Modes
 
 - `PARSER_BACKEND=auto|docling|fallback`

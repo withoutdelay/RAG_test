@@ -5,6 +5,7 @@ WORKDIR /app
 ARG BACKEND_EXTRAS=
 
 COPY app ./app
+COPY data/case_library ./data/case_library
 COPY pyproject.toml .
 RUN if [ -n "$BACKEND_EXTRAS" ]; then pip install --no-cache-dir ".[$BACKEND_EXTRAS]"; else pip install --no-cache-dir .; fi
 

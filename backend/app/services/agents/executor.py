@@ -18,14 +18,18 @@ class ExecutorAgent:
         outline_title: str,
         recommended_assets: list[dict] | None = None,
         reuse_pack: dict | None = None,
+        assembled_draft: str | None = None,
     ) -> LLMResponse:
+        prompt_reuse_pack = dict(reuse_pack or {})
+        if assembled_draft:
+            prompt_reuse_pack["assembled_draft"] = assembled_draft
         system_prompt, user_prompt = build_section_prompts(
             section=section,
             global_params=global_params,
             retrieved_context=retrieved_context,
             outline_title=outline_title,
             recommended_assets=recommended_assets or [],
-            reuse_pack=reuse_pack or {},
+            reuse_pack=prompt_reuse_pack,
         )
         return await self.llm_client.invoke(
             LLMRequest(
@@ -38,7 +42,8 @@ class ExecutorAgent:
                     "section": section,
                     "retrieved_context": retrieved_context,
                     "recommended_assets": recommended_assets or [],
-                    "reuse_pack": reuse_pack or {},
+                    "reuse_pack": prompt_reuse_pack,
+                    "assembled_draft": assembled_draft or "",
                 },
             )
         )
