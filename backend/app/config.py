@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -47,6 +48,7 @@ class Settings(BaseSettings):
     embedding_backend: Literal["auto", "sentence-transformers", "fallback"] = "fallback"
     embedding_model: str = "BAAI/bge-large-zh-v1.5"
     embedding_dimension: int = 1024
+    embedding_local_files_only: bool = True
 
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"
@@ -55,8 +57,15 @@ class Settings(BaseSettings):
 
     gateway_url: str = "http://localhost:8001"
     gateway_masking_enabled: bool = True
+    legacy_generation_enabled: bool = False
+    validation_require_final_review: bool = False
+    export_holistic_finalization_enabled: bool = False
+    export_holistic_finalization_mode: Literal["section", "document"] = "section"
     llm_provider_backend: Literal["mock", "live"] = "mock"
     llm_timeout_seconds: float = 60.0
+    llm_stream_timeout_seconds: float = 90.0
+    llm_retry_attempts: int = 1
+    llm_retry_backoff_seconds: float = 1.0
     llm_mock_stream_chunk_size: int = 48
     deepseek_api_key: str | None = Field(default=None, validation_alias="DEEPSEEK_API_KEY")
     deepseek_base_url: str = Field(default="https://api.deepseek.com/v1", validation_alias="DEEPSEEK_BASE_URL")
@@ -94,4 +103,15 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if settings.llm_stream_timeout_seconds <= 0:
+        settings.llm_stream_timeout_seconds = max(settings.llm_timeout_seconds, 1.0)
+    if settings.llm_retry_attempts < 0:
+        settings.llm_retry_attempts = 0
+    if settings.llm_retry_backoff_seconds < 0:
+        settings.llm_retry_backoff_seconds = 0.0
+    if not math.isfinite(settings.llm_stream_timeout_seconds):
+        settings.llm_stream_timeout_seconds = max(settings.llm_timeout_seconds, 90.0)
+    if not math.isfinite(settings.llm_retry_backoff_seconds):
+        settings.llm_retry_backoff_seconds = 1.0
+    return settings

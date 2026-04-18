@@ -7,8 +7,9 @@ Phase 2 backend plus Phase 3 gateway scaffold for the presales AI system describ
 - Docker Compose for local infrastructure
 - FastAPI backend with project CRUD
 - Document upload, parsing, chunking, vector indexing, and retrieval APIs
+- Requirement extraction, evidence retrieval, outline generation, section generation, validation, and export through the composition/artifacts pipeline
 - Phase 3 gateway for reversible masking and restoration
-- Phase 4 backend generation workflow, review APIs, and pluggable LLM providers
+- Pluggable live/mock LLM providers for the active composition pipeline
 - SQLAlchemy models and Alembic migration
 - Local/object-storage fallback and Qdrant in-memory test mode
 - Unit and API integration tests for the Phase 2 path
@@ -30,6 +31,21 @@ Phase 2 backend plus Phase 3 gateway scaffold for the presales AI system describ
    `cd backend && ../.venv/bin/uvicorn app.main:app --reload`
 6. Open `http://localhost:8000/docs`.
 7. Open `http://localhost:8001/docs` for the masking gateway.
+
+## MVP Primary API Path
+
+The MVP only promotes the composition/artifacts pipeline:
+
+1. `POST /api/v1/projects/{project_id}/extract-requirement`
+2. `POST /api/v1/projects/{project_id}/retrieve-evidence`
+3. `POST /api/v1/projects/{project_id}/generate-outline`
+4. `POST /api/v1/projects/{project_id}/generate-sections`
+5. `POST /api/v1/projects/{project_id}/validate`
+6. `POST /api/v1/projects/{project_id}/export`
+
+Legacy `/api/v1/generation/*` and legacy review routes are disabled by default and hidden from OpenAPI docs. They can still be re-enabled explicitly for compatibility/debugging with:
+
+`LEGACY_GENERATION_ENABLED=true`
 
 ## Server Deployment
 
@@ -81,7 +97,7 @@ Infrastructure services stay on the internal Docker network in the production co
 - The gateway container uses Python `3.11`, which is the supported runtime for Presidio in this repo.
 - In a shared local `.venv`, Presidio-heavy installs may conflict with optional Docling extras; Docker is the safest way to validate the full gateway stack.
 
-## Phase 4 LLM Provider Modes
+## LLM Provider Modes
 
 - `LLM_PROVIDER_BACKEND=mock|live`
   `mock` is the default for local tests; `live` enables real DeepSeek/Qwen/Azure/OpenAI-compatible chat-completions calls.
@@ -90,7 +106,7 @@ Infrastructure services stay on the internal Docker network in the production co
 - Azure OpenAI uses `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, and `AZURE_OPENAI_API_VERSION`.
 - OpenAI-compatible relay endpoints use `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
 - For development with a GPT-style proxy, point `OPENAI_BASE_URL` at the relay host; the client will normalize an empty path to `/v1`.
-- The backend currently targets each provider's chat-completions interface and keeps the masking gateway in front of outbound prompts.
+- The active generation path is the composition/artifacts pipeline; LLM calls are used for outline generation, section writing, quality review, and multimodal enrichment on that path.
 - Current development default: keep using the `OpenAI-compatible` path for generation and multimodal validation.
 - Production planning note: if the final deployment chooses Qwen as the primary model family, evaluate `DashScope SDK` first for OCR, file-native parsing, and vision-heavy asset enrichment instead of forcing everything through the OpenAI-compatible bridge.
 

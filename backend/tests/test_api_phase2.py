@@ -325,9 +325,9 @@ class Phase2ApiTests(unittest.TestCase):
             document_response = client.get(f"/api/v1/documents/{document_id}")
             self.assertEqual(document_response.status_code, 200)
             document_payload = document_response.json()["data"]
-            self.assertEqual(document_payload["metadata"]["chunk_count"], 3)
+            self.assertEqual(document_payload["metadata"]["chunk_count"], 2)
             self.assertEqual(document_payload["metadata"]["indexed_chunk_count"], 1)
-            self.assertEqual(document_payload["metadata"]["skipped_chunk_count"], 2)
+            self.assertEqual(document_payload["metadata"]["skipped_chunk_count"], 1)
             self.assertEqual(document_payload["metadata"]["preserved_table_asset_count"], 0)
 
             chunks_response = client.get(f"/api/v1/documents/{document_id}/chunks")
@@ -335,9 +335,8 @@ class Phase2ApiTests(unittest.TestCase):
             chunks = chunks_response.json()["data"]
 
             skipped = [chunk for chunk in chunks if not chunk["metadata"]["indexable"]]
-            self.assertEqual(len(skipped), 2)
+            self.assertEqual(len(skipped), 1)
             self.assertTrue(any("numeric_table_fragment" in chunk["metadata"]["indexing_reasons"] for chunk in skipped))
-            self.assertTrue(any("heading_only" in chunk["metadata"]["indexing_reasons"] for chunk in skipped))
             numeric_table_chunk = next(
                 chunk for chunk in skipped if "numeric_table_fragment" in chunk["metadata"]["indexing_reasons"]
             )

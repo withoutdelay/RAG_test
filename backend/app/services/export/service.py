@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings, get_settings
 from app.models.audit_log import AuditLog
 from app.models.evidence_bundle import EvidenceBundle
 from app.models.job import Job
@@ -20,6 +21,8 @@ from app.models.requirement_card import RequirementCard
 from app.models.review_task import ReviewTask
 from app.models.section_draft import SectionDraft
 from app.models.validation_report import ValidationReport
+from app.services.agents.holistic import HolisticAgent
+from app.services.evidence_binding import resolve_outline_evidence_bundle
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 from app.services.validation.service import flatten_outline_sections
 from app.utils.object_storage import get_object_storage
@@ -121,6 +124,63 @@ def render_export_markdown(
     return "\n".join(lines).strip() + "\n"
 
 
+def render_export_sections_markdown(
+    *,
+    outline: ProposalOutline,
+    section_drafts: list[SectionDraft],
+    render_assets: bool = True,
+) -> str:
+    sections = flatten_outline_sections(((outline.outline_json or {}).get("sections") or []))
+    drafts_by_id = {draft.section_id: draft for draft in section_drafts}
+    lines: list[str] = []
+    for section in sections:
+        draft = drafts_by_id.get(str(section.get("section_id") or ""))
+        if draft is None:
+            continue
+        content = (_render_export_section_content(draft) if render_assets else str(draft.content_md or "")).strip()
+        if not content.startswith("#"):
+            content = f"## {draft.title}\n\n{content}"
+        lines.extend([content, ""])
+    return "\n".join(lines).strip() + "\n"
+
+
+def render_export_citations_markdown(section_drafts: list[SectionDraft]) -> str:
+    citation_sections: list[str] = []
+    for draft in section_drafts:
+        citations = draft.citation_refs if isinstance(draft.citation_refs, list) else []
+        if not citations:
+            continue
+        citation_sections.append(f"### {draft.title}")
+        for citation in citations:
+            if not isinstance(citation, dict):
+                continue
+            heading_path = citation.get("heading_path") or []
+            path_text = " > ".join(str(item) for item in heading_path if item)
+            citation_sections.append(
+                "- "
+                + " / ".join(
+                    part
+                    for part in [
+                        str(citation.get("evidence_id") or ""),
+                        str(citation.get("source_title") or ""),
+                        path_text,
+                    ]
+                    if part
+                )
+            )
+        citation_sections.append("")
+    if not citation_sections:
+        return ""
+    return "\n".join(["---", "", "## 引用清单", "", *citation_sections]).strip() + "\n"
+
+
+def render_export_markdown_from_sections(*, sections_markdown: str, section_drafts: list[SectionDraft]) -> str:
+    citations_markdown = render_export_citations_markdown(section_drafts).strip()
+    if not citations_markdown:
+        return sections_markdown.strip() + "\n"
+    return "\n".join([sections_markdown.strip(), "", citations_markdown]).strip() + "\n"
+
+
 def _render_export_section_content(draft: SectionDraft) -> str:
     content = draft.content_md or ""
     raw_validator_result = getattr(draft, "validator_result", {})
@@ -139,6 +199,26 @@ def _render_export_section_content(draft: SectionDraft) -> str:
         )
 
     return ASSET_PLACEHOLDER_PATTERN.sub(_replace, content)
+
+
+def _render_asset_placeholders_in_markdown(content_md: str, section_drafts: list[SectionDraft]) -> str:
+    asset_lookup: dict[tuple[str, str], dict] = {}
+    for draft in section_drafts:
+        raw_validator_result = getattr(draft, "validator_result", {})
+        validator_result = raw_validator_result if isinstance(raw_validator_result, dict) else {}
+        recommended_assets = validator_result.get("recommended_assets") if isinstance(validator_result.get("recommended_assets"), list) else []
+        asset_lookup.update(_build_recommended_asset_lookup(recommended_assets))
+
+    def _replace(match: re.Match[str]) -> str:
+        placeholder_type = str(match.group(1) or "").upper()
+        asset_id = str(match.group(2) or "").strip()
+        return _render_asset_reference_block(
+            placeholder_type=placeholder_type,
+            asset_id=asset_id,
+            asset=asset_lookup.get((placeholder_type, asset_id)),
+        )
+
+    return ASSET_PLACEHOLDER_PATTERN.sub(_replace, str(content_md or ""))
 
 
 def _build_recommended_asset_lookup(recommended_assets: list[dict]) -> dict[tuple[str, str], dict]:
@@ -209,7 +289,114 @@ def _render_asset_reference_block(*, placeholder_type: str, asset_id: str, asset
     return "\n".join(lines)
 
 
+def _extract_export_global_params(requirement_card: RequirementCard) -> dict:
+    content = requirement_card.content if isinstance(requirement_card.content, dict) else {}
+    if isinstance(content.get("global_params"), dict):
+        return dict(content["global_params"])
+    if isinstance(content.get("fields"), dict):
+        return dict(content["fields"])
+    return dict(content)
+
+
+def _holistic_output_is_acceptable(content_md: str, *, section_drafts: list[SectionDraft]) -> bool:
+    content = str(content_md or "").strip()
+    if not content.startswith("#"):
+        return False
+    original_chars = sum(len(str(draft.content_md or "")) for draft in section_drafts)
+    if original_chars and len(content) < max(200, int(original_chars * 0.65)):
+        return False
+    original_placeholders = set(ASSET_PLACEHOLDER_PATTERN.findall("\n".join(str(draft.content_md or "") for draft in section_drafts)))
+    output_placeholders = set(ASSET_PLACEHOLDER_PATTERN.findall(content))
+    return original_placeholders.issubset(output_placeholders)
+
+
+def _holistic_section_output_is_acceptable(content_md: str, *, original_content_md: str) -> bool:
+    content = str(content_md or "").strip()
+    if not content.startswith("#"):
+        return False
+    original_chars = len(str(original_content_md or ""))
+    if original_chars and len(content) < max(80, int(original_chars * 0.55)):
+        return False
+    original_placeholders = set(ASSET_PLACEHOLDER_PATTERN.findall(str(original_content_md or "")))
+    output_placeholders = set(ASSET_PLACEHOLDER_PATTERN.findall(content))
+    return original_placeholders.issubset(output_placeholders)
+
+
+def _normalize_finalized_section_markdown(*, content_md: str, title: str) -> str:
+    lines = str(content_md or "").strip().splitlines()
+    if not lines:
+        return f"## {title}\n"
+    first = lines[0].strip()
+    if first.startswith("# "):
+        lines[0] = f"## {title}"
+    elif not first.startswith("## "):
+        lines.insert(0, f"## {title}")
+    lines = _dedupe_leading_section_heading(lines=lines, title=title)
+    return "\n".join(lines).strip() + "\n"
+
+
+def _dedupe_leading_section_heading(*, lines: list[str], title: str) -> list[str]:
+    if not lines:
+        return lines
+    target = _normalize_markdown_heading_text(f"## {title}")
+    deduped = [lines[0].rstrip()]
+    index = 1
+
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped:
+            index += 1
+            continue
+        if stripped.startswith("#") and _normalize_markdown_heading_text(stripped) == target:
+            index += 1
+            continue
+        break
+
+    if index < len(lines):
+        deduped.append("")
+        deduped.extend(lines[index:])
+    return deduped
+
+
+def _normalize_markdown_heading_text(line: str) -> str:
+    text = re.sub(r"^#+\s*", "", str(line or "")).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text.lower()
+
+
+def summarize_holistic_finalization_trace(trace: dict) -> dict:
+    if not isinstance(trace, dict):
+        return {"enabled": False, "status": "unknown"}
+    sections = trace.get("sections") if isinstance(trace.get("sections"), list) else []
+    succeeded_sections = int(trace.get("succeeded_sections") or 0)
+    fallback_sections = sum(
+        1
+        for section in sections
+        if isinstance(section, dict) and str(section.get("status") or "").lower() == "fallback"
+    )
+    summary = {
+        "enabled": bool(trace.get("enabled")),
+        "mode": str(trace.get("mode") or "section"),
+        "status": str(trace.get("status") or "unknown"),
+        "input_chars": int(trace.get("input_chars") or 0),
+        "output_chars": int(trace.get("output_chars") or 0),
+    }
+    if sections:
+        summary.update(
+            {
+                "section_count": len(sections),
+                "succeeded_sections": succeeded_sections,
+                "fallback_sections": fallback_sections,
+            }
+        )
+    return summary
+
+
 class ExportService:
+    def __init__(self, *, settings: Settings | None = None, holistic: HolisticAgent | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.holistic = holistic
+
     async def export_project(
         self,
         *,
@@ -248,6 +435,15 @@ class ExportService:
             section_drafts=section_drafts,
             snapshot=snapshot,
         )
+        markdown, holistic_trace = await self._maybe_finalize_markdown(
+            task_id=f"export-{project.id}-{int(project.current_draft_version or 0)}",
+            project=project,
+            outline=outline,
+            requirement_card=requirement_card,
+            section_drafts=section_drafts,
+            current_markdown=markdown,
+        )
+        snapshot["holistic_finalization"] = holistic_trace
         extension = SUPPORTED_EXPORT_FORMATS[normalized_format]
 
         job = Job(
@@ -311,13 +507,175 @@ class ExportService:
         )
 
         job.status = "succeeded"
-        job.output_ref = {"export_id": str(export_record.id), "storage_path": storage_path}
+        job.output_ref = {
+            "export_id": str(export_record.id),
+            "storage_path": storage_path,
+            "holistic_finalization": summarize_holistic_finalization_trace(holistic_trace),
+        }
         job.completed_at = datetime.now(timezone.utc)
 
         await session.commit()
         await session.refresh(job)
         await session.refresh(export_record)
         return job, export_record
+
+    async def _maybe_finalize_markdown(
+        self,
+        *,
+        task_id: str,
+        project: Project,
+        outline: ProposalOutline,
+        requirement_card: RequirementCard,
+        section_drafts: list[SectionDraft],
+        current_markdown: str,
+    ) -> tuple[str, dict]:
+        enabled = bool(getattr(self.settings, "export_holistic_finalization_enabled", False))
+        trace = {
+            "enabled": enabled,
+            "mode": str(getattr(self.settings, "export_holistic_finalization_mode", "section") or "section"),
+            "status": "skipped",
+            "input_chars": 0,
+            "output_chars": len(current_markdown or ""),
+        }
+        if not enabled:
+            return current_markdown, trace
+
+        mode = str(trace["mode"]).lower()
+        if mode == "document":
+            return await self._finalize_markdown_as_document(
+                task_id=task_id,
+                project=project,
+                outline=outline,
+                requirement_card=requirement_card,
+                section_drafts=section_drafts,
+                current_markdown=current_markdown,
+                trace=trace,
+            )
+        return await self._finalize_markdown_by_section(
+            task_id=task_id,
+            project=project,
+            outline=outline,
+            requirement_card=requirement_card,
+            section_drafts=section_drafts,
+            current_markdown=current_markdown,
+            trace=trace,
+        )
+
+    async def _finalize_markdown_as_document(
+        self,
+        *,
+        task_id: str,
+        project: Project,
+        outline: ProposalOutline,
+        requirement_card: RequirementCard,
+        section_drafts: list[SectionDraft],
+        current_markdown: str,
+        trace: dict,
+    ) -> tuple[str, dict]:
+        title = str((outline.outline_json or {}).get("title") or project.name)
+        raw_sections_markdown = render_export_sections_markdown(
+            outline=outline,
+            section_drafts=section_drafts,
+            render_assets=False,
+        )
+        holistic_input = f"# {title}\n\n{raw_sections_markdown.strip()}\n"
+        trace["input_chars"] = len(holistic_input)
+        try:
+            holistic = self.holistic or HolisticAgent()
+            response = await holistic.finalize(
+                task_id=task_id,
+                outline_title=title,
+                global_params=_extract_export_global_params(requirement_card),
+                all_sections_markdown=holistic_input,
+            )
+            finalized = str(response.content or "").strip()
+            if not _holistic_output_is_acceptable(finalized, section_drafts=section_drafts):
+                raise ArtifactValidationError("Holistic finalization output failed safety checks")
+            finalized = _render_asset_placeholders_in_markdown(finalized, section_drafts)
+            markdown = render_export_markdown_from_sections(
+                sections_markdown=finalized,
+                section_drafts=section_drafts,
+            )
+            trace.update({"status": "succeeded", "output_chars": len(markdown)})
+            return markdown, trace
+        except Exception as exc:  # noqa: BLE001
+            trace.update({"status": "fallback", "error": str(exc), "output_chars": len(current_markdown or "")})
+            return current_markdown, trace
+
+    async def _finalize_markdown_by_section(
+        self,
+        *,
+        task_id: str,
+        project: Project,
+        outline: ProposalOutline,
+        requirement_card: RequirementCard,
+        section_drafts: list[SectionDraft],
+        current_markdown: str,
+        trace: dict,
+    ) -> tuple[str, dict]:
+        title = str((outline.outline_json or {}).get("title") or project.name)
+        sections = flatten_outline_sections(((outline.outline_json or {}).get("sections") or []))
+        drafts_by_id = {draft.section_id: draft for draft in section_drafts}
+        ordered_drafts = [
+            draft
+            for section in sections
+            if (draft := drafts_by_id.get(str(section.get("section_id") or ""))) is not None
+        ]
+        holistic = self.holistic or HolisticAgent()
+        global_params = _extract_export_global_params(requirement_card)
+        finalized_sections: list[str] = []
+        section_traces: list[dict] = []
+        success_count = 0
+        input_chars = 0
+
+        for index, draft in enumerate(ordered_drafts, start=1):
+            original_content = str(draft.content_md or "").strip()
+            section_input = original_content if original_content.startswith("#") else f"## {draft.title}\n\n{original_content}"
+            input_chars += len(section_input)
+            section_trace = {
+                "section_id": str(draft.section_id),
+                "title": str(draft.title),
+                "input_chars": len(section_input),
+                "status": "pending",
+            }
+            try:
+                response = await holistic.finalize(
+                    task_id=f"{task_id}-section-{index}",
+                    outline_title=str(draft.title),
+                    global_params=global_params,
+                    all_sections_markdown=section_input,
+                )
+                finalized = str(response.content or "").strip()
+                if not _holistic_section_output_is_acceptable(
+                    finalized,
+                    original_content_md=original_content,
+                ):
+                    raise ArtifactValidationError("Holistic section output failed safety checks")
+                normalized = _normalize_finalized_section_markdown(content_md=finalized, title=str(draft.title))
+                finalized_sections.append(normalized)
+                section_trace.update({"status": "succeeded", "output_chars": len(normalized)})
+                success_count += 1
+            except Exception as exc:  # noqa: BLE001
+                fallback = section_input.strip() + "\n"
+                finalized_sections.append(fallback)
+                section_trace.update({"status": "fallback", "error": str(exc), "output_chars": len(fallback)})
+            section_traces.append(section_trace)
+
+        trace["input_chars"] = input_chars
+        trace["sections"] = section_traces
+        if success_count <= 0:
+            trace.update({"status": "fallback", "output_chars": len(current_markdown or "")})
+            return current_markdown, trace
+
+        sections_markdown = f"# {title}\n\n" + "\n\n".join(item.strip() for item in finalized_sections if item.strip()) + "\n"
+        sections_markdown = _render_asset_placeholders_in_markdown(sections_markdown, section_drafts)
+        markdown = render_export_markdown_from_sections(
+            sections_markdown=sections_markdown,
+            section_drafts=section_drafts,
+        )
+        status = "succeeded" if success_count == len(ordered_drafts) else "partial_fallback"
+        trace.update({"status": status, "output_chars": len(markdown), "succeeded_sections": success_count})
+        return markdown, trace
 
     async def get_latest_export(self, *, session: AsyncSession, project_id: UUID) -> ProjectExport:
         project = await session.get(Project, project_id)
@@ -359,12 +717,7 @@ class ExportService:
         return card
 
     async def _resolve_evidence_bundle(self, *, session: AsyncSession, outline: ProposalOutline) -> EvidenceBundle:
-        if outline.evidence_bundle_id is None:
-            raise ArtifactValidationError("Outline has no evidence bundle binding")
-        bundle = await session.get(EvidenceBundle, outline.evidence_bundle_id)
-        if not bundle:
-            raise ArtifactNotFoundError("Evidence bundle not found")
-        return bundle
+        return await resolve_outline_evidence_bundle(session=session, outline=outline)
 
     async def _resolve_validation_report(self, *, session: AsyncSession, project: Project) -> ValidationReport:
         result = await session.scalars(

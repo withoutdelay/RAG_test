@@ -19,6 +19,7 @@ class ExecutorAgent:
         recommended_assets: list[dict] | None = None,
         reuse_pack: dict | None = None,
         assembled_draft: str | None = None,
+        preceding_context: str = "",
     ) -> LLMResponse:
         prompt_reuse_pack = dict(reuse_pack or {})
         if assembled_draft:
@@ -30,14 +31,16 @@ class ExecutorAgent:
             outline_title=outline_title,
             recommended_assets=recommended_assets or [],
             reuse_pack=prompt_reuse_pack,
+            preceding_context=preceding_context,
         )
+        max_tokens = 3200 if assembled_draft else 900
         return await self.llm_client.invoke(
             LLMRequest(
                 task_type=TaskType.SECTION_WRITE,
                 session_id=task_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=1600,
+                max_tokens=max_tokens,
                 metadata={
                     "section": section,
                     "retrieved_context": retrieved_context,
@@ -69,7 +72,7 @@ class ExecutorAgent:
                 session_id=task_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=1600,
+                max_tokens=2400,
                 metadata={
                     "section_context": section_context,
                     "selected_text": selected_text,

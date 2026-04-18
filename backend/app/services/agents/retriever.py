@@ -7,6 +7,8 @@ from app.models.chunk import Chunk
 
 
 class RetrieverAgent:
+    """Legacy retriever used only by the old /generation workflow."""
+
     async def retrieve_context(
         self,
         *,

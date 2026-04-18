@@ -21,10 +21,17 @@ class Embedder:
             self.backend_mode = settings.embedding_backend
             self.dimension = settings.embedding_dimension
             self.model_name = settings.embedding_model
+            self.local_files_only = settings.embedding_local_files_only
         else:
             self.backend_mode = os.getenv("EMBEDDING_BACKEND", "fallback")
             self.dimension = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
             self.model_name = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5")
+            self.local_files_only = os.getenv("EMBEDDING_LOCAL_FILES_ONLY", "true").strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
         self._model = None
         self.backend_name = "fallback"
 
@@ -63,7 +70,7 @@ class Embedder:
                 raise RuntimeError("sentence-transformers backend requested with fallback model name")
             return None
         try:
-            return SentenceTransformer(self.model_name)
+            return SentenceTransformer(self.model_name, local_files_only=self.local_files_only)
         except Exception:
             if strict:
                 raise

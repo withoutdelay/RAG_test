@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from app.api.generation import get_generation_service
 from app.api.router import api_router
 from app.db import get_db_session
+from app.services.generation import GenerationService
 
 
 class _FakeGenerationService:
@@ -191,6 +192,56 @@ class GenerationApiTests(unittest.TestCase):
             stream_after = client.get(f"/api/v1/generation/{task_id}/stream")
             self.assertEqual(stream_after.status_code, 200)
             self.assertIn("event: review_required", stream_after.text)
+
+
+class LegacyGenerationDisabledApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.app = FastAPI()
+        self.app.include_router(api_router, prefix="/api/v1")
+        self.app.dependency_overrides[get_generation_service] = lambda: GenerationService(
+            settings=SimpleNamespace(legacy_generation_enabled=False)
+        )
+        self.app.dependency_overrides[get_db_session] = _fake_db_session
+
+    def tearDown(self) -> None:
+        self.app.dependency_overrides.clear()
+
+    def test_generation_routes_return_gone_when_legacy_flow_disabled(self) -> None:
+        with TestClient(self.app) as client:
+            start_response = client.post(
+                "/api/v1/generation/start",
+                json={
+                    "project_id": str(uuid4()),
+                    "instructions": "请生成一份测试方案。",
+                    "global_params": {},
+                },
+            )
+            self.assertEqual(start_response.status_code, 410)
+            self.assertIn("/generate-outline", start_response.json()["detail"])
+
+            task_response = client.get(f"/api/v1/generation/{uuid4()}")
+            self.assertEqual(task_response.status_code, 410)
+
+            confirm_response = client.post(
+                f"/api/v1/generation/{uuid4()}/outline/confirm",
+                json={},
+            )
+            self.assertEqual(confirm_response.status_code, 410)
+
+            rewrite_response = client.post(
+                f"/api/v1/generation/{uuid4()}/sections/0/rewrite",
+                json={"instruction": "重写", "selected_text": "原文"},
+            )
+            self.assertEqual(rewrite_response.status_code, 410)
+
+    def test_generation_routes_are_hidden_from_openapi_schema(self) -> None:
+        with TestClient(self.app) as client:
+            schema = client.get("/openapi.json").json()
+            self.assertNotIn("/api/v1/generation/start", schema["paths"])
+            self.assertNotIn("/api/v1/generation/{task_id}", schema["paths"])
+            self.assertNotIn("/api/v1/generation/{task_id}/stream", schema["paths"])
+            self.assertNotIn("/api/v1/generation/{task_id}/outline/confirm", schema["paths"])
+            self.assertNotIn("/api/v1/generation/{task_id}/sections/{section_index}/rewrite", schema["paths"])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import uuid
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -7,7 +8,7 @@ import re
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.evidence_bundle import EvidenceBundle
@@ -17,8 +18,10 @@ from app.models.proposal_outline import ProposalOutline
 from app.models.requirement_card import RequirementCard
 from app.models.section_draft import SectionDraft
 from app.services.agents.executor import ExecutorAgent
+from app.services.agents.state import WorkflowState
 from app.services.composition.outline_service import outline_is_approved
 from app.services.composition.section_quality import SectionQualityGateService
+from app.services.evidence_binding import resolve_outline_evidence_bundle
 from app.services.retrieval import AssetRetrievalService
 from app.services.retrieval.case_service import CaseLibraryService
 from app.services.validation.service import flatten_outline_sections
@@ -42,8 +45,10 @@ FULL_SECTION_MIN_LEAD = 0.08
 FULL_SECTION_MAX_SOURCE_TOKENS = 1800
 REUSE_TRACE_SECTION_LIMIT = 4
 REUSE_TRACE_BLOCK_LIMIT = 6
+INTER_SECTION_TOPIC_LIMIT = 8
 REUSE_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./+-]{2,}|[\u4e00-\u9fff]{2,}")
 TECHNICAL_TOKEN_PATTERN = re.compile(r"[A-Za-z]{2,}\d*|\d+(?:\.\d+)+|[\u4e00-\u9fff]{2,}")
+SECTION_TITLE_PREFIX_PATTERN = re.compile(r"^\s*(?:第[\d一二三四五六七八九十百]+[章节篇部]\s*|[\d一二三四五六七八九十百]+(?:\.\d+)*[、.\-]?\s*)")
 REUSE_STOPWORDS = {
     "项目",
     "方案",
@@ -176,6 +181,7 @@ GENERIC_REUSE_HEADINGS = {
     "总体说明",
     "项目概述",
     "系统方案",
+    "文件清单",
 }
 INTERNAL_REUSE_HEADING_PATTERNS = (
     re.compile(r"^(建议插入图表|建议图表|建议参考资产|推荐资产|可用参考资料|可用复用包|替换与禁用约束|参考摘要)$", re.IGNORECASE),
@@ -183,6 +189,10 @@ INTERNAL_REUSE_HEADING_PATTERNS = (
 )
 LATIN_ENUM_REUSE_HEADING_PATTERN = re.compile(r"^[A-Z]\.\s*.+$")
 GENERIC_LABEL_REUSE_PATTERN = re.compile(r"^(概述|说明|补充说明|其他|附加说明)$")
+BILINGUAL_GENERIC_REUSE_HEADING_PATTERN = re.compile(
+    r"^(系统方案|总体方案|总体说明|项目概述|文件清单)\s+[A-Za-z][A-Za-z\s\-/]*$",
+    re.IGNORECASE,
+)
 ASSET_PLACEHOLDER_PATTERN = re.compile(r"\[\[ASSET:[A-Z]+:([^\]]+)\]\]")
 BANNED_TERM_PATTERNS = (
     re.compile(r"(?:项目名称|买方|卖方|客户|用户)\s*[:：]\s*([^\n]{2,80})"),
@@ -203,9 +213,27 @@ STANDARD_REPLACE_FIELDS = (
 SECTION_OUTPUT_NOISE_PATTERNS = (
     re.compile(r"^\s*本节基于.+草拟.*$", re.IGNORECASE),
     re.compile(r"^\s*目标章节标题[:：].*$", re.IGNORECASE),
+    re.compile(r"^\s*章节关键词[:：].*$", re.IGNORECASE),
     re.compile(r"^\s*参考摘要[:：].*$", re.IGNORECASE),
+    re.compile(r"^\s*匹配原因[:：].*$", re.IGNORECASE),
+    re.compile(r"^\s*可参考章节[:：].*$", re.IGNORECASE),
     re.compile(r"^\s*可用参考资料[:：].*$", re.IGNORECASE),
+    re.compile(r"^\s*(建议参考资产|推荐资产|可用复用包|替换与禁用约束)[:：].*$", re.IGNORECASE),
+    re.compile(r"^\s*这些资产仅供参考.*$", re.IGNORECASE),
+    re.compile(r"^\s*只输出最终客户可阅读的 Markdown 正文.*$", re.IGNORECASE),
     re.compile(r"^\s*请撰写章节.+$", re.IGNORECASE),
+)
+INTERNAL_REUSE_SUMMARY_LINE_PATTERNS = (
+    re.compile(r"^\s*匹配原因[:：].*$", re.IGNORECASE),
+    re.compile(r"^\s*可参考章节[:：].*$", re.IGNORECASE),
+    re.compile(r"^\s*命中原因[:：].*$", re.IGNORECASE),
+    re.compile(r"^\s*query_overlap\s*=.*$", re.IGNORECASE),
+)
+PROMPT_XML_TAG_LINE_PATTERN = re.compile(r"^\s*</?[a-z_]+>\s*$", re.IGNORECASE)
+INTERNAL_GUIDANCE_BULLET_PATTERN = re.compile(r"^\s*[-*]\s*(命中原因|推荐原因|使用方式|来源|章节|摘要)[:：].*$", re.IGNORECASE)
+INTERNAL_GUIDANCE_HEADING_PATTERN = re.compile(
+    r"^#{2,6}\s*(建议插入图表|建议图表|建议参考资产|推荐资产|可用参考资料|可用复用包|替换与禁用约束|参考摘要|图表建议|插图建议|图表清单)\s*$",
+    re.IGNORECASE,
 )
 REWRITE_LEAKAGE_TOKENS = (
     "章节标题:",
@@ -217,6 +245,83 @@ REWRITE_LEAKAGE_TOKENS = (
     "已根据要求完成重写",
     "QWEN模型",
 )
+MAIN_CIRCUIT_FOCUS_TOKENS = ("主回路", "主接线", "一次接线", "一次系统", "单线图", "变压器", "旁路", "隔离", "母排", "电缆", "绝缘", "短路", "温升", "谐波")
+MAIN_CIRCUIT_NOISE_TOKENS = ("控制", "监控", "辅助设备", "油站", "冷却器", "励磁柜", "启动时间", "同步过程", "运行方式", "dcs")
+PROTECTION_FOCUS_TOKENS = ("控制", "监控", "监视", "联锁", "保护", "告警", "报警", "跳闸", "顺控", "故障", "信号接口", "plc", "dcs")
+PROTECTION_NOISE_TOKENS = (
+    "主回路",
+    "一次接线",
+    "一次图",
+    "一次方案",
+    "单线图",
+    "功率单元",
+    "结构示意",
+    "波形",
+    "谐波",
+    "启动曲线",
+    "转矩曲线",
+    "外形尺寸",
+    "版本",
+    "页码",
+    "备品备件",
+    "备件",
+    "spare",
+    "售后",
+    "服务",
+    "额定数据",
+    "rated data",
+)
+CONTROL_LOGIC_FOCUS_TOKENS = ("运行模式", "控制策略", "调节模式", "启动", "升速", "并切换", "切换", "同期", "工频", "顺控", "控制边界")
+CONTROL_LOGIC_NOISE_TOKENS = ("外形尺寸", "版本信息", "开关柜参数", "供货范围", "设备清单", "目录", "版本")
+PARAMETER_SUMMARY_FOCUS_TOKENS = ("技术数据", "技术参数", "性能指标", "额定", "容量", "电流", "电压", "频率", "短路容量", "阻抗", "温升", "防护等级", "电磁兼容", "效率", "功率因数", "输入变压器", "输出变压器", "变频器")
+PARAMETER_SUMMARY_NOISE_TOKENS = ("控制总图", "控制系统", "联锁保护", "外形尺寸", "最小间距", "side view", "版本", "页码", "启动曲线")
+DESIGN_BASIS_FOCUS_TOKENS = ("设计依据", "标准", "规范", "边界", "条件", "环境", "电源条件", "短路容量", "海拔", "温度", "湿度", "安装", "基础", "接口边界")
+DESIGN_BASIS_NOISE_TOKENS = ("启动时间", "同步时间", "纯加速", "去磁", "油流量", "润滑曲线", "波形", "曲线", "顺控", "plc", "工频切换")
+VFD_SPEC_FOCUS_TOKENS = ("lci", "变频软起", "变频软起动", "变频装置", "晶闸管", "整流", "逆变", "工频切换", "同步切换", "启动回路", "输出变压器")
+VFD_SPEC_NOISE_TOKENS = ("柜体尺寸", "外形尺寸", "控制总图", "油站", "润滑油", "冷却器", "售后", "备件", "供货范围")
+VFD_LCI_ALLOWED_SIGNAL_TOKENS = ("lci", "sfc", "软起", "软启动", "软起动", "变频软起", "同步切换", "工频切换", "启动时间", "启动过程")
+VFD_LCI_SPECIFIC_TOKENS = ("lci", "sfc", "变频软起", "软起动", "软启动", "晶闸管", "换相", "纯加速", "同步切换", "工频切换", "励磁柜")
+MOTOR_INTERFACE_FOCUS_TOKENS = ("同步电机", "励磁", "转子", "定子", "测温", "测振", "轴承", "接口", "绝缘", "整流", "触发", "适配")
+MOTOR_INTERFACE_NOISE_TOKENS = ("柜体结构", "外形尺寸", "开关柜参数", "供货范围", "售后", "培训", "维保")
+SUPPLY_SCOPE_FOCUS_TOKENS = ("供货范围", "供货", "设备清单", "专用工具", "随机资料", "软件", "接口分工", "责任边界", "资料交付")
+SUPPLY_SCOPE_NOISE_TOKENS = ("售后服务", "培训", "维保", "质保", "巡检", "波形", "启动曲线", "控制总图")
+TABLE_PLACEHOLDER_REFERENCE_ONLY_SECTION_TYPES = {
+    "bom_or_supply_list",
+    "site_conditions",
+    "supply_scope",
+    "transformer_spec",
+    "vfd_spec",
+    "motor_spec",
+}
+SUPPLY_SCOPE_REQUIRED_ITEM_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("LCI/SFC 变频软起动装置", ("lci", "sfc", "变频软起", "软起动", "软启动")),
+    ("输入变压器", ("输入变压器", "进线变压器")),
+    ("输出变压器", ("输出变压器", "出线变压器")),
+    ("励磁控制盘", ("励磁控制盘", "励磁柜", "励磁控制柜", "励磁调节")),
+)
+INVALID_ASSET_PLACEHOLDER_PATTERN = re.compile(r"\[\[ASSET:([A-Z_]+):([^\]]+)\]\]")
+PROTECTION_LCI_SCENARIO_NOISE_TOKENS = (
+    "高浓磨机",
+    "磨机",
+    "lci",
+    "sfc",
+    "变频软起",
+    "同步电机",
+    "励磁柜",
+    "励磁系统",
+    "油站",
+    "冷却器",
+)
+SUBSTATION_AUTOMATION_SECTION_TOKENS = ("变电站", "综合自动化", "站控层", "间隔层", "网络层", "iec 61850", "远方通信", "调度")
+SUBSTATION_AUTOMATION_FOCUS_TOKENS = ("变电站", "综合自动化", "站控层", "间隔层", "网络层", "iec 61850", "goose", "mms", "调度")
+SUBSTATION_AUTOMATION_OFF_SCOPE_TYPES = {
+    "main_circuit_scheme",
+    "motor_spec",
+    "protection_interlock",
+    "starter_spec",
+    "transformer_spec",
+    "vfd_spec",
+}
 
 
 def build_section_context(
@@ -240,7 +345,9 @@ def build_section_context(
     for item in selected:
         heading_path = item.get("heading_path") or []
         heading_text = " > ".join(str(segment) for segment in heading_path if segment)
-        raw_excerpt = str(item.get("raw_content") or item.get("summary") or "").strip()[:600]
+        raw_excerpt = _strip_internal_reuse_summary_lines(str(item.get("raw_content") or item.get("summary") or "")).strip()[:600]
+        if not raw_excerpt:
+            continue
         context_lines.append(f"- {item.get('source_title')} {heading_text}: {raw_excerpt}".strip())
         citations.append(
             {
@@ -298,6 +405,14 @@ def prioritize_recommended_assets(recommended_assets: list[dict[str, Any]], *, l
             bonus += 0.05
         if visual_role == "page_furniture":
             bonus -= 0.55
+        retrieval_quality = asset.get("metadata", {}).get("retrieval_quality") if isinstance(asset.get("metadata"), dict) else {}
+        if isinstance(retrieval_quality, dict):
+            if retrieval_quality.get("low_information"):
+                bonus -= 0.65
+            elif retrieval_quality.get("partial_fragment"):
+                bonus -= 0.22
+            if retrieval_quality.get("complete_diagram"):
+                bonus += 0.08
         return (score + bonus, score)
 
     prioritized = sorted(recommended_assets, key=_priority, reverse=True)
@@ -333,11 +448,22 @@ def filter_recommended_assets_for_section(
         return []
     target_taxonomy = infer_target_taxonomy(section)
     target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
+    parameter_summary = _is_parameter_summary_section(section=section, target_taxonomy=target_taxonomy)
+    parameter_text = _section_asset_signal_text(section).casefold()
+    needs_dimension_assets = any(token in parameter_text for token in ("尺寸", "外形", "柜体", "布置"))
     technical_noise_tokens = ("认证", "检验", "检测", "报告", "证书", "试验")
     filtered: list[dict[str, Any]] = []
     for asset in recommended_assets:
         visual_role = str(asset.get("visual_role") or "").lower()
+        asset_type = str(asset.get("asset_type") or "").lower()
         metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        retrieval_quality = metadata.get("retrieval_quality") if isinstance(metadata.get("retrieval_quality"), dict) else {}
+        if retrieval_quality.get("low_information"):
+            continue
+        if retrieval_quality.get("low_confidence_summary") and not retrieval_quality.get("complete_diagram"):
+            continue
+        if retrieval_quality.get("partial_fragment") and not retrieval_quality.get("complete_diagram"):
+            continue
         if str(asset.get("title") or "").strip() in {"目录", "目 录"}:
             continue
         if str(metadata.get("label") or "").strip() == "document_index":
@@ -356,6 +482,98 @@ def filter_recommended_assets_for_section(
             continue
         if target_section_type in EXTRACTIVE_SECTION_TYPES and any(token in heading_text for token in technical_noise_tokens):
             continue
+        if target_section_type == "main_circuit_scheme":
+            asset_section_type = str(metadata.get("section_type") or "unknown").lower()
+            focus_match, noise_match = _main_circuit_focus_flags(
+                heading_text=heading_text,
+                content_text=str(asset.get("preview_text") or ""),
+            )
+            if asset_section_type in {"communication_interface", "protection_interlock"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "vfd_spec":
+            asset_section_type = str(metadata.get("section_type") or "unknown").lower()
+            focus_match, noise_match = _vfd_spec_focus_flags(
+                heading_text=heading_text,
+                content_text=str(asset.get("preview_text") or ""),
+            )
+            if asset_section_type in {"protection_interlock", "cabinet_layout", "service_support", "supply_scope"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "motor_spec":
+            asset_section_type = str(metadata.get("section_type") or "unknown").lower()
+            focus_match, noise_match = _motor_interface_focus_flags(
+                heading_text=heading_text,
+                content_text=str(asset.get("preview_text") or ""),
+            )
+            if asset_section_type in {"cabinet_layout", "supply_scope", "service_support"} and not focus_match:
+                continue
+            if asset_type == "table" and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "protection_interlock":
+            asset_section_type = str(metadata.get("section_type") or "unknown").lower()
+            focus_match, noise_match = _protection_focus_flags(
+                heading_text=heading_text,
+                content_text=str(asset.get("preview_text") or ""),
+            )
+            lowered_heading = heading_text.casefold()
+            if any(token in lowered_heading for token in ("外形尺寸", "front view", "rear view", "side view", "尺寸图")):
+                continue
+            if not focus_match:
+                continue
+            if asset_type == "table" and not focus_match:
+                continue
+            if asset_section_type == "cabinet_layout":
+                continue
+            if asset_section_type in {"main_circuit_scheme", "vfd_spec", "transformer_spec"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "control_logic":
+            asset_section_type = str(metadata.get("section_type") or "unknown").lower()
+            focus_match, noise_match = _control_logic_focus_flags(
+                heading_text=heading_text,
+                content_text=str(asset.get("preview_text") or ""),
+            )
+            if asset_section_type in {"cabinet_layout", "commissioning_acceptance", "supply_scope"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif parameter_summary:
+            asset_section_type = str(metadata.get("section_type") or "unknown").lower()
+            focus_match, noise_match = _parameter_summary_focus_flags(
+                heading_text=heading_text,
+                content_text=str(asset.get("preview_text") or ""),
+            )
+            if asset_type != "table":
+                continue
+            if asset_section_type == "cabinet_layout" and not needs_dimension_assets:
+                continue
+            if asset_section_type in {"control_logic", "communication_interface", "protection_interlock"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type in {"supply_scope", "bom_or_supply_list"}:
+            asset_section_type = str(metadata.get("section_type") or "unknown").lower()
+            focus_match, noise_match = _supply_scope_focus_flags(
+                heading_text=heading_text,
+                content_text=str(asset.get("preview_text") or ""),
+            )
+            lowered_heading = heading_text.casefold()
+            if asset_section_type == "service_support":
+                continue
+            if asset_type == "table" and asset_section_type not in {"supply_scope", "bom_or_supply_list"} and not focus_match:
+                continue
+            if any(token in lowered_heading for token in ("售后", "培训", "维保", "巡检")) and not focus_match:
+                continue
+            if any(token in lowered_heading for token in ("备件", "spare")) and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
         filtered.append(asset)
     if filtered:
         return filtered
@@ -441,7 +659,19 @@ def tighten_recommended_assets_for_reuse(
 def sanitize_generated_section_content(*, content_md: str, section_title: str) -> str:
     lines = str(content_md or "").splitlines()
     cleaned: list[str] = []
+    skip_blank_after_internal_heading = False
     for line in lines:
+        stripped = line.strip()
+        if PROMPT_XML_TAG_LINE_PATTERN.match(stripped):
+            continue
+        if INTERNAL_GUIDANCE_HEADING_PATTERN.match(stripped):
+            skip_blank_after_internal_heading = True
+            continue
+        if skip_blank_after_internal_heading and not stripped:
+            continue
+        if skip_blank_after_internal_heading and INTERNAL_GUIDANCE_BULLET_PATTERN.match(stripped):
+            continue
+        skip_blank_after_internal_heading = False
         if any(pattern.match(line) for pattern in SECTION_OUTPUT_NOISE_PATTERNS):
             continue
         cleaned.append(line)
@@ -455,6 +685,112 @@ def sanitize_generated_section_content(*, content_md: str, section_title: str) -
     return text.rstrip() + "\n"
 
 
+def _strip_internal_reuse_summary_lines(content_md: str) -> str:
+    lines = str(content_md or "").splitlines()
+    cleaned = [
+        line
+        for line in lines
+        if not any(pattern.match(line) for pattern in INTERNAL_REUSE_SUMMARY_LINE_PATTERNS)
+    ]
+    return "\n".join(cleaned).strip()
+
+
+def _text_contains_any_token(text: str, tokens: tuple[str, ...] | set[str]) -> bool:
+    haystack = str(text or "").casefold()
+    compact_haystack = re.sub(r"\s+", "", haystack)
+    return any(
+        token.casefold() in haystack or token.casefold().replace(" ", "") in compact_haystack
+        for token in tokens
+    )
+
+
+def _is_substation_automation_section(section: dict[str, Any]) -> bool:
+    signal = _section_asset_signal_text(section)
+    return _text_contains_any_token(signal, SUBSTATION_AUTOMATION_SECTION_TOKENS)
+
+
+def _should_skip_substation_automation_scenario_noise(
+    *,
+    section: dict[str, Any],
+    candidate_section_type: str,
+    heading_text: str,
+    content_text: str,
+) -> bool:
+    if not _is_substation_automation_section(section):
+        return False
+    candidate_text = f"{heading_text}\n{content_text}"
+    if _text_contains_any_token(candidate_text, SUBSTATION_AUTOMATION_FOCUS_TOKENS):
+        return False
+    normalized_candidate_type = str(candidate_section_type or "unknown").lower()
+    if normalized_candidate_type in SUBSTATION_AUTOMATION_OFF_SCOPE_TYPES:
+        return True
+    return _text_contains_any_token(candidate_text, PROTECTION_LCI_SCENARIO_NOISE_TOKENS)
+
+
+def _should_skip_generic_vfd_lci_specific_noise(
+    *,
+    section: dict[str, Any],
+    heading_text: str,
+    content_text: str,
+) -> bool:
+    section_signal = _section_asset_signal_text(section)
+    if _text_contains_any_token(section_signal, VFD_LCI_ALLOWED_SIGNAL_TOKENS):
+        return False
+    return _text_contains_any_token(f"{heading_text}\n{content_text}", VFD_LCI_SPECIFIC_TOKENS)
+
+
+def _should_skip_reuse_scenario_noise(
+    *,
+    section: dict[str, Any],
+    global_params: dict[str, Any],
+    target_section_type: str,
+    candidate_section_type: str,
+    heading_text: str,
+    content_text: str,
+) -> bool:
+    if _should_skip_substation_automation_scenario_noise(
+        section=section,
+        candidate_section_type=candidate_section_type,
+        heading_text=heading_text,
+        content_text=content_text,
+    ):
+        return True
+    if target_section_type == "vfd_spec" and _should_skip_generic_vfd_lci_specific_noise(
+        section=section,
+        heading_text=heading_text,
+        content_text=content_text,
+    ):
+        return True
+    if target_section_type == "protection_interlock" and _should_skip_protection_scenario_noise(
+        section=section,
+        global_params=global_params,
+        heading_text=heading_text,
+        content_text=content_text,
+    ):
+        return True
+    return False
+
+
+def _should_skip_protection_scenario_noise(
+    *,
+    section: dict[str, Any],
+    global_params: dict[str, Any],
+    heading_text: str,
+    content_text: str,
+) -> bool:
+    product_line = str(global_params.get("product_line") or "").strip().lower()
+    if product_line in {"", "generic", "lci"}:
+        return False
+    section_signal = _section_asset_signal_text(section).casefold()
+    if any(token.casefold() in section_signal for token in PROTECTION_LCI_SCENARIO_NOISE_TOKENS):
+        return False
+    haystack = f"{heading_text}\n{content_text}".casefold()
+    mismatch_hits = {
+        token for token in PROTECTION_LCI_SCENARIO_NOISE_TOKENS if token.casefold() in haystack
+    }
+    return len(mismatch_hits) >= 2
+
+
 def _derive_project_draft_status(drafts: list[SectionDraft]) -> str:
     statuses = {str(getattr(draft, "status", "") or "").lower() for draft in drafts}
     if statuses & {"review_required", "rejected", "manual_required"}:
@@ -462,6 +798,240 @@ def _derive_project_draft_status(drafts: list[SectionDraft]) -> str:
     if statuses:
         return "DRAFT_READY"
     return "OUTLINE_APPROVED"
+
+
+def _make_generation_metric(
+    *,
+    section_id: str,
+    draft_status: str,
+    generation_details: dict[str, Any],
+    quality_gate_result: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "section_id": section_id,
+        "draft_status": str(draft_status or ""),
+        "effective_path": str(generation_details.get("effective_path") or "unknown"),
+        "refinement_status": str(generation_details.get("refinement_status") or "not_applicable"),
+        "refinement_error": str(generation_details.get("refinement_error") or "").strip(),
+        "quality_gate_status": str(quality_gate_result.get("status") or "skipped"),
+    }
+
+
+def _compute_next_section_draft_version(current_draft_version: int | None, existing_max_draft_version: int | None) -> int:
+    return max(int(current_draft_version or 0), int(existing_max_draft_version or 0)) + 1
+
+
+def _build_generation_summary(metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    if not metrics:
+        return {
+            "total_sections": 0,
+            "effective_paths": {},
+            "refinement_statuses": {},
+            "quality_gate_statuses": {},
+            "fallback_rate": 0.0,
+            "refinement_error_count": 0,
+        }
+
+    total = len(metrics)
+    effective_paths = Counter(str(item.get("effective_path") or "unknown") for item in metrics)
+    refinement_statuses = Counter(str(item.get("refinement_status") or "not_applicable") for item in metrics)
+    quality_gate_statuses = Counter(str(item.get("quality_gate_status") or "skipped") for item in metrics)
+    fallback_count = sum(1 for item in metrics if str(item.get("refinement_status") or "").startswith("fallback_"))
+    refinement_error_count = sum(1 for item in metrics if str(item.get("refinement_error") or "").strip())
+    return {
+        "total_sections": total,
+        "effective_paths": dict(sorted(effective_paths.items())),
+        "refinement_statuses": dict(sorted(refinement_statuses.items())),
+        "quality_gate_statuses": dict(sorted(quality_gate_statuses.items())),
+        "fallback_rate": round(fallback_count / max(total, 1), 4),
+        "refinement_error_count": refinement_error_count,
+    }
+
+
+def _build_evidence_retrieval_trace(
+    *,
+    citations: list[dict[str, Any]],
+    preferred_evidence_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "selected_count": len(citations),
+        "preferred_evidence_ids": sorted(str(item) for item in (preferred_evidence_ids or set()) if str(item).strip()),
+        "selected_items": [
+            {
+                "evidence_id": item.get("evidence_id"),
+                "source_doc_id": item.get("source_doc_id"),
+                "source_title": item.get("source_title"),
+                "heading_path": item.get("heading_path"),
+                "type": item.get("type"),
+                "relevance_score": item.get("relevance_score"),
+            }
+            for item in citations[:REUSE_TRACE_BLOCK_LIMIT]
+        ],
+    }
+
+
+def _build_asset_retrieval_trace(
+    *,
+    query: str,
+    asset_types: list[str] | None,
+    skipped_optional_search: bool,
+    recommended_assets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "query": str(query or ""),
+        "asset_types": list(asset_types or []),
+        "skipped_optional_search": bool(skipped_optional_search),
+        "selected_count": len(recommended_assets),
+        "selected_assets": [
+            {
+                "asset_id": item.get("asset_id"),
+                "asset_type": item.get("asset_type"),
+                "visual_role": item.get("visual_role"),
+                "display_title": item.get("display_title") or item.get("title"),
+                "document_name": item.get("document_name"),
+                "heading_path": item.get("heading_path"),
+                "score": item.get("score"),
+            }
+            for item in recommended_assets[:REUSE_TRACE_BLOCK_LIMIT]
+        ],
+    }
+
+
+def _build_composition_retrieval_trace(
+    *,
+    evidence_trace: dict[str, Any],
+    asset_trace: dict[str, Any],
+    reuse_pack: dict[str, Any],
+    generation_details: dict[str, Any],
+) -> dict[str, Any]:
+    reuse_trace = reuse_pack.get("retrieval_trace") if isinstance(reuse_pack.get("retrieval_trace"), dict) else {}
+    return {
+        "pipeline": "composition_main",
+        "layers": {
+            "evidence": {
+                "role": "需求/证据层",
+                **evidence_trace,
+            },
+            "reuse": {
+                "role": "历史方案复用层",
+                "query": reuse_trace.get("query"),
+                "query_intents": reuse_trace.get("query_intents") or {},
+                "section_candidates": reuse_trace.get("section_candidates") or [],
+                "scoped_sections": reuse_trace.get("scoped_sections") or [],
+                "retrieval_mode": generation_details.get("retrieval_mode"),
+                "selected_sections": generation_details.get("selected_sections") or [],
+                "selected_blocks": generation_details.get("selected_blocks") or [],
+                "token_budget": generation_details.get("token_budget") or {},
+            },
+            "assets": {
+                "role": "图表/公式层",
+                **asset_trace,
+            },
+        },
+    }
+
+
+def _new_inter_section_state(
+    *,
+    task_id: str,
+    outline_title: str,
+    global_params: dict[str, Any],
+) -> WorkflowState:
+    return WorkflowState(
+        task_id=task_id,
+        project_name=str(outline_title or "技术方案"),
+        global_params=global_params if isinstance(global_params, dict) else {},
+        outline=None,
+    )
+
+
+def _normalize_inter_section_topic(title: str) -> str:
+    normalized = SECTION_TITLE_PREFIX_PATTERN.sub("", str(title or "")).strip()
+    return normalized or str(title or "未命名章节").strip() or "未命名章节"
+
+
+def _should_record_inter_section_context(*, draft_status: str, content_md: str) -> bool:
+    status = str(draft_status or "").strip().lower()
+    if status in {"manual_required", "rejected"}:
+        return False
+    return bool(str(content_md or "").strip())
+
+
+def _record_inter_section_context(
+    *,
+    state: WorkflowState,
+    covered_topics: dict[int, str],
+    section_index: int,
+    section_title: str,
+    draft_status: str,
+    content_md: str,
+) -> None:
+    if not _should_record_inter_section_context(draft_status=draft_status, content_md=content_md):
+        return
+    title = str(section_title or f"章节 {section_index + 1}").strip() or f"章节 {section_index + 1}"
+    state.record_section_summary(section_index, title, str(content_md or ""))
+    covered_topics[section_index] = _normalize_inter_section_topic(title)
+
+
+def _build_preceding_context(
+    *,
+    state: WorkflowState,
+    covered_topics: dict[int, str],
+    current_index: int,
+) -> str:
+    base_context = str(state.build_preceding_context(current_index) or "").strip()
+    prior_topics = [topic for idx, topic in sorted(covered_topics.items()) if idx < current_index and topic]
+    if not prior_topics:
+        return base_context
+    topics = prior_topics[:INTER_SECTION_TOPIC_LIMIT]
+    suffix = "等" if len(prior_topics) > INTER_SECTION_TOPIC_LIMIT else ""
+    covered_topics_text = f"已覆盖主题：{'、'.join(topics)}{suffix}"
+    if not base_context:
+        return covered_topics_text
+    return f"{base_context}\n{covered_topics_text}"
+
+
+def _build_preceding_context_from_existing_drafts(
+    *,
+    task_id: str,
+    outline_title: str,
+    global_params: dict[str, Any],
+    sections: list[dict[str, Any]],
+    current_section_id: str,
+    existing_drafts: list[SectionDraft],
+) -> str:
+    current_section_id = str(current_section_id or "").strip()
+    if not current_section_id:
+        return ""
+    current_index = next(
+        (idx for idx, item in enumerate(sections) if str(item.get("section_id") or "").strip() == current_section_id),
+        -1,
+    )
+    if current_index <= 0:
+        return ""
+
+    state = _new_inter_section_state(
+        task_id=task_id,
+        outline_title=outline_title,
+        global_params=global_params,
+    )
+    covered_topics: dict[int, str] = {}
+    drafts_by_id = {str(draft.section_id or "").strip(): draft for draft in existing_drafts}
+    for index, section in enumerate(sections):
+        if index >= current_index:
+            break
+        draft = drafts_by_id.get(str(section.get("section_id") or "").strip())
+        if not draft:
+            continue
+        _record_inter_section_context(
+            state=state,
+            covered_topics=covered_topics,
+            section_index=index,
+            section_title=str(section.get("title") or getattr(draft, "title", "") or ""),
+            draft_status=str(getattr(draft, "status", "") or ""),
+            content_md=str(getattr(draft, "content_md", "") or ""),
+        )
+    return _build_preceding_context(state=state, covered_topics=covered_topics, current_index=current_index)
 
 
 def should_use_extractive_reuse(*, section: dict[str, Any], reuse_pack: dict[str, Any]) -> bool:
@@ -496,14 +1066,21 @@ def build_extractive_reuse_section_content(
     candidate_blocks = _filter_reuse_blocks_for_assembly(
         reusable_blocks=list(reuse_pack.get("reusable_blocks") or []),
         target_taxonomy=target_taxonomy,
+        section=section,
     )
     candidate_blocks = _order_assembly_blocks(candidate_blocks=candidate_blocks, target_taxonomy=target_taxonomy)
     target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
     if target_section_type in {"bom_or_supply_list", "supply_scope"}:
         return _build_supply_scope_reuse_section_content(
+            section=section,
             title=title,
             candidate_blocks=candidate_blocks,
             reuse_pack=reuse_pack,
+        )
+    if _is_parameter_summary_section(section=section, target_taxonomy=target_taxonomy):
+        return _build_parameter_summary_reuse_section_content(
+            title=title,
+            candidate_blocks=candidate_blocks,
         )
     lines = [f"## {title}", ""]
     seen_paragraphs: set[str] = set()
@@ -554,6 +1131,31 @@ def build_extractive_reuse_section_content(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def build_llm_write_fallback_section_content(*, section: dict[str, Any], global_params: dict[str, Any]) -> str:
+    title = str(section.get("title") or "未命名章节").strip() or "未命名章节"
+    purpose = str(section.get("purpose") or section.get("description") or "").strip()
+    project_name = str(global_params.get("project_name") or "").strip()
+    keywords = [str(item).strip() for item in (section.get("keywords") or []) if str(item).strip()]
+    lines = [f"## {title}", ""]
+    if purpose:
+        lines.extend([purpose, ""])
+    if project_name:
+        lines.extend([f"本章节需结合 `{project_name}` 的真实需求、现场条件和最终设备资料进一步补全。", ""])
+    if keywords:
+        lines.extend(["### 待补充技术要点", ""])
+        for keyword in keywords[:6]:
+            lines.append(f"- {keyword}")
+        lines.append("")
+    lines.extend(
+        [
+            "### 当前状态",
+            "",
+            "本章节自动生成未能完成，已保留章节目标和待补充要点，需重新生成或人工补充后再交付客户。",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def polish_extractive_reuse_section_content(*, section: dict[str, Any], content_md: str) -> str:
     section_title = str(section.get("title") or "未命名章节")
     polished = sanitize_generated_section_content(content_md=content_md, section_title=section_title)
@@ -580,6 +1182,7 @@ def polish_extractive_reuse_section_content(*, section: dict[str, Any], content_
 
 def _build_supply_scope_reuse_section_content(
     *,
+    section: dict[str, Any],
     title: str,
     candidate_blocks: list[dict[str, Any]],
     reuse_pack: dict[str, Any],
@@ -591,7 +1194,10 @@ def _build_supply_scope_reuse_section_content(
 
     primary_table = _select_primary_supply_scope_table(candidate_blocks)
     if primary_table:
+        primary_table = _ensure_supply_scope_required_items(table_md=primary_table, section=section)
         lines.extend([primary_table, ""])
+        if "待技术确认" in primary_table:
+            lines.extend(["注：表中标记为“待技术确认”的型号、制造商或边界信息，需以最终技术协议和供货清单为准。", ""])
 
     content = "\n".join(lines).rstrip() + "\n"
     return ensure_required_asset_placeholders(content_md=content, reuse_pack=reuse_pack)
@@ -670,6 +1276,268 @@ def _normalize_markdown_table_text(text: str) -> str:
     if len(table_lines) < 2:
         return ""
     return "\n".join(table_lines)
+
+
+def _ensure_supply_scope_required_items(*, table_md: str, section: dict[str, Any]) -> str:
+    required_items = _infer_supply_scope_required_items(section)
+    if not required_items:
+        return table_md
+    table_lines = [line.rstrip() for line in str(table_md or "").splitlines() if "|" in line]
+    if len(table_lines) < 2:
+        return table_md
+    headers = _split_markdown_table_row(table_lines[0])
+    if not headers:
+        return table_md
+    existing_text = "\n".join(table_lines).casefold()
+    next_index = _next_supply_scope_row_index(table_lines[2:])
+    appended: list[str] = []
+    for item in required_items:
+        if _supply_scope_item_present(item=item, existing_text=existing_text):
+            continue
+        cells = _build_supply_scope_row_cells(headers=headers, item=item, row_index=next_index)
+        appended.append(f"| {' | '.join(cells)} |")
+        existing_text += f"\n{item}".casefold()
+        next_index += 1
+    if not appended:
+        return table_md
+    return "\n".join([*table_lines, *appended])
+
+
+def _infer_supply_scope_required_items(section: dict[str, Any]) -> list[str]:
+    section_text = " ".join(
+        [
+            str(section.get("title") or ""),
+            str(section.get("purpose") or ""),
+            " ".join(str(item) for item in (section.get("keywords") or [])),
+        ]
+    ).casefold()
+    required: list[str] = []
+    for item, triggers in SUPPLY_SCOPE_REQUIRED_ITEM_RULES:
+        if any(trigger.casefold() in section_text for trigger in triggers) and item not in required:
+            required.append(item)
+    return required
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    stripped = str(line or "").strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _next_supply_scope_row_index(data_lines: list[str]) -> int:
+    indexes: list[int] = []
+    for line in data_lines:
+        cells = _split_markdown_table_row(line)
+        if not cells:
+            continue
+        match = re.search(r"\d+", cells[0])
+        if match:
+            indexes.append(int(match.group(0)))
+    return (max(indexes) + 1) if indexes else 1
+
+
+def _supply_scope_item_present(*, item: str, existing_text: str) -> bool:
+    aliases = {
+        "LCI/SFC 变频软起动装置": ("lci", "sfc", "变频器", "变频软起", "软起动装置", "软启动装置"),
+        "输入变压器": ("输入变压器", "进线变压器"),
+        "输出变压器": ("输出变压器", "出线变压器"),
+        "励磁控制盘": ("励磁控制盘", "励磁控制柜", "励磁柜", "励磁调节柜"),
+    }.get(item, (item,))
+    return any(alias.casefold() in existing_text for alias in aliases)
+
+
+def _build_supply_scope_row_cells(*, headers: list[str], item: str, row_index: int) -> list[str]:
+    cells: list[str] = []
+    item_written = False
+    for header in headers:
+        header_norm = re.sub(r"\s+", "", header).casefold()
+        if any(token in header_norm for token in ("序号", "序", "no.", "no", "index")):
+            cells.append(str(row_index))
+        elif any(token in header_norm for token in ("设备", "名称", "component", "item", "description")):
+            cells.append(item)
+            item_written = True
+        elif any(token in header_norm for token in ("型号", "规格", "model", "type")):
+            cells.append("待技术确认")
+        elif any(token in header_norm for token in ("制造", "供应", "厂家", "品牌", "manufacturer", "supplier")):
+            cells.append("待确认")
+        elif any(token in header_norm for token in ("数量", "qty", "number")):
+            cells.append("1")
+        elif any(token in header_norm for token in ("单位", "unit")):
+            cells.append(_supply_scope_unit_for_item(item))
+        elif any(token in header_norm for token in ("备注", "边界", "范围", "remark", "scope")):
+            cells.append("待技术确认")
+        else:
+            cells.append("待技术确认")
+    if not item_written and cells:
+        for index, header in enumerate(headers):
+            header_norm = re.sub(r"\s+", "", header).casefold()
+            if not any(token in header_norm for token in ("序号", "序", "no.", "no", "index")):
+                cells[index] = item
+                break
+    return cells
+
+
+def _supply_scope_unit_for_item(item: str) -> str:
+    if "变压器" in item:
+        return "台"
+    return "套"
+
+
+def _build_parameter_summary_reuse_section_content(
+    *,
+    title: str,
+    candidate_blocks: list[dict[str, Any]],
+) -> str:
+    lines = [f"## {title}", ""]
+    intro = "以下主要技术参数和性能指标依据现有相近方案资料整理，未明确项建议在技术确认阶段进一步确认。"
+    lines.extend([intro, ""])
+
+    primary_parameter_block = _select_parameter_narrative_block(
+        candidate_blocks=candidate_blocks,
+        preferred_terms=("技术数据", "技术参数", "变频器", "型号", "额定电流"),
+    )
+    primary_parameter_bullets = _extract_parameter_summary_bullets(
+        block=primary_parameter_block,
+        preferred_terms=("型号", "额定", "电流", "晶闸管", "冷却", "温度", "功率"),
+        limit=8,
+    )
+    if primary_parameter_bullets:
+        lines.extend(["### 主要装置技术参数", "", *primary_parameter_bullets, ""])
+
+    performance_block = _select_parameter_narrative_block(
+        candidate_blocks=candidate_blocks,
+        preferred_terms=("启动", "同步", "升速", "工频", "循环"),
+    )
+    performance_bullets = _extract_parameter_summary_bullets(
+        block=performance_block,
+        preferred_terms=("启动", "同步", "加速", "工频", "循环", "切换"),
+        limit=8,
+    )
+    if performance_bullets:
+        lines.extend(["### 启动性能与运行能力", "", *performance_bullets, ""])
+
+    transformer_table = _select_parameter_table(
+        candidate_blocks=candidate_blocks,
+        preferred_terms=("输入", "输出", "变压器", "阻抗", "绕组"),
+    )
+    if transformer_table:
+        lines.extend(["### 输入/输出变压器技术参数", "", "主要技术参数如下表所示。", "", transformer_table, ""])
+
+    grid_table = _select_parameter_table(
+        candidate_blocks=candidate_blocks,
+        preferred_terms=("电网", "短路容量", "频率", "电压"),
+    )
+    if grid_table:
+        lines.extend(["### 电网适应性及边界条件", "", "电网侧边界条件如下表所示。", "", grid_table, ""])
+
+    lines.extend(
+        [
+            "### 待技术确认项",
+            "",
+            "- 系统效率、综合功率因数、防护等级及电磁兼容限值等未在现有资料中完整给出，建议在技术确认阶段明确。",
+            "- 控制柜及辅助设备详细规格应结合最终接口边界和现场条件进一步确认。",
+            "",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _select_parameter_narrative_block(
+    *,
+    candidate_blocks: list[dict[str, Any]],
+    preferred_terms: tuple[str, ...],
+) -> dict[str, Any] | None:
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for block in candidate_blocks:
+        metadata = block.get("metadata") or {}
+        if str(metadata.get("content_form") or "narrative").lower() != "narrative":
+            continue
+        heading_text = " > ".join(str(item).strip() for item in (block.get("heading_path") or []) if str(item).strip())
+        body = _normalize_reuse_block_body(str(block.get("content_md") or ""))
+        focus_match, noise_match = _parameter_summary_focus_flags(heading_text=heading_text, content_text=body)
+        score = float(block.get("selection_score") or 0)
+        if focus_match:
+            score += 0.18
+        if noise_match and not focus_match:
+            score -= 0.25
+        if any(term.casefold() in f"{heading_text}\n{body}".casefold() for term in preferred_terms):
+            score += 0.16
+        if score >= 0.55:
+            scored.append((score, block))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
+def _select_parameter_table(
+    *,
+    candidate_blocks: list[dict[str, Any]],
+    preferred_terms: tuple[str, ...],
+) -> str:
+    scored: list[tuple[float, str]] = []
+    for block in candidate_blocks:
+        metadata = block.get("metadata") or {}
+        if str(metadata.get("content_form") or "").lower() != "parameter_table":
+            continue
+        table_text = _normalize_markdown_table_text(str(block.get("content_md") or ""))
+        if not table_text:
+            continue
+        heading_text = " > ".join(str(item).strip() for item in (block.get("heading_path") or []) if str(item).strip())
+        score = float(block.get("selection_score") or 0)
+        if any(term.casefold() in f"{heading_text}\n{table_text}".casefold() for term in preferred_terms):
+            score += 0.2
+        if "外形尺寸" in heading_text and "尺寸" not in " ".join(preferred_terms):
+            score -= 0.3
+        scored.append((score, table_text))
+    if not scored:
+        return ""
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
+def _extract_parameter_summary_bullets(
+    *,
+    block: dict[str, Any] | None,
+    preferred_terms: tuple[str, ...],
+    limit: int,
+) -> list[str]:
+    if not block:
+        return []
+    body = _normalize_reuse_block_body(str(block.get("content_md") or ""))
+    bullets: list[str] = []
+    seen: set[str] = set()
+    for raw_line in body.splitlines():
+        line = str(raw_line or "").strip().lstrip("").strip()
+        if not line:
+            continue
+        if "|" in line or line.startswith("#"):
+            continue
+        lowered = line.casefold()
+        if lowered in {"版本", "页码"} or "dayu electric" in lowered:
+            continue
+        if re.fullmatch(r"[0-9.,%'’+\- ]+", line):
+            continue
+        signal_match = any(term.casefold() in lowered for term in preferred_terms) or bool(re.search(r"\d", line))
+        if not signal_match:
+            continue
+        if any(token in lowered for token in ("版本", "页码", "side view", "minimal clearance")):
+            continue
+        normalized = _normalize_technical_spacing(re.sub(r"\s{2,}", " ", line))
+        if len(normalized) < 6:
+            continue
+        bullet = normalized if normalized.startswith("-") else f"- {normalized}"
+        dedupe_key = bullet.casefold()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        bullets.append(bullet)
+        if len(bullets) >= limit:
+            break
+    return bullets
 
 
 def build_reuse_refinement_context(
@@ -805,6 +1673,8 @@ def _heading_should_be_excluded_from_customer_reuse(heading_text: str) -> bool:
         return True
     if LATIN_ENUM_REUSE_HEADING_PATTERN.match(label):
         return True
+    if BILINGUAL_GENERIC_REUSE_HEADING_PATTERN.match(label):
+        return True
     if GENERIC_LABEL_REUSE_PATTERN.match(label):
         return True
     if label in GENERIC_REUSE_HEADINGS:
@@ -823,24 +1693,135 @@ def _filter_reuse_blocks_for_assembly(
     *,
     reusable_blocks: list[dict[str, Any]],
     target_taxonomy: dict[str, Any],
+    section: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not reusable_blocks:
         return []
     top_score = max(float(block.get("selection_score") or 0) for block in reusable_blocks)
     target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
+    parameter_summary = _is_parameter_summary_section(section=section, target_taxonomy=target_taxonomy)
     filtered: list[dict[str, Any]] = []
+    scenario_guard_skipped = False
     for block in reusable_blocks:
         score = float(block.get("selection_score") or 0)
         metadata = block.get("metadata") or {}
         section_type = str(metadata.get("section_type") or "unknown").lower()
         content_form = str(metadata.get("content_form") or "narrative").lower()
         heading_text = " > ".join(str(item).strip() for item in (block.get("heading_path") or []) if str(item).strip())
+        original_content_text = str(block.get("content_md") or "")
+        content_text = _strip_internal_reuse_summary_lines(original_content_text)
+        if original_content_text.strip() and not content_text:
+            continue
         if score < max(0.38, top_score * 0.5):
             continue
         if _heading_should_be_excluded_from_customer_reuse(heading_text):
             continue
         if heading_looks_like_document_title(heading_text) and score < top_score * 0.9:
             continue
+        if section and _should_skip_reuse_scenario_noise(
+            section=section,
+            global_params={},
+            target_section_type=target_section_type,
+            candidate_section_type=section_type,
+            heading_text=heading_text,
+            content_text=content_text,
+        ):
+            scenario_guard_skipped = True
+            continue
+        if target_section_type == "main_circuit_scheme":
+            focus_match, noise_match = _main_circuit_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if content_form == "figure":
+                continue
+            if section_type in {"protection_interlock", "control_logic", "communication_interface"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "design_basis":
+            focus_match, noise_match = _design_basis_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if content_form in {"figure", "formula"}:
+                continue
+            if section_type in {"control_logic", "protection_interlock", "main_circuit_scheme", "service_support"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "vfd_spec":
+            focus_match, noise_match = _vfd_spec_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if content_form == "formula":
+                continue
+            if section_type in {"protection_interlock", "cabinet_layout", "service_support", "supply_scope"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "motor_spec":
+            focus_match, noise_match = _motor_interface_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if section_type in {"cabinet_layout", "supply_scope", "service_support"} and not focus_match:
+                continue
+            if section_type == "protection_interlock" and not focus_match:
+                continue
+            if content_form == "narrative" and not focus_match and section_type not in {"motor_spec", "protection_interlock"}:
+                continue
+            if content_form == "bom_table" and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "protection_interlock":
+            focus_match, noise_match = _protection_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            focus_hits = _focus_token_hit_count(
+                heading_text=heading_text,
+                content_text=content_text,
+                focus_tokens=PROTECTION_FOCUS_TOKENS,
+            )
+            if content_form in {"formula", "figure"}:
+                continue
+            if section_type in {"main_circuit_scheme", "transformer_spec"} and not focus_match:
+                continue
+            if section_type == "unknown" and focus_hits < 2:
+                continue
+            if content_form == "narrative" and focus_hits < 2 and section_type not in {"protection_interlock", "communication_interface", "control_logic"}:
+                continue
+            if focus_hits < 2 and any(token in content_text for token in ("同期", "同步", "励磁")):
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "control_logic":
+            focus_match, noise_match = _control_logic_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if content_form in {"formula", "bom_table"}:
+                continue
+            if section_type in {"cabinet_layout", "commissioning_acceptance", "supply_scope"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif parameter_summary:
+            focus_match, noise_match = _parameter_summary_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if content_form == "formula":
+                continue
+            if section_type in {"control_logic", "communication_interface", "protection_interlock"}:
+                continue
+            if content_form == "narrative" and score < max(0.52, top_score * 0.62) and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
         if target_section_type not in {"unknown", "overall_solution"}:
             if section_type == "unknown" and score < top_score * 0.7:
                 continue
@@ -848,6 +1829,15 @@ def _filter_reuse_blocks_for_assembly(
                 continue
         if target_section_type in {"communication_interface", "bom_or_supply_list", "supply_scope"} and content_form == "formula" and score < top_score * 0.92:
             continue
+        if target_section_type in {"bom_or_supply_list", "supply_scope"}:
+            focus_match, noise_match = _supply_scope_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if section_type == "service_support":
+                continue
+            if noise_match and not focus_match:
+                continue
         if (
             target_section_type in {"bom_or_supply_list", "supply_scope"}
             and any(token in heading_text.casefold() for token in ("启动", "同步过程", "运行过程", "控制逻辑"))
@@ -860,9 +1850,18 @@ def _filter_reuse_blocks_for_assembly(
             and score < top_score * 0.95
         ):
             continue
-        filtered.append(block)
+        normalized_block = dict(block)
+        normalized_block["content_md"] = content_text
+        filtered.append(normalized_block)
+    if not filtered and (target_section_type in {"protection_interlock", "control_logic"} or scenario_guard_skipped):
+        return []
     filtered = filtered or reusable_blocks[:2]
-    return _augment_with_support_blocks(filtered=filtered, reusable_blocks=reusable_blocks, target_taxonomy=target_taxonomy)
+    return _augment_with_support_blocks(
+        filtered=filtered,
+        reusable_blocks=reusable_blocks,
+        target_taxonomy=target_taxonomy,
+        section=section,
+    )
 
 
 def _normalize_technical_spacing(text: str) -> str:
@@ -881,11 +1880,153 @@ def _normalize_technical_spacing(text: str) -> str:
     return normalized.strip()
 
 
+def _main_circuit_focus_flags(*, heading_text: str, content_text: str) -> tuple[bool, bool]:
+    return _focus_flags(
+        heading_text=heading_text,
+        content_text=content_text,
+        focus_tokens=MAIN_CIRCUIT_FOCUS_TOKENS,
+        noise_tokens=MAIN_CIRCUIT_NOISE_TOKENS,
+    )
+
+
+def _protection_focus_flags(*, heading_text: str, content_text: str) -> tuple[bool, bool]:
+    return _focus_flags(
+        heading_text=heading_text,
+        content_text=content_text,
+        focus_tokens=PROTECTION_FOCUS_TOKENS,
+        noise_tokens=PROTECTION_NOISE_TOKENS,
+    )
+
+
+def _control_logic_focus_flags(*, heading_text: str, content_text: str) -> tuple[bool, bool]:
+    return _focus_flags(
+        heading_text=heading_text,
+        content_text=content_text,
+        focus_tokens=CONTROL_LOGIC_FOCUS_TOKENS,
+        noise_tokens=CONTROL_LOGIC_NOISE_TOKENS,
+    )
+
+
+def _parameter_summary_focus_flags(*, heading_text: str, content_text: str) -> tuple[bool, bool]:
+    return _focus_flags(
+        heading_text=heading_text,
+        content_text=content_text,
+        focus_tokens=PARAMETER_SUMMARY_FOCUS_TOKENS,
+        noise_tokens=PARAMETER_SUMMARY_NOISE_TOKENS,
+    )
+
+
+def _design_basis_focus_flags(*, heading_text: str, content_text: str) -> tuple[bool, bool]:
+    return _focus_flags(
+        heading_text=heading_text,
+        content_text=content_text,
+        focus_tokens=DESIGN_BASIS_FOCUS_TOKENS,
+        noise_tokens=DESIGN_BASIS_NOISE_TOKENS,
+    )
+
+
+def _vfd_spec_focus_flags(*, heading_text: str, content_text: str) -> tuple[bool, bool]:
+    return _focus_flags(
+        heading_text=heading_text,
+        content_text=content_text,
+        focus_tokens=VFD_SPEC_FOCUS_TOKENS,
+        noise_tokens=VFD_SPEC_NOISE_TOKENS,
+    )
+
+
+def _motor_interface_focus_flags(*, heading_text: str, content_text: str) -> tuple[bool, bool]:
+    return _focus_flags(
+        heading_text=heading_text,
+        content_text=content_text,
+        focus_tokens=MOTOR_INTERFACE_FOCUS_TOKENS,
+        noise_tokens=MOTOR_INTERFACE_NOISE_TOKENS,
+    )
+
+
+def _supply_scope_focus_flags(*, heading_text: str, content_text: str) -> tuple[bool, bool]:
+    return _focus_flags(
+        heading_text=heading_text,
+        content_text=content_text,
+        focus_tokens=SUPPLY_SCOPE_FOCUS_TOKENS,
+        noise_tokens=SUPPLY_SCOPE_NOISE_TOKENS,
+    )
+
+
+def _focus_flags(
+    *,
+    heading_text: str,
+    content_text: str,
+    focus_tokens: tuple[str, ...],
+    noise_tokens: tuple[str, ...],
+) -> tuple[bool, bool]:
+    haystack = f"{heading_text}\n{content_text}".casefold()
+    compact_haystack = re.sub(r"\s+", "", haystack)
+    focus_match = any(
+        token.casefold() in haystack or token.casefold().replace(" ", "") in compact_haystack
+        for token in focus_tokens
+    )
+    noise_match = any(
+        token.casefold() in haystack or token.casefold().replace(" ", "") in compact_haystack
+        for token in noise_tokens
+    )
+    return focus_match, noise_match
+
+
+def _focus_token_hit_count(*, heading_text: str, content_text: str, focus_tokens: tuple[str, ...]) -> int:
+    haystack = f"{heading_text}\n{content_text}".casefold()
+    compact_haystack = re.sub(r"\s+", "", haystack)
+    return sum(
+        1
+        for token in focus_tokens
+        if token.casefold() in haystack or token.casefold().replace(" ", "") in compact_haystack
+    )
+
+
+def _is_parameter_summary_section(
+    *,
+    section: dict[str, Any] | None,
+    target_taxonomy: dict[str, Any] | None = None,
+) -> bool:
+    section = section or {}
+    taxonomy = target_taxonomy or infer_target_taxonomy(section)
+    text = _section_asset_signal_text(section).casefold()
+    explicit_parameter_title = any(token in text for token in ("技术参数", "性能指标", "技术数据", "额定容量"))
+    if explicit_parameter_title:
+        return True
+    if bool(section.get("parameter_sensitive")) and any(token in text for token in ("参数", "性能", "容量", "电压", "电流")):
+        return True
+    return str(taxonomy.get("section_type") or "unknown").lower() in {"motor_spec", "vfd_spec", "starter_spec", "transformer_spec"} and bool(section.get("parameter_sensitive"))
+
+
+def _normalize_invalid_asset_placeholders(
+    *,
+    content_md: str,
+    recommended_assets: list[dict[str, Any]],
+) -> str:
+    valid_ids = {
+        str(asset.get("asset_id") or "").strip()
+        for asset in recommended_assets
+        if str(asset.get("asset_id") or "").strip()
+    }
+
+    def _replace(match: re.Match[str]) -> str:
+        asset_ref = str(match.group(2) or "").strip()
+        if asset_ref in valid_ids:
+            return match.group(0)
+        label = re.sub(r"\s+", " ", asset_ref).strip("[]【】")
+        if not label:
+            return "待补充确认"
+        return f"待根据《{label}》进一步确认"
+
+    return INVALID_ASSET_PLACEHOLDER_PATTERN.sub(_replace, str(content_md or ""))
+
+
 def _augment_with_support_blocks(
     *,
     filtered: list[dict[str, Any]],
     reusable_blocks: list[dict[str, Any]],
     target_taxonomy: dict[str, Any],
+    section: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not filtered:
         return []
@@ -904,6 +2045,7 @@ def _augment_with_support_blocks(
         if item
     }
     target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
+    parameter_summary = _is_parameter_summary_section(section=section, target_taxonomy=target_taxonomy)
     target_equipment_type = str(target_taxonomy.get("equipment_type") or "generic").lower()
     support_forms = {
         str(item).lower()
@@ -932,10 +2074,106 @@ def _augment_with_support_blocks(
         if content_form in {"formula", "page_furniture", "certificate"}:
             continue
         heading_text = " > ".join(str(item).strip() for item in (block.get("heading_path") or []) if str(item).strip())
+        original_content_text = str(block.get("content_md") or "")
+        content_text = _strip_internal_reuse_summary_lines(original_content_text)
+        if original_content_text.strip() and not content_text:
+            continue
         if _heading_should_be_excluded_from_customer_reuse(heading_text):
             continue
         if heading_looks_like_document_title(heading_text):
             continue
+        if target_section_type == "main_circuit_scheme":
+            focus_match, noise_match = _main_circuit_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if content_form == "figure":
+                continue
+            if section_type in {"protection_interlock", "control_logic", "communication_interface"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "design_basis":
+            focus_match, noise_match = _design_basis_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if content_form in {"figure", "formula"}:
+                continue
+            if section_type in {"control_logic", "protection_interlock", "main_circuit_scheme", "service_support"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "vfd_spec":
+            focus_match, noise_match = _vfd_spec_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if content_form == "formula":
+                continue
+            if section_type in {"protection_interlock", "cabinet_layout", "service_support", "supply_scope"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "motor_spec":
+            focus_match, noise_match = _motor_interface_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if section_type in {"cabinet_layout", "supply_scope", "service_support"} and not focus_match:
+                continue
+            if section_type == "protection_interlock" and not focus_match:
+                continue
+            if content_form == "narrative" and not focus_match and section_type not in {"motor_spec", "protection_interlock"}:
+                continue
+            if content_form == "bom_table" and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "protection_interlock":
+            focus_match, noise_match = _protection_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            focus_hits = _focus_token_hit_count(
+                heading_text=heading_text,
+                content_text=content_text,
+                focus_tokens=PROTECTION_FOCUS_TOKENS,
+            )
+            if content_form in {"formula", "figure"}:
+                continue
+            if section_type in {"main_circuit_scheme", "transformer_spec"} and not focus_match:
+                continue
+            if section_type == "unknown" and focus_hits < 2:
+                continue
+            if content_form == "narrative" and focus_hits < 2 and section_type not in {"protection_interlock", "communication_interface", "control_logic"}:
+                continue
+            if focus_hits < 2 and any(token in content_text for token in ("同期", "同步", "励磁")):
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif target_section_type == "control_logic":
+            focus_match, noise_match = _control_logic_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if content_form in {"formula", "bom_table"}:
+                continue
+            if section_type in {"cabinet_layout", "commissioning_acceptance", "supply_scope"} and not focus_match:
+                continue
+            if noise_match and not focus_match:
+                continue
+        elif parameter_summary:
+            focus_match, noise_match = _parameter_summary_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if content_form == "formula":
+                continue
+            if section_type in {"control_logic", "communication_interface", "protection_interlock"}:
+                continue
+            if noise_match and not focus_match:
+                continue
         try:
             chunk_index = int(block.get("chunk_index"))
         except (TypeError, ValueError):
@@ -960,6 +2198,14 @@ def _augment_with_support_blocks(
         elif content_form == "narrative":
             bonus += 0.06
         if target_section_type in {"bom_or_supply_list", "supply_scope"}:
+            focus_match, noise_match = _supply_scope_focus_flags(
+                heading_text=heading_text,
+                content_text=content_text,
+            )
+            if section_type == "service_support":
+                continue
+            if noise_match and not focus_match:
+                continue
             if content_form == "narrative" and not any(
                 token in heading_text.casefold()
                 for token in ("供货", "范围", "清单", "设备", "备件", "spare", "scope", "remark", "备注")
@@ -980,7 +2226,9 @@ def _augment_with_support_blocks(
         support_score = score + bonus
         if support_score < 0.45:
             continue
-        support_candidates.append((support_score, block))
+        normalized_block = dict(block)
+        normalized_block["content_md"] = content_text
+        support_candidates.append((support_score, normalized_block))
 
     support_candidates.sort(key=lambda item: item[0], reverse=True)
     augmented = list(filtered)
@@ -1150,16 +2398,25 @@ def _effective_section_evidence_types(section: dict[str, Any]) -> list[str]:
         for item in (target_taxonomy.get("support_content_forms") or [])
         if str(item).strip()
     }
+    taxonomy_section = str(target_taxonomy.get("section_type") or "unknown").lower()
     explicit_figure = bool({"figure", "diagram"} & set(raw_types))
     table_hint = any(token in text for token in TABLE_ASSET_HINTS)
     figure_hint = any(token in text for token in FIGURE_ASSET_HINTS)
     formula_hint = any(token in text for token in FORMULA_ASSET_HINTS)
     prefer_table_only = table_hint and not figure_hint and not explicit_figure
 
-    if {"table", "parameter"} & set(raw_types) or table_hint or support_forms & {"parameter_table", "bom_table", "interface_table", "protection_table"}:
+    if (
+        {"table", "parameter"} & set(raw_types)
+        or table_hint
+        or (bool(section.get("parameter_sensitive")) and support_forms & {"parameter_table", "bom_table", "interface_table", "protection_table"})
+    ):
         _append_unique_text(effective, "table")
         _append_unique_text(effective, "parameter")
-    if explicit_figure or figure_hint or ("figure" in support_forms and not prefer_table_only):
+    control_or_interface_with_parameters = (
+        taxonomy_section in {"protection_interlock", "control_logic", "communication_interface"}
+        and (bool({"table", "parameter"} & set(effective)) or bool(section.get("parameter_sensitive")))
+    )
+    if explicit_figure or figure_hint or control_or_interface_with_parameters or ("figure" in support_forms and not prefer_table_only):
         _append_unique_text(effective, "figure")
     if {"formula", "equation"} & set(raw_types) or formula_hint:
         _append_unique_text(effective, "formula")
@@ -1308,6 +2565,26 @@ def build_section_asset_types(section: dict[str, Any]) -> list[str] | None:
     if {"formula", "equation"} & expected_types:
         asset_types.append("formula_candidate")
     return asset_types or None
+
+
+def _should_skip_optional_asset_search(
+    *,
+    section: dict[str, Any],
+    target_taxonomy: dict[str, Any],
+    asset_types: list[str] | None,
+) -> bool:
+    if bool(section.get("asset_required")):
+        return False
+    raw_expected_types = {
+        str(item).strip().lower()
+        for item in (section.get("expected_evidence_types") or [])
+        if str(item).strip()
+    }
+    if raw_expected_types & {"figure", "diagram", "table", "parameter", "formula", "equation"}:
+        return False
+    if bool(section.get("parameter_sensitive")):
+        return False
+    return True
 
 
 def _select_evidence_items(
@@ -1462,13 +2739,23 @@ def _extract_banned_terms(*, raw_content: str, global_params: dict[str, Any]) ->
     return terms
 
 
-def _build_required_asset_placeholders(recommended_assets: list[dict[str, Any]], *, asset_required: bool) -> list[dict[str, Any]]:
+def _build_required_asset_placeholders(
+    recommended_assets: list[dict[str, Any]],
+    *,
+    asset_required: bool,
+    target_taxonomy: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     if not asset_required:
         return []
+    target_section_type = str((target_taxonomy or {}).get("section_type") or "").lower()
     placeholders: list[dict[str, Any]] = []
     for asset in recommended_assets[:3]:
         asset_type = str(asset.get("asset_type") or "").lower()
         if asset_type not in {"figure", "table", "formula_candidate"}:
+            continue
+        if asset_type == "table" and target_section_type in TABLE_PLACEHOLDER_REFERENCE_ONLY_SECTION_TYPES:
+            # Table-heavy chapters should materialize tables into Markdown or use them as references.
+            # Leaving raw TABLE placeholders in customer draft blocks export as unconfirmed assets.
             continue
         asset_id = asset.get("asset_id")
         if not asset_id:
@@ -1525,6 +2812,7 @@ def _build_evidence_reusable_blocks(
     limit: int,
 ) -> list[dict[str, Any]]:
     target_taxonomy = infer_target_taxonomy(section)
+    target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
     selected = _select_evidence_items(
         section=section,
         evidence_bundle=evidence_bundle,
@@ -1534,12 +2822,23 @@ def _build_evidence_reusable_blocks(
     blocks: list[dict[str, Any]] = []
     query_terms = _build_reuse_query_terms(section=section, global_params=global_params)
     for item in selected:
-        raw_content = str(item.get("raw_content") or item.get("summary") or "").strip()
+        raw_content = _strip_internal_reuse_summary_lines(str(item.get("raw_content") or item.get("summary") or ""))
         if not raw_content:
             continue
         heading_path = item.get("heading_path") or []
+        heading_text = " > ".join(str(segment).strip() for segment in heading_path if str(segment).strip())
         block_type = str(item.get("source_chunk_type") or item.get("type") or "section").lower()
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        candidate_section_type = str(metadata.get("section_type") or item.get("section_type") or "unknown").lower()
+        if _should_skip_reuse_scenario_noise(
+            section=section,
+            global_params=global_params,
+            target_section_type=target_section_type,
+            candidate_section_type=candidate_section_type,
+            heading_text=heading_text,
+            content_text=raw_content,
+        ):
+            continue
         selection_score, selection_reasons = _score_reuse_candidate(
             section=section,
             item=item,
@@ -1588,13 +2887,15 @@ def _build_case_library_reusable_blocks(
     limit: int,
 ) -> list[dict[str, Any]]:
     target_taxonomy = infer_target_taxonomy(section)
+    target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
     query_terms = _build_reuse_query_terms(section=section, global_params=global_params)
     blocks: list[dict[str, Any]] = []
     for item in case_library_matches[: max(limit * REUSE_CANDIDATE_MULTIPLIER, REUSE_MIN_CANDIDATES)]:
-        raw_content = str(item.get("content") or "").strip()
+        raw_content = _strip_internal_reuse_summary_lines(str(item.get("content") or ""))
         if not raw_content:
             continue
         heading_path = _normalize_case_heading_path(item.get("heading_path"))
+        heading_text = " > ".join(str(segment).strip() for segment in heading_path if str(segment).strip())
         metadata = {
             "front_matter": bool(item.get("front_matter")),
             "needs_asset_lookup": bool(item.get("needs_asset_lookup")),
@@ -1602,6 +2903,15 @@ def _build_case_library_reusable_blocks(
             "equipment_type": item.get("equipment_type") or "generic",
             "content_form": item.get("content_form") or "narrative",
         }
+        if _should_skip_reuse_scenario_noise(
+            section=section,
+            global_params=global_params,
+            target_section_type=target_section_type,
+            candidate_section_type=str(metadata["section_type"] or "unknown"),
+            heading_text=heading_text,
+            content_text=raw_content,
+        ):
+            continue
         score_input = {
             "type": str(item.get("chunk_type") or "section").lower(),
             "source_chunk_type": item.get("chunk_type"),
@@ -1679,6 +2989,8 @@ def build_reuse_pack(
     recommended_assets: list[dict[str, Any]],
     retrieval_trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    target_taxonomy = infer_target_taxonomy(section)
+    serializable_target_taxonomy = _json_safe_value(target_taxonomy)
     risk_flags: list[str] = []
     if bool(section.get("parameter_sensitive")):
         risk_flags.append("parameter_sensitive")
@@ -1698,6 +3010,7 @@ def build_reuse_pack(
     required_asset_placeholders = _build_required_asset_placeholders(
         recommended_assets,
         asset_required=bool(section.get("asset_required")),
+        target_taxonomy=target_taxonomy,
     )
 
     return {
@@ -1705,6 +3018,7 @@ def build_reuse_pack(
         "section_purpose": str(section.get("purpose") or ""),
         "generation_mode": str(section.get("generation_mode") or "baseline"),
         "reuse_level": str(section.get("reuse_level") or "medium"),
+        "target_taxonomy": serializable_target_taxonomy,
         "reusable_blocks": reusable_blocks,
         "recommended_assets": recommended_assets,
         "must_replace_fields": must_replace_fields,
@@ -1803,7 +3117,10 @@ def build_manual_only_section_content(*, section: dict[str, Any], reuse_pack: di
 
 
 def ensure_required_asset_placeholders(*, content_md: str, reuse_pack: dict[str, Any]) -> str:
-    placeholders = reuse_pack.get("required_asset_placeholders") or []
+    placeholders = _filter_required_asset_placeholders_for_section(
+        placeholders=list(reuse_pack.get("required_asset_placeholders") or []),
+        reuse_pack=reuse_pack,
+    )
     if not placeholders:
         return content_md
     missing = [
@@ -1831,6 +3148,24 @@ def ensure_required_asset_placeholders(*, content_md: str, reuse_pack: dict[str,
     for item in remaining:
         appendix_lines.append(f"- {item.get('placeholder')} {item.get('title') or '参考资产'}")
     return content_with_inline_assets.rstrip() + "\n" + "\n".join(appendix_lines).rstrip() + "\n"
+
+
+def _filter_required_asset_placeholders_for_section(
+    *,
+    placeholders: list[dict[str, Any]],
+    reuse_pack: dict[str, Any],
+) -> list[dict[str, Any]]:
+    target_section_type = str(((reuse_pack.get("target_taxonomy") or {}) or {}).get("section_type") or "").lower()
+    if target_section_type not in TABLE_PLACEHOLDER_REFERENCE_ONLY_SECTION_TYPES:
+        return placeholders
+    filtered: list[dict[str, Any]] = []
+    for item in placeholders:
+        asset_type = str(item.get("asset_type") or "").lower()
+        placeholder = str(item.get("placeholder") or "").strip().upper()
+        if asset_type == "table" or placeholder.startswith("[[ASSET:TABLE:"):
+            continue
+        filtered.append(item)
+    return filtered
 
 
 def _inline_missing_asset_placeholders(
@@ -2212,6 +3547,18 @@ def _serialize_section_candidate(section_candidate: dict[str, Any]) -> dict[str,
     }
 
 
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, set):
+        return sorted(_json_safe_value(item) for item in value)
+    if isinstance(value, tuple):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, list):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    return value
+
+
 def _estimate_material_tokens(*, blocks: list[dict[str, Any]], assets: list[dict[str, Any]]) -> dict[str, Any]:
     section_material_tokens = sum(
         max(1, len(str(block.get("content_md") or "")) // 4)
@@ -2407,17 +3754,37 @@ class SectionDraftService:
         session.add(job)
         await session.flush()
 
-        draft_version = int(project.current_draft_version or 0) + 1
+        existing_max_draft_version = await session.scalar(
+            select(func.max(SectionDraft.draft_version)).where(SectionDraft.project_id == project_id)
+        )
+        draft_version = _compute_next_section_draft_version(
+            current_draft_version=project.current_draft_version,
+            existing_max_draft_version=existing_max_draft_version,
+        )
         generated_drafts: list[SectionDraft] = []
+        generation_metrics: list[dict[str, Any]] = []
         global_params = build_section_global_params(requirement_card.content)
+        outline_title = (outline.outline_json or {}).get("title", "技术方案")
+        inter_section_state = _new_inter_section_state(
+            task_id=str(job.id),
+            outline_title=outline_title,
+            global_params=global_params,
+        )
+        covered_topics: dict[int, str] = {}
 
-        for section in sections:
+        for index, section in enumerate(sections):
             generation_mode = str(section.get("generation_mode") or "baseline")
+            preceding_context = _build_preceding_context(
+                state=inter_section_state,
+                covered_topics=covered_topics,
+                current_index=index,
+            )
             context, citations = build_section_context(
                 section=section,
                 evidence_bundle=evidence_bundle,
                 global_params=global_params,
             )
+            evidence_trace = _build_evidence_retrieval_trace(citations=citations)
             case_library_result = self._retrieve_case_library_matches(
                 section=section,
                 evidence_bundle=evidence_bundle,
@@ -2435,7 +3802,7 @@ class SectionDraftService:
                 global_params=global_params,
                 limit=DEFAULT_REUSE_LIMIT,
             )
-            recommended_assets = await self._search_recommended_assets(
+            recommended_assets, asset_trace = await self._search_recommended_assets(
                 session=session,
                 project_id=project_id,
                 section=section,
@@ -2452,14 +3819,24 @@ class SectionDraftService:
             content_md, draft_status, citations, generation_details = await self._generate_section_content(
                 task_id=str(job.id),
                 section=section,
-                outline_title=(outline.outline_json or {}).get("title", "技术方案"),
+                outline_title=outline_title,
                 global_params=global_params,
                 retrieved_context=context,
                 citations=citations,
                 recommended_assets=recommended_assets,
                 reusable_blocks=reusable_blocks,
                 reuse_pack=reuse_pack,
+                preceding_context=preceding_context,
             )
+            generation_details = {
+                **generation_details,
+                "retrieval_trace": _build_composition_retrieval_trace(
+                    evidence_trace=evidence_trace,
+                    asset_trace=asset_trace,
+                    reuse_pack=reuse_pack,
+                    generation_details=generation_details,
+                ),
+            }
             quality_gate_result: dict[str, Any] = {}
             if draft_status == "generated":
                 content_md, draft_status, quality_gate_result = await self.quality_gate.review_and_repair(
@@ -2471,6 +3848,14 @@ class SectionDraftService:
                     recommended_assets=recommended_assets,
                     allow_rewrite=True,
                 )
+            _record_inter_section_context(
+                state=inter_section_state,
+                covered_topics=covered_topics,
+                section_index=index,
+                section_title=str(section.get("title") or "未命名章节"),
+                draft_status=draft_status,
+                content_md=content_md,
+            )
             draft = SectionDraft(
                 project_id=project_id,
                 draft_version=draft_version,
@@ -2491,11 +3876,23 @@ class SectionDraftService:
             )
             session.add(draft)
             generated_drafts.append(draft)
+            generation_metrics.append(
+                _make_generation_metric(
+                    section_id=str(section.get("section_id") or ""),
+                    draft_status=draft_status,
+                    generation_details=generation_details,
+                    quality_gate_result=quality_gate_result,
+                )
+            )
 
         project.current_draft_version = draft_version
         project.status = _derive_project_draft_status(generated_drafts)
         job.status = "succeeded"
-        job.output_ref = {"draft_version": draft_version, "section_count": len(generated_drafts)}
+        job.output_ref = {
+            "draft_version": draft_version,
+            "section_count": len(generated_drafts),
+            "generation_summary": _build_generation_summary(generation_metrics),
+        }
         job.completed_at = datetime.now(timezone.utc)
 
         await session.commit()
@@ -2552,6 +3949,7 @@ class SectionDraftService:
             raise ArtifactValidationError("Outline must be approved before regenerating sections")
         requirement_card = await self._resolve_requirement_card(session=session, outline=outline)
         evidence_bundle = await self._resolve_evidence_bundle(session=session, outline=outline)
+        sections = flatten_outline_sections(((outline.outline_json or {}).get("sections") or []))
         section = self._find_section(outline=outline, section_id=section_id)
         draft = await self._get_current_section_draft(
             session=session,
@@ -2574,10 +3972,28 @@ class SectionDraftService:
         generation_mode = str(section.get("generation_mode") or "baseline")
         normalized_preferred_citation_ids = _normalize_preferred_citation_ids(preferred_citation_ids)
         global_params = build_section_global_params(requirement_card.content)
+        outline_title = (outline.outline_json or {}).get("title", "技术方案")
+        existing_drafts = await self._load_section_drafts(
+            session=session,
+            project_id=project_id,
+            draft_version=project.current_draft_version,
+        )
+        preceding_context = _build_preceding_context_from_existing_drafts(
+            task_id=str(job.id),
+            outline_title=outline_title,
+            global_params=global_params,
+            sections=sections,
+            current_section_id=section_id,
+            existing_drafts=existing_drafts,
+        )
         context, citations = build_section_context(
             section=section,
             evidence_bundle=evidence_bundle,
             global_params=global_params,
+            preferred_evidence_ids=normalized_preferred_citation_ids,
+        )
+        evidence_trace = _build_evidence_retrieval_trace(
+            citations=citations,
             preferred_evidence_ids=normalized_preferred_citation_ids,
         )
         case_library_result = self._retrieve_case_library_matches(
@@ -2605,7 +4021,7 @@ class SectionDraftService:
             reusable_blocks,
             preferred_citation_ids=preferred_citation_ids,
         )
-        recommended_assets = await self._search_recommended_assets(
+        recommended_assets, asset_trace = await self._search_recommended_assets(
             session=session,
             project_id=project_id,
             section=section,
@@ -2622,14 +4038,24 @@ class SectionDraftService:
         content_md, draft_status, citations, generation_details = await self._generate_section_content(
             task_id=str(job.id),
             section=section,
-            outline_title=(outline.outline_json or {}).get("title", "技术方案"),
+            outline_title=outline_title,
             global_params=global_params,
             retrieved_context=context,
             citations=citations,
             recommended_assets=recommended_assets,
             reusable_blocks=reusable_blocks,
             reuse_pack=reuse_pack,
+            preceding_context=preceding_context,
         )
+        generation_details = {
+            **generation_details,
+            "retrieval_trace": _build_composition_retrieval_trace(
+                evidence_trace=evidence_trace,
+                asset_trace=asset_trace,
+                reuse_pack=reuse_pack,
+                generation_details=generation_details,
+            ),
+        }
         quality_gate_result: dict[str, Any] = {}
         if draft_status == "generated":
             content_md, draft_status, quality_gate_result = await self.quality_gate.review_and_repair(
@@ -2664,7 +4090,20 @@ class SectionDraftService:
         )
 
         job.status = "succeeded"
-        job.output_ref = {"draft_version": project.current_draft_version, "section_id": section_id}
+        job.output_ref = {
+            "draft_version": project.current_draft_version,
+            "section_id": section_id,
+            "generation_summary": _build_generation_summary(
+                [
+                    _make_generation_metric(
+                        section_id=section_id,
+                        draft_status=draft_status,
+                        generation_details=generation_details,
+                        quality_gate_result=quality_gate_result,
+                    )
+                ]
+            ),
+        }
         job.completed_at = datetime.now(timezone.utc)
 
         await session.commit()
@@ -2729,26 +4168,51 @@ class SectionDraftService:
         section: dict[str, Any],
         global_params: dict[str, Any],
         reusable_blocks: list[dict[str, Any]] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         query = build_section_asset_query(section=section, global_params=global_params)
+        asset_types = build_section_asset_types(section)
         if not query:
-            return []
+            return [], _build_asset_retrieval_trace(
+                query="",
+                asset_types=asset_types,
+                skipped_optional_search=True,
+                recommended_assets=[],
+            )
+        target_taxonomy = infer_target_taxonomy(section)
+        skipped_optional_search = _should_skip_optional_asset_search(
+            section=section,
+            target_taxonomy=target_taxonomy,
+            asset_types=asset_types,
+        )
+        if skipped_optional_search:
+            return [], _build_asset_retrieval_trace(
+                query=query,
+                asset_types=asset_types,
+                skipped_optional_search=True,
+                recommended_assets=[],
+            )
         response = await self.asset_retriever.search_project_assets(
             session=session,
             project_id=project_id,
             query=query,
             top_k=12,
-            asset_types=build_section_asset_types(section),
+            asset_types=asset_types,
             section_context=_build_asset_search_context(section=section, reusable_blocks=reusable_blocks),
             include_global_historical=True,
         )
         assets = [item.model_dump(mode="json") for item in response.results]
         assets = filter_recommended_assets_for_section(assets, section=section)
         assets = prioritize_recommended_assets(assets)
-        return tighten_recommended_assets_for_reuse(
+        assets = tighten_recommended_assets_for_reuse(
             assets,
             section=section,
             reusable_blocks=reusable_blocks,
+        )
+        return assets, _build_asset_retrieval_trace(
+            query=query,
+            asset_types=asset_types,
+            skipped_optional_search=False,
+            recommended_assets=assets,
         )
 
     def _retrieve_case_library_matches(
@@ -2890,10 +4354,13 @@ class SectionDraftService:
         recommended_assets: list[dict[str, Any]],
         reusable_blocks: list[dict[str, Any]],
         reuse_pack: dict[str, Any],
+        preceding_context: str = "",
     ) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
         generation_mode = str(section.get("generation_mode") or "baseline")
         effective_citations = citations
         assembly_blocks = reusable_blocks
+        effective_reuse_pack = reuse_pack
+        normalized_preceding_context = str(preceding_context or "").strip()
         reuse_strategy = resolve_reuse_generation_strategy(
             section=section,
             reuse_pack=reuse_pack,
@@ -2913,10 +4380,13 @@ class SectionDraftService:
                 assembly_blocks = _filter_reuse_blocks_for_assembly(
                     reusable_blocks=prompt_blocks,
                     target_taxonomy=infer_target_taxonomy(section),
+                    section=section,
                 )
             selected_blocks = _build_selected_block_trace(assembly_blocks)
             token_budget = _estimate_material_tokens(blocks=assembly_blocks, assets=recommended_assets)
             effective_citations = build_reuse_citations(assembly_blocks)
+            effective_reuse_pack = dict(reuse_pack)
+            effective_reuse_pack["reusable_blocks"] = assembly_blocks
 
         if generation_mode == "manual_only":
             return (
@@ -2929,12 +4399,13 @@ class SectionDraftService:
                     "selected_sections": selected_sections,
                     "selected_blocks": selected_blocks,
                     "token_budget": token_budget,
+                    "preceding_context_chars": len(normalized_preceding_context),
                 },
             )
 
         section_title = str(section.get("title") or "未命名章节")
-        if should_use_extractive_reuse(section=section, reuse_pack=reuse_pack):
-            assembly_reuse_pack = dict(reuse_pack)
+        if should_use_extractive_reuse(section=section, reuse_pack=effective_reuse_pack):
+            assembly_reuse_pack = dict(effective_reuse_pack)
             assembly_reuse_pack["reusable_blocks"] = assembly_blocks
             assembled_content = build_extractive_reuse_section_content(
                 section=section,
@@ -2962,11 +4433,16 @@ class SectionDraftService:
                     recommended_assets=recommended_assets,
                     reuse_pack=llm_reuse_pack,
                     assembled_draft=assembled_content,
+                    preceding_context=normalized_preceding_context,
                 )
                 finalized_content = response.content
                 finalized_content = sanitize_generated_section_content(
                     content_md=finalized_content,
                     section_title=section_title,
+                )
+                finalized_content = _normalize_invalid_asset_placeholders(
+                    content_md=finalized_content,
+                    recommended_assets=recommended_assets,
                 )
                 _, refinement_status, refinement_fallback_reason = resolve_reuse_refinement_content(
                     assembled_content=assembled_content,
@@ -2982,6 +4458,10 @@ class SectionDraftService:
                 section_title=section_title,
             )
             refinement_fallback_reason = refinement_fallback_reason or selection_fallback_reason
+            content_md = _normalize_invalid_asset_placeholders(
+                content_md=content_md,
+                recommended_assets=recommended_assets,
+            )
             content_md = ensure_required_asset_placeholders(content_md=content_md, reuse_pack=assembly_reuse_pack)
             content_md = polish_extractive_reuse_section_content(section=section, content_md=content_md)
             effective_path = "extractive_reuse_llm_finalize" if finalized_content is not None and refinement_error is None else "extractive_reuse"
@@ -2999,33 +4479,49 @@ class SectionDraftService:
                     "refinement_fallback_reason": refinement_fallback_reason,
                     "refinement_error": refinement_error,
                     "assembled_block_count": len(assembly_blocks),
+                    "preceding_context_chars": len(normalized_preceding_context),
                 },
             )
 
-        response = await self.executor.write_section(
-            task_id=task_id,
-            section=section_outline_to_executor_payload(section),
-            global_params=global_params,
-            retrieved_context=retrieved_context,
-            outline_title=outline_title,
-            recommended_assets=recommended_assets,
-            reuse_pack=reuse_pack,
-        )
+        write_error: str | None = None
+        try:
+            response = await self.executor.write_section(
+                task_id=task_id,
+                section=section_outline_to_executor_payload(section),
+                global_params=global_params,
+                retrieved_context=retrieved_context,
+                outline_title=outline_title,
+                recommended_assets=recommended_assets,
+                reuse_pack=effective_reuse_pack,
+                preceding_context=normalized_preceding_context,
+            )
+            raw_content = response.content
+            draft_status = "generated"
+        except Exception as exc:  # noqa: BLE001
+            write_error = str(exc)
+            raw_content = build_llm_write_fallback_section_content(section=section, global_params=global_params)
+            draft_status = "review_required"
         content_md = sanitize_generated_section_content(
-            content_md=response.content,
+            content_md=raw_content,
             section_title=section_title,
+        )
+        content_md = _normalize_invalid_asset_placeholders(
+            content_md=content_md,
+            recommended_assets=recommended_assets,
         )
         content_md = ensure_required_asset_placeholders(content_md=content_md, reuse_pack=reuse_pack)
         return (
             content_md,
-            "generated",
+            draft_status,
             effective_citations,
             {
-                "effective_path": "llm_write",
+                "effective_path": "llm_write" if write_error is None else "llm_write_fallback",
                 "retrieval_mode": retrieval_mode,
                 "selected_sections": selected_sections,
                 "selected_blocks": selected_blocks,
                 "token_budget": token_budget,
+                "write_error": write_error,
+                "preceding_context_chars": len(normalized_preceding_context),
             },
         )
 
@@ -3071,12 +4567,7 @@ class SectionDraftService:
         session: AsyncSession,
         outline: ProposalOutline,
     ) -> EvidenceBundle:
-        if outline.evidence_bundle_id is None:
-            raise ArtifactValidationError("Outline is not bound to an evidence bundle")
-        bundle = await session.get(EvidenceBundle, outline.evidence_bundle_id)
-        if not bundle:
-            raise ArtifactNotFoundError("Evidence bundle not found")
-        return bundle
+        return await resolve_outline_evidence_bundle(session=session, outline=outline)
 
     async def _get_current_section_draft(
         self,

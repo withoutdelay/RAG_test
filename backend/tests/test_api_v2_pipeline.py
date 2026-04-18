@@ -116,17 +116,18 @@ class V2PipelineApiTests(unittest.TestCase):
 
     def test_v2_pipeline_runs_end_to_end_against_postgres(self) -> None:
         markdown = (
-            "# 110kV变电站综合自动化改造方案\n\n"
-            "本项目面向 110kV 变电站场景，提供 HV-VFD 高压变频器及综合自动化系统改造。\n\n"
+            "# 高炉鼓风机电机及 LCI 变频软起动系统改造方案\n\n"
+            "本项目面向钢铁厂高炉鼓风机 10kV 同步电机场景，提供 LCI/SFC 变频软起动系统改造。\n\n"
             "## 技术架构\n\n"
-            "方案采用站控层、间隔层和网络层的分层架构，支持 IEC 61850 协议集成。\n\n"
+            "方案采用 LCI/SFC 变频软起动装置、本地 PLC 控制单元、DCS 接口、断路器反馈和励磁联锁组成的分层控制架构。\n\n"
             "## 硬件配置清单\n\n"
             "| 设备名称 | 型号 | 数量 |\n"
             "| --- | --- | --- |\n"
-            "| 高压变频器 | HV-VFD-5000 | 2 |\n"
-            "| 站控主机 | IPC-9000 | 1 |\n\n"
+            "| LCI/SFC 变频软起动系统 | LCI-SFC-10kV | 1 |\n"
+            "| 同步电机接口 | 10kV | 2 |\n"
+            "| 本地控制单元 PLC | PLC-LOCAL | 1 |\n\n"
             "## 实施计划\n\n"
-            "项目分为勘察、设计、实施、调试和验收五个阶段。"
+            "项目分为现场勘察、系统设计、设备成套、安装调试、同步切换试验和验收交付六个阶段。"
         )
 
         with self._make_client() as client:
@@ -136,10 +137,10 @@ class V2PipelineApiTests(unittest.TestCase):
                 project_response = client.post(
                     "/api/v1/projects",
                     json={
-                        "name": "2026年国网变电站智能化项目",
-                        "product_line": "hv_vfd",
-                        "industry": "电气",
-                        "description": "为 110kV 变电站提供综合自动化改造和高压变频器配置方案。",
+                        "name": "某钢铁集团高炉鼓风机 LCI 软起动改造项目",
+                        "product_line": "lci",
+                        "industry": "钢铁",
+                        "description": "为高炉鼓风机 10kV 同步电机配置 LCI/SFC 变频软起动系统。",
                     },
                 )
                 self.assertEqual(project_response.status_code, 201)
@@ -172,7 +173,7 @@ class V2PipelineApiTests(unittest.TestCase):
                 requirement_response = client.get(f"/api/v1/projects/{project_id}/requirement-card/latest")
                 self.assertEqual(requirement_response.status_code, 200)
                 requirement_card = requirement_response.json()["data"]
-                self.assertEqual(requirement_card["content"]["product_line"], "hv_vfd")
+                self.assertEqual(requirement_card["content"]["product_line"], "lci")
                 self.assertEqual(requirement_card["blocking_items"], [])
 
                 retrieve_response = client.post(
@@ -254,19 +255,18 @@ class V2PipelineApiTests(unittest.TestCase):
                 validation_report = latest_validation_response.json()["data"]
                 self.assertEqual(validation_report["id"], validation_report_id)
                 self.assertEqual(validation_report["draft_version"], 1)
-                self.assertEqual(validation_report["status"], "review_required")
-                self.assertGreaterEqual(len(validation_report["review_tasks_created"]), 1)
+                self.assertEqual(validation_report["status"], "passed")
 
                 review_tasks_response = client.get(f"/api/v1/projects/{project_id}/review-tasks")
                 self.assertEqual(review_tasks_response.status_code, 200)
                 review_tasks = review_tasks_response.json()["data"]
                 task_types = {task["task_type"] for task in review_tasks}
-                self.assertIn("final_review", task_types)
+                self.assertNotIn("final_review", task_types)
 
                 project_detail_response = client.get(f"/api/v1/projects/{project_id}")
                 self.assertEqual(project_detail_response.status_code, 200)
                 project = project_detail_response.json()["data"]
-                self.assertEqual(project["status"], "REVIEW_REQUIRED")
+                self.assertEqual(project["status"], "EXPORTABLE")
                 self.assertEqual(project["current_draft_version"], 1)
                 self.assertEqual(project["current_outline_id"], outline["id"])
 
@@ -321,7 +321,7 @@ class V2PipelineApiTests(unittest.TestCase):
         self.assertEqual(stored_report.status, "passed")
         self.assertEqual(len(stored_section_drafts), len(section_drafts_payload))
         self.assertGreaterEqual(len(stored_review_tasks), len(review_tasks))
-        self.assertTrue(any(task.task_type == "final_review" for task in stored_review_tasks))
+        self.assertFalse(any(task.task_type == "final_review" for task in stored_review_tasks))
         self.assertEqual(stored_export.status, "succeeded")
 
 

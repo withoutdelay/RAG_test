@@ -12,6 +12,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings, get_settings
 from app.models.audit_log import AuditLog
 from app.models.evidence_bundle import EvidenceBundle
 from app.models.job import Job
@@ -21,13 +22,26 @@ from app.models.requirement_card import RequirementCard
 from app.models.review_task import ReviewTask
 from app.models.section_draft import SectionDraft
 from app.models.validation_report import ValidationReport
+from app.services.evidence_binding import resolve_outline_evidence_bundle
 from app.services.composition.section_quality import analyze_section_heading_quality
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
 HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008", "VAL009", "VAL010"}
 CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103", "VAL104", "VAL105", "VAL106", "VAL107", "VAL108"}
+BLOCKING_CONTENT_REVIEW_CODES = {"VAL108"}
 ASSUMPTION_HINTS = ("待确认", "待补充", "TBD", "暂定", "后续确认")
+DECLARED_ASSUMPTION_CONTEXT_TOKENS = (
+    "以最终",
+    "最终以",
+    "以双方确认",
+    "以技术协议",
+    "以供货清单",
+    "按最终",
+    "待确认参数",
+    "待确认事项",
+    "待确认供电参数",
+)
 TECHNICAL_SECTION_HINTS = ("技术", "架构", "配置", "参数", "实施", "系统", "方案")
 PARAMETER_REPLACE_FIELDS = {"voltage_level", "power_rating", "quantity", "delivery_scope"}
 PLACEHOLDER_PATTERNS = [
@@ -35,6 +49,10 @@ PLACEHOLDER_PATTERNS = [
     re.compile(r"\{\{[^{}\n]+\}\}"),
 ]
 ASSET_PLACEHOLDER_PATTERN = re.compile(r"\[\[ASSET:(FIGURE|TABLE|FORMULA):[^\]]+\]\]")
+ASSET_PLACEHOLDER_DETAIL_PATTERN = re.compile(r"\[\[ASSET:(FIGURE|TABLE|FORMULA):([^\]]+)\]\]")
+MARKDOWN_TABLE_ROW_PATTERN = re.compile(r"(?m)^\|.+\|\s*$")
+MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(r"(?m)^\|\s*:?-{3,}.*\|\s*$")
+QUANTITY_PAIR_PATTERN = re.compile(r"\d+(?:\.\d+)?(?:套|台|个|项|柜|面|回|路|只|组|根|支)")
 
 
 def flatten_outline_sections(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -82,6 +100,36 @@ def derive_validation_status(*, errors: list[dict[str, Any]], open_review_task_c
     if open_review_task_count > 0:
         return "review_required"
     return "passed"
+
+
+def _extract_evidence_quality_trace(evidence_bundle: EvidenceBundle) -> dict[str, Any]:
+    content = evidence_bundle.content if isinstance(evidence_bundle.content, dict) else {}
+    trace = content.get("quality_trace") if isinstance(content.get("quality_trace"), dict) else {}
+    if trace:
+        return trace
+    fallback_results = content.get("fallback_results") if isinstance(content.get("fallback_results"), list) else []
+    fallback_top_score = max(
+        (
+            float(item.get("relevance_score") or 0)
+            for item in fallback_results
+            if isinstance(item, dict)
+        ),
+        default=0.0,
+    )
+    return {
+        "case_fallback_used": bool(fallback_results),
+        "case_fallback_count": len(fallback_results),
+        "case_fallback_top_score": fallback_top_score,
+        "primary_results_source": "case_fallback" if fallback_results else "empty",
+    }
+
+
+def _has_acceptable_case_fallback(evidence_bundle: EvidenceBundle) -> bool:
+    trace = _extract_evidence_quality_trace(evidence_bundle)
+    fallback_used = bool(trace.get("case_fallback_used"))
+    fallback_count = int(trace.get("case_fallback_count") or 0)
+    fallback_top_score = float(trace.get("case_fallback_top_score") or 0)
+    return fallback_used and fallback_count >= 1 and fallback_top_score >= 0.45
 
 
 def collect_validation_findings(
@@ -238,10 +286,11 @@ def collect_validation_findings(
             errors.append(issue)
             section_results[section_id]["errors"].append(issue)
 
-        requires_figure_confirmation = bool(section.get("needs_human_review")) and any(
-            isinstance(citation, dict) and str(citation.get("type") or "") in {"figure", "table", "parameter"}
-            for citation in citations
+        unresolved_asset_confirmations = _collect_unresolved_asset_confirmations(
+            content=draft.content_md,
+            recommended_assets=validator_result.get("recommended_assets"),
         )
+        requires_figure_confirmation = bool(section.get("needs_human_review")) and bool(unresolved_asset_confirmations)
         if requires_figure_confirmation and not bool(validator_result.get("figure_confirmed")):
             issue = make_issue(
                 code="VAL006",
@@ -250,6 +299,7 @@ def collect_validation_findings(
                 section_title=section_title,
                 message=f"章节《{section_title}》引用了待人工确认的复杂图表或参数资产。",
                 suggested_action="请完成图表/参数对外使用确认后再导出。",
+                details={"unresolved_assets": unresolved_asset_confirmations},
             )
             errors.append(issue)
             section_results[section_id]["errors"].append(issue)
@@ -308,13 +358,13 @@ def collect_validation_findings(
         if quality_gate_status == "review_required" or (
             quality_gate_score is not None and quality_gate_score < 0.78
         ):
-            warning = make_issue(
+            issue = make_issue(
                 code="VAL108",
-                level="P1",
+                level="P0",
                 section_id=section_id,
                 section_title=section_title,
-                message=f"章节《{section_title}》未通过自动质量审查，建议人工复核当前表达和结构。",
-                suggested_action="优先根据自动质检意见重写该章节，再重新执行校验。",
+                message=f"章节《{section_title}》未通过自动质量审查，不能直接作为可交付稿导出。",
+                suggested_action="优先根据自动质检意见重写该章节；如仍不通过，则保留人工复核任务后再导出。",
                 details={
                     "quality_gate_status": quality_gate_status or None,
                     "quality_gate_score": quality_gate_score,
@@ -322,8 +372,8 @@ def collect_validation_findings(
                     "quality_gate_issues": quality_gate.get("issues") or [],
                 },
             )
-            warnings.append(warning)
-            section_results[section_id]["warnings"].append(warning)
+            errors.append(issue)
+            section_results[section_id]["errors"].append(issue)
 
         leaked_terms = _find_reuse_leakage_terms(
             content=draft.content_md,
@@ -346,7 +396,11 @@ def collect_validation_findings(
         missing_replacements = [
             field_name
             for field_name, value in expected_replacements.items()
-            if not _contains_normalized_value(draft.content_md, value)
+            if not _contains_replacement_value(
+                draft.content_md,
+                field_name=field_name,
+                expected_value=value,
+            )
         ]
         if expected_replacements and len(missing_replacements) == len(expected_replacements):
             issue = make_issue(
@@ -424,8 +478,11 @@ def collect_validation_findings(
             warnings.append(warning)
             section_results[section_id]["warnings"].append(warning)
 
-        if bool(section.get("asset_required")) and validator_result.get("recommended_assets") and not _has_asset_placeholder(
-            draft.content_md
+        recommended_assets = validator_result.get("recommended_assets")
+        if (
+            bool(section.get("asset_required"))
+            and _requires_asset_placeholder(content=draft.content_md, recommended_assets=recommended_assets)
+            and not _has_asset_placeholder(draft.content_md)
         ):
             warning = make_issue(
                 code="VAL104",
@@ -439,14 +496,29 @@ def collect_validation_findings(
             section_results[section_id]["warnings"].append(warning)
 
     quality_score = evidence_bundle.quality_score
+    quality_trace = _extract_evidence_quality_trace(evidence_bundle)
     if quality_score is None or Decimal(quality_score) < Decimal("0.6500"):
+        if _has_acceptable_case_fallback(evidence_bundle):
+            return errors, warnings, section_results
+        fallback_used = bool(quality_trace.get("case_fallback_used"))
+        message = "当前证据包相关性偏低，可能影响草案稳定性。"
+        suggested_action = "建议重新检索证据，或补充更精确的需求参数后再生成。"
+        if fallback_used:
+            message = "当前证据包主要依赖案例级 fallback，精确 evidence 仍偏弱。"
+            suggested_action = "建议补充关键参数并重新检索，以获得更精确的 chunk 级证据。"
         warnings.append(
             make_issue(
                 code="VAL103",
                 level="P1",
-                message="当前证据包相关性偏低，可能影响草案稳定性。",
-                suggested_action="建议重新检索证据，或补充更精确的需求参数后再生成。",
-                details={"quality_score": str(quality_score) if quality_score is not None else None},
+                message=message,
+                suggested_action=suggested_action,
+                details={
+                    "quality_score": str(quality_score) if quality_score is not None else None,
+                    "primary_results_source": quality_trace.get("primary_results_source"),
+                    "case_fallback_used": fallback_used,
+                    "case_fallback_count": quality_trace.get("case_fallback_count"),
+                    "case_fallback_top_score": quality_trace.get("case_fallback_top_score"),
+                },
             )
         )
 
@@ -460,11 +532,36 @@ def build_review_task_blueprints(
     outline: ProposalOutline,
     draft_version: int,
     existing_tasks: list[ReviewTask],
+    require_final_review: bool = False,
 ) -> list[dict[str, Any]]:
     blueprints: list[dict[str, Any]] = []
     seen_signatures: set[str] = set()
 
     for issue in errors:
+        if issue.get("code") in BLOCKING_CONTENT_REVIEW_CODES:
+            section_id = str(issue.get("section_id") or "")
+            signature = task_signature(
+                task_type="content_review",
+                draft_version=draft_version,
+                section_id=section_id or None,
+                code=str(issue.get("code")),
+            )
+            if signature not in seen_signatures:
+                blueprints.append(
+                    {
+                        "task_type": "content_review",
+                        "blocking_level": "P0",
+                        "signature": signature,
+                        "payload": {
+                            "draft_version": draft_version,
+                            "code": issue.get("code"),
+                            "message": issue.get("message"),
+                            "section_id": section_id or None,
+                            "section_title": issue.get("section_title"),
+                        },
+                    }
+                )
+                seen_signatures.add(signature)
         if issue.get("code") == "VAL003":
             param_name = ((issue.get("details") or {}).get("param_name") or "unknown")
             signature = task_signature(
@@ -543,7 +640,12 @@ def build_review_task_blueprints(
         )
         seen_signatures.add(signature)
 
-    if not any(issue.get("code") in HARD_BLOCKING_CODES for issue in errors):
+    if require_final_review and not any(
+        issue.get("code") in HARD_BLOCKING_CODES
+        or issue.get("code") in BLOCKING_CONTENT_REVIEW_CODES
+        or str(issue.get("level") or "").upper() == "P0"
+        for issue in errors
+    ):
         final_review_signature = task_signature(
             task_type="final_review",
             draft_version=draft_version,
@@ -584,6 +686,9 @@ def task_signature(
 
 
 class ValidationService:
+    def __init__(self, *, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+
     async def validate_project(
         self,
         *,
@@ -639,6 +744,7 @@ class ValidationService:
             outline=outline,
             draft_version=target_draft_version,
             existing_tasks=existing_tasks,
+            require_final_review=self.settings.validation_require_final_review,
         )
         current_signatures = {blueprint["signature"] for blueprint in blueprints}
         await self._close_obsolete_tasks(
@@ -678,6 +784,8 @@ class ValidationService:
                     "recommended_assets",
                     "generation_mode",
                     "reuse_pack",
+                    "generation_details",
+                    "quality_gate",
                 ]
                 if key in current_result
             }
@@ -688,7 +796,7 @@ class ValidationService:
                 "warnings": per_section["warnings"],
                 "validated_at": datetime.now(timezone.utc).isoformat(),
             }
-            if per_section["errors"] or per_section["warnings"]:
+            if per_section["errors"]:
                 draft.status = "review_required"
             elif draft.status == "review_required":
                 draft.status = "generated"
@@ -696,7 +804,9 @@ class ValidationService:
         open_current_tasks = [
             task
             for task in existing_tasks
-            if task.status == "open" and int((task.payload or {}).get("draft_version") or target_draft_version) == target_draft_version
+            if task.status == "open"
+            and str(getattr(task, "blocking_level", "") or "").upper() == "P0"
+            and int((task.payload or {}).get("draft_version") or target_draft_version) == target_draft_version
         ]
         report_status = derive_validation_status(errors=errors, open_review_task_count=len(open_current_tasks))
         report = ValidationReport(
@@ -873,12 +983,7 @@ class ValidationService:
         session: AsyncSession,
         outline: ProposalOutline,
     ) -> EvidenceBundle:
-        if outline.evidence_bundle_id is None:
-            raise ArtifactValidationError("Outline is not bound to an evidence bundle")
-        bundle = await session.get(EvidenceBundle, outline.evidence_bundle_id)
-        if not bundle:
-            raise ArtifactNotFoundError("Evidence bundle not found")
-        return bundle
+        return await resolve_outline_evidence_bundle(session=session, outline=outline)
 
     async def _load_section_drafts(
         self,
@@ -1088,6 +1193,23 @@ def _contains_normalized_value(content: str, expected_value: str) -> bool:
     return normalized_expected in normalized_content
 
 
+def _contains_replacement_value(content: str, *, field_name: str, expected_value: str) -> bool:
+    if _contains_normalized_value(content, expected_value):
+        return True
+    if field_name != "quantity":
+        return False
+    expected_pairs = _extract_quantity_pairs(expected_value)
+    if not expected_pairs:
+        return False
+    content_pairs = set(_extract_quantity_pairs(content))
+    return all(pair in content_pairs for pair in expected_pairs)
+
+
+def _extract_quantity_pairs(value: str) -> list[str]:
+    normalized = re.sub(r"\s+", "", str(value or "")).lower()
+    return sorted(set(match.group(0) for match in QUANTITY_PAIR_PATTERN.finditer(normalized)))
+
+
 def _compute_reuse_similarity(*, content: str, reusable_blocks: list[dict[str, Any]]) -> dict[str, Any]:
     normalized_content = _normalize_similarity_text(content)
     if len(normalized_content) < 60:
@@ -1137,6 +1259,75 @@ def _has_asset_placeholder(content: str) -> bool:
     return bool(ASSET_PLACEHOLDER_PATTERN.search(content or ""))
 
 
+def _has_materialized_markdown_table(content: str) -> bool:
+    text = content or ""
+    return bool(MARKDOWN_TABLE_ROW_PATTERN.search(text) and MARKDOWN_TABLE_SEPARATOR_PATTERN.search(text))
+
+
+def _requires_asset_placeholder(*, content: str, recommended_assets: Any) -> bool:
+    if not isinstance(recommended_assets, list) or not recommended_assets:
+        return False
+
+    has_table_asset = False
+    for asset in recommended_assets:
+        if not isinstance(asset, dict):
+            continue
+        asset_type = str(asset.get("asset_type") or "").lower()
+        metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        visual_role = str(asset.get("visual_role") or metadata.get("visual_role") or "").lower()
+        if asset_type == "table" or visual_role == "table_asset":
+            has_table_asset = True
+            continue
+        return True
+
+    return has_table_asset and not _has_materialized_markdown_table(content)
+
+
+def _collect_unresolved_asset_confirmations(*, content: str, recommended_assets: Any) -> list[dict[str, Any]]:
+    placeholders = [
+        {"placeholder_type": str(match.group(1) or "").upper(), "asset_id": str(match.group(2) or "").strip()}
+        for match in ASSET_PLACEHOLDER_DETAIL_PATTERN.finditer(content or "")
+    ]
+    if not placeholders:
+        return []
+
+    asset_lookup: dict[str, dict[str, Any]] = {}
+    if isinstance(recommended_assets, list):
+        for asset in recommended_assets:
+            if not isinstance(asset, dict):
+                continue
+            asset_id = str(asset.get("asset_id") or "").strip()
+            if asset_id:
+                asset_lookup[asset_id] = asset
+
+    has_markdown_table = _has_materialized_markdown_table(content)
+    unresolved: list[dict[str, Any]] = []
+    for placeholder in placeholders:
+        placeholder_type = placeholder["placeholder_type"]
+        asset_id = placeholder["asset_id"]
+        asset = asset_lookup.get(asset_id) or {}
+        risk_level = str(asset.get("risk_level") or "").lower()
+        asset_type = str(asset.get("asset_type") or placeholder_type.lower()).lower()
+
+        if placeholder_type == "TABLE" and has_markdown_table:
+            continue
+        if placeholder_type == "FIGURE" and risk_level not in {"high", "critical"}:
+            continue
+        if placeholder_type == "TABLE" and asset_type != "table":
+            continue
+
+        unresolved.append(
+            {
+                "asset_id": asset_id,
+                "placeholder_type": placeholder_type,
+                "asset_type": asset_type,
+                "risk_level": risk_level or "unknown",
+                "title": str(asset.get("display_title") or asset.get("title") or "").strip(),
+            }
+        )
+    return unresolved
+
+
 def _find_reuse_leakage_terms(*, content: str, banned_terms: list[Any]) -> list[str]:
     text = content or ""
     leaked_terms: list[str] = []
@@ -1161,5 +1352,34 @@ def _looks_like_goal_drift(*, draft: SectionDraft, section: dict[str, Any]) -> b
 
 
 def _has_implicit_assumption(content: str) -> bool:
-    text = content or ""
-    return any(token in text for token in ASSUMPTION_HINTS)
+    in_declared_block = False
+    for raw_line in str(content or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            in_declared_block = _line_has_assumption_hint(line) and _is_declared_assumption_line(line)
+            continue
+        if not _line_has_assumption_hint(line):
+            continue
+        if in_declared_block or _is_declared_assumption_line(line):
+            continue
+        return True
+    return False
+
+
+def _line_has_assumption_hint(line: str) -> bool:
+    return any(token in line for token in ASSUMPTION_HINTS)
+
+
+def _is_declared_assumption_line(line: str) -> bool:
+    normalized = line.strip()
+    if "TBD" in normalized or "待补充" in normalized or "暂定" in normalized:
+        return False
+    if normalized.startswith("|"):
+        return True
+    if normalized.startswith("注") or normalized.startswith("说明"):
+        return True
+    if normalized.startswith("#") and ("待确认" in normalized or "后续确认" in normalized):
+        return True
+    return any(token in normalized for token in DECLARED_ASSUMPTION_CONTEXT_TOKENS)

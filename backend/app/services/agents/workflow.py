@@ -21,6 +21,11 @@ class ReviewDraft:
 
 
 class WorkflowOrchestrator:
+    """Legacy generation orchestrator.
+
+    The active product path is the composition/artifacts pipeline.
+    """
+
     def __init__(
         self,
         *,
@@ -73,6 +78,10 @@ class WorkflowOrchestrator:
             if references:
                 state.referenced_sources.extend(references)
 
+            # Build rolling context from preceding sections to avoid repetition
+            # and maintain terminology consistency across chapters.
+            preceding_context = state.build_preceding_context(index)
+
             state.current_agent = "executor"
             response = await self.executor.write_section(
                 task_id=state.task_id,
@@ -80,9 +89,14 @@ class WorkflowOrchestrator:
                 global_params=state.global_params,
                 retrieved_context=retrieved_context,
                 outline_title=outline.get("title", "技术方案"),
+                preceding_context=preceding_context,
             )
             state.record_usage(total_tokens=response.total_tokens, cost_estimate=response.cost_estimate)
             state.set_section_content(index, response.content)
+
+            # Record summary for subsequent sections to reference.
+            section_title = str(section.get("title") or f"章节 {index + 1}")
+            state.record_section_summary(index, section_title, response.content)
 
             section_state = {
                 "index": section.get("index", index),

@@ -20,6 +20,7 @@ from app.services.llm.client import (
     LLMResponse,
     ModelType,
     MockLLMProvider,
+    RetryableLLMError,
     TaskType,
 )
 
@@ -78,6 +79,16 @@ class _FallbackProvider(BaseLLMProvider):
             raise RuntimeError("primary failed")
         for chunk in ["根据分析，[Com", "pany_A]需要", "新的实施方案。"]:
             yield chunk
+
+
+class _HangingStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        await asyncio.sleep(0.05)
+        if False:
+            yield b""
+
+    async def aclose(self) -> None:
+        return None
 
 
 class LLMClientTests(unittest.TestCase):
@@ -212,7 +223,7 @@ class LLMClientTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(seen_hosts, ["deepseek", "qwen"])
+        self.assertEqual(seen_hosts, ["deepseek", "deepseek", "qwen"])
         self.assertEqual(response.content, '{"company":"上海电气集团"}')
         self.assertEqual(response.model_used, "qwen-plus")
 
@@ -559,6 +570,114 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(user_content[1]["image_url"], "data:image/png;base64,ZmFrZQ==")
         self.assertEqual(user_content[1]["detail"], "low")
         self.assertIn('"visual_role":"page_furniture"', response.content)
+
+    def test_live_provider_retries_retryable_responses_failure_once(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(503, json={"error": {"message": "Service temporarily unavailable"}})
+            result_text = '{"title":"重试成功","sections":[]}'
+            stream_body = (
+                "event: response.created\n"
+                f"data: {json.dumps({'type': 'response.created', 'response': {'id': 'resp-openai', 'model': 'gpt-4o-mini'}}, ensure_ascii=False)}\n\n"
+                "event: response.output_text.delta\n"
+                f"data: {json.dumps({'type': 'response.output_text.delta', 'delta': result_text}, ensure_ascii=False)}\n\n"
+                "event: response.completed\n"
+                f"data: {json.dumps({'type': 'response.completed', 'response': {'id': 'resp-openai', 'model': 'gpt-4o-mini', 'usage': {'input_tokens': 14, 'output_tokens': 5, 'total_tokens': 19}}}, ensure_ascii=False)}\n\n"
+            )
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=stream_body)
+
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER_BACKEND": "live",
+                "DEEPSEEK_API_KEY": "",
+                "QWEN_API_KEY": "",
+                "DOUBAO_API_KEY": "",
+                "AZURE_OPENAI_API_KEY": "",
+                "AZURE_OPENAI_ENDPOINT": "",
+                "AZURE_OPENAI_DEPLOYMENT": "",
+                "OPENAI_API_KEY": "relay-key",
+                "OPENAI_BASE_URL": "https://relay.test",
+                "OPENAI_MODEL": "gpt-4o-mini",
+                "LLM_RETRY_ATTEMPTS": "1",
+                "LLM_RETRY_BACKOFF_SECONDS": "0",
+            },
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            provider = HTTPChatCompletionsProvider(transport=httpx.MockTransport(handler))
+            response = asyncio.run(
+                provider.invoke(
+                    ModelType.OPENAI,
+                    LLMRequest(
+                        task_type=TaskType.OUTLINE,
+                        system_prompt="请输出 JSON。",
+                        user_prompt="请返回结构化结果。",
+                        json_schema={
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "sections": {"type": "array"},
+                            },
+                            "required": ["title", "sections"],
+                        },
+                    ),
+                )
+            )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(response.content, '{"title":"重试成功","sections":[]}')
+
+    def test_live_provider_times_out_stalled_responses_stream(self) -> None:
+        class _TimeoutProvider(HTTPChatCompletionsProvider):
+            async def _collect_responses_stream(self, *, config, request, model_type, payload):
+                raise RetryableLLMError(
+                    self._format_stream_timeout(config.provider_name, model_type, self.stream_timeout_seconds)
+                )
+
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER_BACKEND": "live",
+                "DEEPSEEK_API_KEY": "",
+                "QWEN_API_KEY": "",
+                "DOUBAO_API_KEY": "",
+                "AZURE_OPENAI_API_KEY": "",
+                "AZURE_OPENAI_ENDPOINT": "",
+                "AZURE_OPENAI_DEPLOYMENT": "",
+                "OPENAI_API_KEY": "relay-key",
+                "OPENAI_BASE_URL": "https://relay.test",
+                "OPENAI_MODEL": "gpt-4o-mini",
+                "LLM_STREAM_TIMEOUT_SECONDS": "0.01",
+                "LLM_RETRY_ATTEMPTS": "0",
+                "LLM_RETRY_BACKOFF_SECONDS": "0",
+            },
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            provider = _TimeoutProvider(transport=httpx.MockTransport(lambda _request: httpx.Response(200)))
+            with self.assertRaises(RuntimeError) as ctx:
+                asyncio.run(
+                    provider.invoke(
+                        ModelType.OPENAI,
+                        LLMRequest(
+                            task_type=TaskType.OUTLINE,
+                            system_prompt="请输出 JSON。",
+                            user_prompt="请返回结构化结果。",
+                            json_schema={
+                                "type": "object",
+                                "properties": {"title": {"type": "string"}},
+                                "required": ["title"],
+                            },
+                        ),
+                    )
+                )
+
+        self.assertIn("stream timed out", str(ctx.exception))
 
 
 if __name__ == "__main__":

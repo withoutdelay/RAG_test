@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import uuid
@@ -103,6 +104,10 @@ class ProviderEndpointConfig:
     @property
     def url(self) -> str:
         return f"{self.base_url.rstrip('/')}{self.path}"
+
+
+class RetryableLLMError(RuntimeError):
+    pass
 
 
 class BaseLLMProvider(ABC):
@@ -362,6 +367,9 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
     ) -> None:
         self.settings = settings or get_settings()
         self.timeout_seconds = self.settings.llm_timeout_seconds
+        self.stream_timeout_seconds = max(self.settings.llm_stream_timeout_seconds, self.timeout_seconds, 1.0)
+        self.retry_attempts = max(0, int(self.settings.llm_retry_attempts))
+        self.retry_backoff_seconds = max(0.0, self.settings.llm_retry_backoff_seconds)
         self.transport = transport
         self._configs = self._build_configs(self.settings)
 
@@ -373,56 +381,95 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
         config = self._get_config(model_type)
         if config.api_style == "responses":
             payload = self._build_payload(model_type, request, stream=True)
-            return await self._collect_responses_stream(config=config, request=request, model_type=model_type, payload=payload)
+            return await self._invoke_with_retry(
+                operation=lambda: self._collect_responses_stream(
+                    config=config,
+                    request=request,
+                    model_type=model_type,
+                    payload=payload,
+                ),
+            )
         payload = self._build_payload(model_type, request, stream=False)
-        response_json = await self._post_json(config=config, payload=payload)
-        return self._parse_completion_response(model_type=model_type, request=request, data=response_json)
+        return await self._invoke_with_retry(
+            operation=lambda: self._invoke_chat_completion(
+                config=config,
+                request=request,
+                model_type=model_type,
+                payload=payload,
+            ),
+        )
 
     async def invoke_stream(self, model_type: ModelType, request: LLMRequest) -> AsyncIterator[str]:
         config = self._get_config(model_type)
         if config.api_style == "responses":
             payload = self._build_payload(model_type, request, stream=True)
-            async for delta in self._iterate_responses_stream(config=config, payload=payload):
+            async for delta in self._iterate_with_retry(
+                operation_factory=lambda: self._iterate_responses_stream(
+                    config=config,
+                    payload=payload,
+                    model_type=model_type,
+                ),
+            ):
                 if delta:
                     yield delta
             return
         payload = self._build_payload(model_type, request, stream=True)
-        headers = self._build_headers(config)
+        async for delta in self._iterate_with_retry(
+            operation_factory=lambda: self._iterate_chat_completions_stream(
+                config=config,
+                payload=payload,
+                model_type=model_type,
+            ),
+        ):
+            if delta:
+                yield delta
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
-                async with client.stream(
-                    "POST",
-                    config.url,
-                    json=payload,
-                    headers=headers,
-                    params=config.query_params,
-                ) as response:
-                    try:
-                        response.raise_for_status()
-                    except httpx.HTTPStatusError as exc:
-                        await exc.response.aread()
-                        raise
-                    async for line in response.aiter_lines():
-                        data = line.strip()
-                        if not data.startswith("data:"):
-                            continue
-                        chunk = data[5:].strip()
-                        if not chunk:
-                            continue
-                        if chunk == "[DONE]":
-                            return
-                        try:
-                            payload_json = json.loads(chunk)
-                        except json.JSONDecodeError as exc:
-                            raise RuntimeError(
-                                f"{config.provider_name} returned invalid stream payload for {model_type.value}"
-                            ) from exc
-                        for delta in self._extract_stream_deltas(payload_json):
-                            if delta:
-                                yield delta
-        except httpx.HTTPError as exc:
-            raise RuntimeError(self._format_http_error(config.provider_name, model_type, exc)) from exc
+    async def _invoke_chat_completion(
+        self,
+        *,
+        config: ProviderEndpointConfig,
+        request: LLMRequest,
+        model_type: ModelType,
+        payload: dict[str, Any],
+    ) -> LLMResponse:
+        response_json = await self._post_json(config=config, payload=payload, model_type=model_type)
+        return self._parse_completion_response(model_type=model_type, request=request, data=response_json)
+
+    async def _invoke_with_retry(self, *, operation) -> LLMResponse:
+        last_error: RetryableLLMError | None = None
+        for attempt in range(self.retry_attempts + 1):
+            try:
+                return await operation()
+            except RetryableLLMError as exc:
+                last_error = exc
+                if attempt >= self.retry_attempts:
+                    break
+                await self._sleep_before_retry(attempt + 1)
+        if last_error is not None:
+            raise RuntimeError(str(last_error)) from last_error
+        raise RuntimeError("LLM invocation failed without a retryable error")
+
+    async def _iterate_with_retry(self, *, operation_factory) -> AsyncIterator[str]:
+        last_error: RetryableLLMError | None = None
+        for attempt in range(self.retry_attempts + 1):
+            emitted = False
+            try:
+                async for chunk in operation_factory():
+                    emitted = True
+                    yield chunk
+                return
+            except RetryableLLMError as exc:
+                last_error = exc
+                if emitted or attempt >= self.retry_attempts:
+                    raise RuntimeError(str(exc)) from exc
+                await self._sleep_before_retry(attempt + 1)
+        if last_error is not None:
+            raise RuntimeError(str(last_error)) from last_error
+
+    async def _sleep_before_retry(self, attempt_number: int) -> None:
+        if self.retry_backoff_seconds <= 0:
+            return
+        await asyncio.sleep(self.retry_backoff_seconds * max(attempt_number, 1))
 
     def _build_configs(self, settings: Settings) -> dict[ModelType, ProviderEndpointConfig]:
         configs: dict[ModelType, ProviderEndpointConfig] = {}
@@ -594,7 +641,13 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
             },
         }
 
-    async def _post_json(self, *, config: ProviderEndpointConfig, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _post_json(
+        self,
+        *,
+        config: ProviderEndpointConfig,
+        payload: dict[str, Any],
+        model_type: ModelType | None = None,
+    ) -> dict[str, Any]:
         headers = self._build_headers(config)
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
@@ -610,9 +663,9 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
                 await exc.response.aread()
             except Exception:
                 pass
-            raise RuntimeError(self._format_http_error(config.provider_name, None, exc)) from exc
+            raise self._wrap_http_error(config.provider_name, model_type, exc) from exc
         except httpx.HTTPError as exc:
-            raise RuntimeError(self._format_http_error(config.provider_name, None, exc)) from exc
+            raise self._wrap_http_error(config.provider_name, model_type, exc) from exc
 
         try:
             return response.json()
@@ -629,18 +682,29 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
     ) -> LLMResponse:
         content_parts: list[str] = []
         response_payload: dict[str, Any] | None = None
-        async for event in self._iterate_responses_stream(config=config, payload=payload, yield_events=True):
-            event_type = str(event.get("type") or "")
-            if event_type == "response.output_text.delta":
-                delta = str(event.get("delta") or "")
-                if delta:
-                    content_parts.append(delta)
-            elif event_type == "response.output_text.done":
-                text = str(event.get("text") or "")
-                if text:
-                    content_parts = [text]
-            elif event_type == "response.completed":
-                response_payload = event.get("response") if isinstance(event.get("response"), dict) else None
+        try:
+            async with asyncio.timeout(self.stream_timeout_seconds):
+                async for event in self._iterate_responses_stream(
+                    config=config,
+                    payload=payload,
+                    model_type=model_type,
+                    yield_events=True,
+                ):
+                    event_type = str(event.get("type") or "")
+                    if event_type == "response.output_text.delta":
+                        delta = str(event.get("delta") or "")
+                        if delta:
+                            content_parts.append(delta)
+                    elif event_type == "response.output_text.done":
+                        text = str(event.get("text") or "")
+                        if text:
+                            content_parts = [text]
+                    elif event_type == "response.completed":
+                        response_payload = event.get("response") if isinstance(event.get("response"), dict) else None
+        except TimeoutError as exc:
+            raise RetryableLLMError(
+                self._format_stream_timeout(config.provider_name, model_type, self.stream_timeout_seconds)
+            ) from exc
 
         content = "".join(content_parts)
         usage = (response_payload or {}).get("usage") or {}
@@ -661,44 +725,98 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
         *,
         config: ProviderEndpointConfig,
         payload: dict[str, Any],
+        model_type: ModelType,
         yield_events: bool = False,
     ) -> AsyncIterator[Any]:
         headers = self._build_headers(config)
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
-                async with client.stream(
-                    "POST",
-                    config.url,
-                    json=payload,
-                    headers=headers,
-                    params=config.query_params,
-                ) as response:
-                    try:
-                        response.raise_for_status()
-                    except httpx.HTTPStatusError as exc:
-                        await exc.response.aread()
-                        raise
-                    async for line in response.aiter_lines():
-                        data = line.strip()
-                        if not data.startswith("data:"):
-                            continue
-                        chunk = data[5:].strip()
-                        if not chunk or chunk == "[DONE]":
-                            continue
+            async with asyncio.timeout(self.stream_timeout_seconds):
+                async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
+                    async with client.stream(
+                        "POST",
+                        config.url,
+                        json=payload,
+                        headers=headers,
+                        params=config.query_params,
+                    ) as response:
                         try:
-                            payload_json = json.loads(chunk)
-                        except json.JSONDecodeError as exc:
-                            raise RuntimeError(f"{config.provider_name} returned invalid responses stream payload") from exc
-                        if yield_events:
-                            yield payload_json
-                        else:
-                            event_type = str(payload_json.get("type") or "")
-                            if event_type == "response.output_text.delta":
-                                delta = str(payload_json.get("delta") or "")
+                            response.raise_for_status()
+                        except httpx.HTTPStatusError as exc:
+                            await exc.response.aread()
+                            raise
+                        async for line in response.aiter_lines():
+                            data = line.strip()
+                            if not data.startswith("data:"):
+                                continue
+                            chunk = data[5:].strip()
+                            if not chunk or chunk == "[DONE]":
+                                continue
+                            try:
+                                payload_json = json.loads(chunk)
+                            except json.JSONDecodeError as exc:
+                                raise RuntimeError(f"{config.provider_name} returned invalid responses stream payload") from exc
+                            if yield_events:
+                                yield payload_json
+                            else:
+                                event_type = str(payload_json.get("type") or "")
+                                if event_type == "response.output_text.delta":
+                                    delta = str(payload_json.get("delta") or "")
+                                    if delta:
+                                        yield delta
+        except TimeoutError as exc:
+            raise RetryableLLMError(
+                self._format_stream_timeout(config.provider_name, model_type, self.stream_timeout_seconds)
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise self._wrap_http_error(config.provider_name, model_type, exc) from exc
+
+    async def _iterate_chat_completions_stream(
+        self,
+        *,
+        config: ProviderEndpointConfig,
+        payload: dict[str, Any],
+        model_type: ModelType,
+    ) -> AsyncIterator[str]:
+        headers = self._build_headers(config)
+        try:
+            async with asyncio.timeout(self.stream_timeout_seconds):
+                async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport) as client:
+                    async with client.stream(
+                        "POST",
+                        config.url,
+                        json=payload,
+                        headers=headers,
+                        params=config.query_params,
+                    ) as response:
+                        try:
+                            response.raise_for_status()
+                        except httpx.HTTPStatusError as exc:
+                            await exc.response.aread()
+                            raise
+                        async for line in response.aiter_lines():
+                            data = line.strip()
+                            if not data.startswith("data:"):
+                                continue
+                            chunk = data[5:].strip()
+                            if not chunk:
+                                continue
+                            if chunk == "[DONE]":
+                                return
+                            try:
+                                payload_json = json.loads(chunk)
+                            except json.JSONDecodeError as exc:
+                                raise RuntimeError(
+                                    f"{config.provider_name} returned invalid stream payload for {model_type.value}"
+                                ) from exc
+                            for delta in self._extract_stream_deltas(payload_json):
                                 if delta:
                                     yield delta
+        except TimeoutError as exc:
+            raise RetryableLLMError(
+                self._format_stream_timeout(config.provider_name, model_type, self.stream_timeout_seconds)
+            ) from exc
         except httpx.HTTPError as exc:
-            raise RuntimeError(self._format_http_error(config.provider_name, None, exc)) from exc
+            raise self._wrap_http_error(config.provider_name, model_type, exc) from exc
 
     def _parse_completion_response(
         self,
@@ -767,6 +885,34 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
                 body = f"{body[:200]}..."
             return f"{provider_name} request failed for {label}: {exc.response.status_code} {body}"
         return f"{provider_name} request failed for {label}: {exc}"
+
+    @staticmethod
+    def _format_stream_timeout(
+        provider_name: str,
+        model_type: ModelType | None,
+        timeout_seconds: float,
+    ) -> str:
+        label = model_type.value if model_type else provider_name
+        return f"{provider_name} stream timed out for {label} after {timeout_seconds:.1f}s"
+
+    @classmethod
+    def _wrap_http_error(
+        cls,
+        provider_name: str,
+        model_type: ModelType | None,
+        exc: httpx.HTTPError,
+    ) -> RuntimeError:
+        message = cls._format_http_error(provider_name, model_type, exc)
+        if cls._is_retryable_http_error(exc):
+            return RetryableLLMError(message)
+        return RuntimeError(message)
+
+    @staticmethod
+    def _is_retryable_http_error(exc: httpx.HTTPError) -> bool:
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = int(exc.response.status_code)
+            return status_code in {408, 409, 425, 429} or status_code >= 500
+        return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
 
 
 def get_default_provider(

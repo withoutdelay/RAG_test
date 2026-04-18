@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.api.generation import get_generation_service
 from app.api.router import api_router
 from app.db import get_db_session
+from app.services.generation import GenerationService
 
 
 class _FakeReviewService:
@@ -129,6 +130,44 @@ class ReviewApiTests(unittest.TestCase):
             approve_payload = approve_response.json()["data"]
             self.assertEqual(approve_payload["status"], "approved")
             self.assertEqual(approve_payload["task_status"], "completed")
+
+
+class LegacyReviewApiDisabledTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.app = FastAPI()
+        self.app.include_router(api_router, prefix="/api/v1")
+        self.app.dependency_overrides[get_generation_service] = lambda: GenerationService(
+            settings=SimpleNamespace(legacy_generation_enabled=False)
+        )
+        self.app.dependency_overrides[get_db_session] = _fake_db_session
+
+    def tearDown(self) -> None:
+        self.app.dependency_overrides.clear()
+
+    def test_review_routes_return_gone_when_legacy_flow_disabled(self) -> None:
+        with TestClient(self.app) as client:
+            reviews_response = client.get(f"/api/v1/generation/{uuid4()}/reviews")
+            self.assertEqual(reviews_response.status_code, 410)
+            self.assertIn("/generate-sections", reviews_response.json()["detail"])
+
+            approve_response = client.post(
+                f"/api/v1/review/{uuid4()}/approve",
+                json={"feedback": "通过"},
+            )
+            self.assertEqual(approve_response.status_code, 410)
+
+            reject_response = client.post(
+                f"/api/v1/review/{uuid4()}/reject",
+                json={"feedback": "退回"},
+            )
+            self.assertEqual(reject_response.status_code, 410)
+
+    def test_review_routes_are_hidden_from_openapi_schema(self) -> None:
+        with TestClient(self.app) as client:
+            schema = client.get("/openapi.json").json()
+            self.assertNotIn("/api/v1/generation/{task_id}/reviews", schema["paths"])
+            self.assertNotIn("/api/v1/review/{review_id}/approve", schema["paths"])
+            self.assertNotIn("/api/v1/review/{review_id}/reject", schema["paths"])
 
 
 if __name__ == "__main__":

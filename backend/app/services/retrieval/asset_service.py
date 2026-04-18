@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import re
+import unicodedata
 from typing import Any
 from uuid import UUID
 
@@ -38,6 +39,35 @@ GENERIC_ASSET_TITLE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 GENERIC_DIAGRAM_TYPE_PATTERN = re.compile(r"^(other|工程示意图|图示|图形资产|主图|系统图|示意图)$", re.IGNORECASE)
+HARD_FRAGMENT_PATTERN = re.compile(
+    r"(cropped\s+figure\s+fragment|figure\s+fragment|symbol\s*/\s*cropped|符号局部|局部图案|"
+    r"仅显示(?:一个|上下|单线图中的)?|无法(?:确认|识别|辨认|提炼)|缺乏可识别|信息非常有限|图意不清|文字太小|"
+    r"文字切片|标题文字|封面字样|text_fragment)",
+    re.IGNORECASE,
+)
+PARTIAL_FRAGMENT_PATTERN = re.compile(r"(局部|fragment|裁剪|符号|symbol)", re.IGNORECASE)
+COMPLETE_DIAGRAM_PATTERN = re.compile(
+    r"(系统图|单线图|一次图|一次接线|原理图|接线图|主回路|系统示意|拓扑|完整|总图)",
+    re.IGNORECASE,
+)
+LAYOUT_ILLUSTRATION_PATTERN = re.compile(
+    r"(外观图|高度关系|平面间距|间距示意|外形|柜体分段|顶部通风|布置图|尺寸图|检修通道)",
+    re.IGNORECASE,
+)
+LOGO_ASSET_PATTERN = re.compile(
+    r"(logo|标\s*识|商标|公司徽标|公司全称|股份有限公司|dayu\s*electric|大\s*禹\s*电\s*气|大\s*禹\s*标\s*识)",
+    re.IGNORECASE,
+)
+CONTROL_INTERFACE_FOCUS_PATTERN = re.compile(
+    r"(控制|监控|监视|联锁|保护|告警|报警|故障|接口|信号|点表|PLC|DCS|励磁|断路器|反馈)",
+    re.IGNORECASE,
+)
+CONTROL_INTERFACE_TABLE_NOISE_PATTERN = re.compile(
+    r"(备品备件|备件|spare|售后|服务|培训|维保|rated\s*data|额定数据|供货范围)",
+    re.IGNORECASE,
+)
+VFD_AUXILIARY_CURVE_NOISE_PATTERN = re.compile(r"(润滑油|油站|冷却器|冷却水|辅机)", re.IGNORECASE)
+VFD_FOCUS_PATTERN = re.compile(r"(LCI|SFC|变频软起|软起动|软启动|同步切换|工频切换|晶闸管|主回路)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -105,7 +135,10 @@ class AssetRetrievalService:
         query_vector = await self.embedder.embed_text(query)
         section_title = str((section_context or {}).get("section_title") or (section_context or {}).get("title") or "")
         expected_types = [str(item) for item in ((section_context or {}).get("expected_evidence_types") or [])]
-        target_taxonomy = infer_target_taxonomy(section_context or {})
+        taxonomy_context = dict(section_context or {})
+        if not taxonomy_context.get("title") and taxonomy_context.get("section_title"):
+            taxonomy_context["title"] = taxonomy_context.get("section_title")
+        target_taxonomy = infer_target_taxonomy(taxonomy_context)
         anchor_document_names = {
             str(item)
             for item in ((section_context or {}).get("anchor_document_names") or [])
@@ -147,9 +180,22 @@ class AssetRetrievalService:
             scored_cards.append((final_score, card))
 
         scored_cards.sort(key=lambda item: item[0], reverse=True)
+        preferred_cards = [
+            (score, card)
+            for score, card in scored_cards
+            if not _asset_quality_flags(card=card)["low_information"]
+        ]
+        if len(preferred_cards) >= top_k:
+            result_pool = preferred_cards
+        else:
+            preferred_ids = {card.asset_id for _score, card in preferred_cards}
+            result_pool = [
+                *preferred_cards,
+                *[(score, card) for score, card in scored_cards if card.asset_id not in preferred_ids],
+            ]
         results = [
             _to_result(card=card, score=score, section_title=section_title)
-            for score, card in scored_cards[:top_k]
+            for score, card in result_pool[:top_k]
         ]
         return AssetSearchResponse(results=results, total=len(results))
 
@@ -345,6 +391,7 @@ def _to_result(*, card: AssetCard, score: float, section_title: str) -> AssetSea
     metadata.setdefault("content_form", card.content_form)
     metadata.setdefault("raw_title", card.title)
     metadata.setdefault("display_title", card.display_title or card.title)
+    metadata["retrieval_quality"] = _asset_quality_flags(card=card)
     return AssetSearchResult(
         asset_card_id=card.asset_card_id,
         asset_id=card.asset_id,
@@ -454,6 +501,30 @@ def _asset_anchor_boost(
 def _asset_noise_penalty(*, card: AssetCard, target_section_type: str) -> float:
     text = " ".join(part for part in (card.heading_path, card.display_title, card.title, card.caption, card.preview_text) if part).casefold()
     penalty = 0.0
+    quality_flags = _asset_quality_flags(card=card)
+    if quality_flags["low_information"]:
+        penalty += 0.72
+    elif quality_flags["partial_fragment"]:
+        penalty += 0.22
+    if quality_flags["summary_review_required"]:
+        penalty += 0.14
+    if quality_flags["low_confidence_summary"]:
+        penalty += 0.1
+    if (
+        target_section_type in {"main_circuit_scheme", "overall_solution", "control_logic", "protection_interlock"}
+        and str(card.visual_role or "").lower() == "illustration"
+        and LAYOUT_ILLUSTRATION_PATTERN.search(text)
+    ):
+        penalty += 0.34
+    if target_section_type in {"protection_interlock", "control_logic", "communication_interface"} and card.asset_type == "table":
+        focus_match = bool(CONTROL_INTERFACE_FOCUS_PATTERN.search(text))
+        if not focus_match:
+            penalty += 0.45
+        if CONTROL_INTERFACE_TABLE_NOISE_PATTERN.search(text) and not focus_match:
+            penalty += 0.24
+    if target_section_type in {"vfd_spec", "starter_spec"} and VFD_AUXILIARY_CURVE_NOISE_PATTERN.search(text):
+        if not VFD_FOCUS_PATTERN.search(text):
+            penalty += 0.34
     if card.visual_role == "page_furniture":
         penalty += 0.32
     if any(token in text for token in ("检测报告", "检验", "认证", "证书", "质量保证", "文档控制", "公司简介")):
@@ -463,6 +534,46 @@ def _asset_noise_penalty(*, card: AssetCard, target_section_type: str) -> float:
     ):
         penalty += 0.18
     return penalty
+
+
+def _asset_quality_flags(*, card: AssetCard) -> dict[str, Any]:
+    summary = _normalize_semantic_summary(card.metadata.get("semantic_summary"))
+    summary_text = _build_semantic_summary_text(summary) or ""
+    signal_text = " ".join(
+        str(item)
+        for item in (
+            card.display_title,
+            card.title,
+            card.caption,
+            card.heading_path,
+            card.preview_text,
+            summary_text,
+        )
+        if item
+    )
+    normalized_signal_text = unicodedata.normalize("NFKC", signal_text)
+    compact_signal_text = re.sub(r"\s+", "", normalized_signal_text)
+    logo_like = bool(LOGO_ASSET_PATTERN.search(normalized_signal_text) or LOGO_ASSET_PATTERN.search(compact_signal_text))
+    low_information = bool(HARD_FRAGMENT_PATTERN.search(normalized_signal_text) or logo_like)
+    partial_fragment = bool(PARTIAL_FRAGMENT_PATTERN.search(signal_text))
+    complete_diagram = bool(COMPLETE_DIAGRAM_PATTERN.search(signal_text))
+    summary_review_required = bool((summary or {}).get("review_required"))
+    summary_confidence = _coerce_confidence((summary or {}).get("confidence"))
+    low_confidence_summary = bool(summary) and summary_confidence > 0 and summary_confidence < 0.45
+
+    if low_information and not logo_like and complete_diagram and summary_confidence >= 0.72 and not summary_review_required:
+        low_information = False
+    if complete_diagram and not low_information:
+        partial_fragment = False
+
+    return {
+        "low_information": low_information,
+        "partial_fragment": partial_fragment and not low_information,
+        "complete_diagram": complete_diagram,
+        "summary_review_required": summary_review_required,
+        "low_confidence_summary": low_confidence_summary,
+        "summary_confidence": summary_confidence,
+    }
 
 
 def _build_preview_text(

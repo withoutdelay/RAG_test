@@ -22,6 +22,7 @@ from app.services.generation import (
     GenerationNotFoundError,
     GenerationService,
     GenerationValidationError,
+    LegacyGenerationDisabledError,
 )
 
 
@@ -32,7 +33,12 @@ def get_generation_service() -> GenerationService:
     return GenerationService()
 
 
-@router.post("/start", response_model=APIResponse[GenerationStartData], status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/start",
+    response_model=APIResponse[GenerationStartData],
+    status_code=status.HTTP_202_ACCEPTED,
+    include_in_schema=False,
+)
 async def start_generation(
     payload: GenerationStartRequest,
     session: AsyncSession = Depends(get_db_session),
@@ -40,6 +46,8 @@ async def start_generation(
 ) -> APIResponse[GenerationStartData]:
     try:
         task = await service.start_generation(session=session, payload=payload)
+    except LegacyGenerationDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
     except GenerationValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -54,7 +62,7 @@ async def start_generation(
     )
 
 
-@router.get("/{task_id}", response_model=APIResponse[GenerationTaskRead])
+@router.get("/{task_id}", response_model=APIResponse[GenerationTaskRead], include_in_schema=False)
 async def get_generation_task(
     task_id: UUID,
     session: AsyncSession = Depends(get_db_session),
@@ -62,17 +70,26 @@ async def get_generation_task(
 ) -> APIResponse[GenerationTaskRead]:
     try:
         task = await service.get_task(session=session, task_id=task_id)
+    except LegacyGenerationDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
     except GenerationNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(code=200, message="success", data=GenerationTaskRead.model_validate(task))
 
 
-@router.get("/{task_id}/stream")
+@router.get("/{task_id}/stream", include_in_schema=False)
 async def stream_generation(
     task_id: UUID,
     session: AsyncSession = Depends(get_db_session),
     service: GenerationService = Depends(get_generation_service),
 ) -> StreamingResponse:
+    try:
+        await service.get_task(session=session, task_id=task_id)
+    except LegacyGenerationDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
+    except GenerationNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
     async def event_source():
         try:
             async for event_name, payload in service.iter_stream_events(session=session, task_id=task_id):
@@ -84,7 +101,11 @@ async def stream_generation(
     return StreamingResponse(event_source(), media_type="text/event-stream")
 
 
-@router.post("/{task_id}/outline/confirm", response_model=APIResponse[OutlineConfirmData])
+@router.post(
+    "/{task_id}/outline/confirm",
+    response_model=APIResponse[OutlineConfirmData],
+    include_in_schema=False,
+)
 async def confirm_outline(
     task_id: UUID,
     payload: OutlineConfirmRequest,
@@ -93,6 +114,8 @@ async def confirm_outline(
 ) -> APIResponse[OutlineConfirmData]:
     try:
         task = await service.confirm_outline(session=session, task_id=task_id, payload=payload)
+    except LegacyGenerationDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
     except GenerationNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except GenerationValidationError as exc:
@@ -116,7 +139,11 @@ async def confirm_outline(
     )
 
 
-@router.post("/{task_id}/sections/{section_index}/rewrite", response_model=APIResponse[SectionRewriteData])
+@router.post(
+    "/{task_id}/sections/{section_index}/rewrite",
+    response_model=APIResponse[SectionRewriteData],
+    include_in_schema=False,
+)
 async def rewrite_section(
     task_id: UUID,
     section_index: int,
@@ -131,6 +158,8 @@ async def rewrite_section(
             section_index=section_index,
             payload=payload,
         )
+    except LegacyGenerationDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
     except GenerationNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except GenerationValidationError as exc:

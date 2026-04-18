@@ -10,13 +10,20 @@ from app.services.retrieval.asset_service import (
     AssetCard,
     _asset_anchor_boost,
     _asset_noise_penalty,
+    _asset_quality_flags,
     _asset_summary_boost,
     _asset_taxonomy_boost,
     _build_asset_display_title,
     _build_preview_text,
     _derive_visual_role,
 )
-from app.services.retrieval.service import build_evidence_items, build_evidence_search_plan, filter_evidence_results
+from app.services.retrieval.service import (
+    EvidenceBundleService,
+    build_case_fallback_evidence_items,
+    build_evidence_items,
+    build_evidence_search_plan,
+    filter_evidence_results,
+)
 from app.services.vectorstore.chunker import Chunker
 from app.services.vectorstore.embedder import Embedder
 from app.services.vectorstore.block_taxonomy import infer_target_taxonomy
@@ -213,6 +220,41 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         self.assertEqual(plan[1][0], "global_fallback_relaxed_industry")
         self.assertIsNone(plan[1][2].industry)
 
+    def test_build_case_fallback_evidence_items_creates_case_summary_entries(self) -> None:
+        items = build_case_fallback_evidence_items(
+            [
+                {
+                    "sample_id": "sample-a",
+                    "file_name": "历史方案A.docx",
+                    "score": 0.52,
+                    "reason": "query_overlap=LCI,同步电机",
+                    "top_level_titles": ["1 工厂设计环境", "2 供货范围", "3 系统方案"],
+                    "profile": "mixed_engineering_doc",
+                    "library_track": "pilot_main",
+                }
+            ]
+        )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["type"], "case_summary")
+        self.assertEqual(items[0]["source_chunk_type"], "CASE_SUMMARY")
+        self.assertEqual(items[0]["metadata"]["fallback_source"], "case_library")
+        self.assertIn("供货范围", items[0]["raw_content"])
+
+    def test_compute_quality_score_uses_discounted_case_fallback_formula(self) -> None:
+        service = EvidenceBundleService()
+        score = service._compute_quality_score(
+            [
+                {"relevance_score": 0.51},
+                {"relevance_score": 0.48},
+                {"relevance_score": 0.46},
+            ],
+            quality_source="case_fallback",
+        )
+
+        self.assertGreater(score, 0)
+        self.assertLess(score, 0.70)
+
     def test_embedder_returns_configured_dimension(self) -> None:
         embedder = Embedder()
         vector = asyncio.run(embedder.embed_text("110kV 变电站综合自动化方案"))
@@ -250,6 +292,26 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     Embedder()
         get_settings.cache_clear()
+
+    def test_embedder_passes_local_files_only_flag_to_sentence_transformer(self) -> None:
+        mock_model = object()
+        with patch("app.services.vectorstore.embedder.SentenceTransformer", return_value=mock_model) as mock_loader:
+            with patch.dict(
+                os.environ,
+                {
+                    "EMBEDDING_BACKEND": "sentence-transformers",
+                    "EMBEDDING_MODEL": "BAAI/bge-large-zh-v1.5",
+                    "EMBEDDING_LOCAL_FILES_ONLY": "true",
+                },
+                clear=False,
+            ):
+                get_settings.cache_clear()
+                embedder = Embedder()
+
+        get_settings.cache_clear()
+
+        self.assertIs(embedder._model, mock_model)
+        mock_loader.assert_called_once_with("BAAI/bge-large-zh-v1.5", local_files_only=True)
 
     def test_asset_taxonomy_boost_prefers_main_circuit_figure(self) -> None:
         target = infer_target_taxonomy(
@@ -319,6 +381,160 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         )
 
         self.assertGreater(_asset_noise_penalty(card=card, target_section_type="main_circuit_scheme"), 0.3)
+
+    def test_asset_noise_penalty_demotes_layout_illustrations_for_overall_solution(self) -> None:
+        card = AssetCard(
+            asset_card_id="asset:layout",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="样板.docx",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="illustration",
+            risk_level="low",
+            usage_mode="reference_only",
+            review_required=False,
+            page_no=12,
+            heading_path="总布置图",
+            title="方案一高度关系示意",
+            display_title="方案一高度关系示意",
+            caption=None,
+            source_ref=None,
+            asset_uri="s3://asset",
+            preview_text="该图用于说明新SFC顶部与电缆层架相对地面的高度关系。",
+            retrieval_text="SFC 高度关系 外观图",
+            section_type="cabinet_layout",
+            equipment_type="vfd",
+            content_form="figure",
+            metadata={},
+        )
+
+        self.assertGreater(_asset_noise_penalty(card=card, target_section_type="overall_solution"), 0.3)
+        self.assertEqual(_asset_noise_penalty(card=card, target_section_type="cabinet_layout"), 0.0)
+
+    def test_asset_noise_penalty_demotes_unfocused_tables_for_interlock_sections(self) -> None:
+        spare_table = AssetCard(
+            asset_card_id="asset:spares",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+            doc_type="historical_proposal",
+            asset_type="table",
+            visual_role="table_asset",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=40,
+            heading_path="8 备品备件清单",
+            title="8 备品备件清单",
+            display_title="8 备品备件清单",
+            caption=None,
+            source_ref=None,
+            asset_uri="s3://asset",
+            preview_text="备品备件名称、型号、数量",
+            retrieval_text="备品备件 清单 型号 数量",
+            section_type="supply_scope",
+            equipment_type="motor",
+            content_form="bom_table",
+            metadata={},
+        )
+        signal_table = AssetCard(
+            asset_card_id="asset:signals",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+            doc_type="historical_proposal",
+            asset_type="table",
+            visual_role="table_asset",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=18,
+            heading_path="DCS/PLC 接口信号表",
+            title="DCS/PLC 接口信号表",
+            display_title="DCS/PLC 接口信号表",
+            caption=None,
+            source_ref=None,
+            asset_uri="s3://asset",
+            preview_text="启动允许、故障、报警、断路器反馈、联锁保护信号",
+            retrieval_text="DCS PLC 接口 信号 联锁 保护 断路器反馈",
+            section_type="protection_interlock",
+            equipment_type="motor",
+            content_form="interface_table",
+            metadata={},
+        )
+
+        self.assertGreater(
+            _asset_noise_penalty(card=spare_table, target_section_type="protection_interlock"),
+            _asset_noise_penalty(card=signal_table, target_section_type="protection_interlock") + 0.4,
+        )
+
+    def test_asset_noise_penalty_demotes_auxiliary_lube_curves_for_vfd_sections(self) -> None:
+        lube_curve = AssetCard(
+            asset_card_id="asset:lube",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=29,
+            heading_path="应急润滑油需求曲线",
+            title="应急润滑油需求曲线",
+            display_title="应急润滑油需求曲线",
+            caption=None,
+            source_ref=None,
+            asset_uri="s3://asset",
+            preview_text="润滑油流量与时间曲线",
+            retrieval_text="应急润滑油 需求曲线 流量 时间",
+            section_type="motor_spec",
+            equipment_type="motor",
+            content_form="figure",
+            metadata={},
+        )
+        lci_diagram = AssetCard(
+            asset_card_id="asset:lci",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=7,
+            heading_path="4.1 LCI 变频软起系统方案",
+            title="LCI变频软起系统图",
+            display_title="LCI变频软起系统图",
+            caption=None,
+            source_ref=None,
+            asset_uri="s3://asset",
+            preview_text="LCI、SFC、同步电机、励磁柜和DCS接口关系",
+            retrieval_text="LCI SFC 变频软起 同步切换 工频切换 主回路",
+            section_type="vfd_spec",
+            equipment_type="lci",
+            content_form="figure",
+            metadata={},
+        )
+
+        self.assertGreater(
+            _asset_noise_penalty(card=lube_curve, target_section_type="vfd_spec"),
+            _asset_noise_penalty(card=lci_diagram, target_section_type="vfd_spec") + 0.3,
+        )
 
     def test_asset_anchor_boost_prefers_same_document_and_heading_family(self) -> None:
         card = AssetCard(
@@ -401,6 +617,134 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
 
         self.assertGreater(strong, weak)
         self.assertGreater(strong, 0.1)
+
+    def test_asset_quality_flags_and_penalty_demote_cropped_fragments(self) -> None:
+        fragment = AssetCard(
+            asset_card_id="asset:fragment",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=None,
+            heading_path="3 系统方案 System Solution",
+            title="symbol / cropped figure fragment",
+            display_title="symbol / cropped figure fragment",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/fragment.png",
+            preview_text="该候选图仅显示一个黑色三角形图形，无法确认其是否属于变频器系统示意图中的有效结构内容。",
+            retrieval_text="symbol cropped figure fragment",
+            section_type="main_circuit_scheme",
+            equipment_type="motor_drive",
+            content_form="figure",
+            metadata={
+                "semantic_summary": {
+                    "status": "summarized",
+                    "title_hint": "symbol / cropped figure fragment",
+                    "summary": "该候选图仅显示一个黑色三角形图形，无法确认其是否属于变频器系统示意图中的有效结构内容。",
+                    "review_required": True,
+                    "confidence": 0.28,
+                }
+            },
+            semantic_summary_text="该候选图仅显示一个黑色三角形图形，无法确认其是否属于变频器系统示意图中的有效结构内容。",
+            semantic_summary_confidence=0.28,
+        )
+        complete = AssetCard(
+            asset_card_id="asset:complete",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=7,
+            heading_path="4.1 LCI 变频软起系统方案",
+            title="LCI变频软起系统图",
+            display_title="LCI变频软起系统图",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/lci.png",
+            preview_text="该图展示了LCI变频软起系统的主电力链路及其与本地PLC、励磁柜和DCS的接口关系。",
+            retrieval_text="LCI 变频软起 系统图 主电力链路 本地PLC 励磁柜 DCS",
+            section_type="main_circuit_scheme",
+            equipment_type="motor_drive",
+            content_form="figure",
+            metadata={
+                "semantic_summary": {
+                    "status": "summarized",
+                    "title_hint": "LCI变频软起系统图",
+                    "summary": "该图展示了LCI变频软起系统的主电力链路及其与本地PLC、励磁柜和DCS的接口关系。",
+                    "review_required": False,
+                    "confidence": 0.86,
+                }
+            },
+            semantic_summary_text="该图展示了LCI变频软起系统的主电力链路及其与本地PLC、励磁柜和DCS的接口关系。",
+            semantic_summary_confidence=0.86,
+        )
+
+        fragment_flags = _asset_quality_flags(card=fragment)
+        complete_flags = _asset_quality_flags(card=complete)
+
+        self.assertTrue(fragment_flags["low_information"])
+        self.assertFalse(complete_flags["low_information"])
+        self.assertTrue(complete_flags["complete_diagram"])
+        self.assertGreater(
+            _asset_noise_penalty(card=fragment, target_section_type="main_circuit_scheme"),
+            _asset_noise_penalty(card=complete, target_section_type="main_circuit_scheme") + 0.5,
+        )
+
+    def test_asset_quality_flags_marks_logo_assets_low_information(self) -> None:
+        logo = AssetCard(
+            asset_card_id="asset:logo",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="样板.pdf",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=1,
+            heading_path="1 主要功能特点",
+            title="大禹标识图",
+            display_title="大禹标识图",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/logo.png",
+            preview_text="DAYU ELECTRIC 公司标识",
+            retrieval_text="大禹标识图 DAYU ELECTRIC",
+            section_type="unknown",
+            equipment_type="generic",
+            content_form="figure",
+            metadata={
+                "semantic_summary": {
+                    "status": "summarized",
+                    "title_hint": "大禹标识图",
+                    "summary": "该图为公司标识，不是工程方案图。",
+                    "confidence": 0.98,
+                    "review_required": False,
+                }
+            },
+            semantic_summary_text="该图为公司标识，不是工程方案图。",
+            semantic_summary_confidence=0.98,
+        )
+
+        self.assertTrue(_asset_quality_flags(card=logo)["low_information"])
 
     def test_build_preview_text_uses_semantic_summary_when_context_is_sparse(self) -> None:
         preview = _build_preview_text(

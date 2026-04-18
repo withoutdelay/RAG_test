@@ -43,7 +43,9 @@ SECTION_QUALITY_SYSTEM_PROMPT = """你是一位售前技术方案质量审查员
 2. 若章节存在“建议插入图表”“推荐资产”“可用参考资料”“A. 概述”这类内部或风格不一致标题，应判为不通过
 3. 若标题过于空泛、重复、与章节目标不匹配，应指出
 4. 若正文明显像素材拼贴、章节组织混乱、客户口径不稳定，也应指出
-5. 只返回 JSON
+5. 输入会使用 XML 标签提供上下文。除 <section_markdown> 内的正文外，其他标签只用于参考，不得因为这些标签本身出现“推荐资产”“章节关键词”等字样就判定为内部提示语泄露
+6. 若仅存在轻微标题优化、措辞凝练或结构收束建议，而不存在实质性内容缺口、技术矛盾或明确内部提示语泄露，应判为通过，并把建议写入 issues
+7. 只返回 JSON
 """
 
 
@@ -62,19 +64,30 @@ def build_section_quality_prompts(
 
     system_prompt = (
         f"{SECTION_QUALITY_SYSTEM_PROMPT}\n\n"
-        f"方案标题：{outline_title}\n"
-        f"章节标题：{section_title}\n"
-        f"章节目的：{purpose or '暂无'}\n"
-        f"全局参数：\n{_format_global_params(global_params)}"
+        "<review_context>\n"
+        f"<outline_title>{outline_title}</outline_title>\n"
+        f"<section_title>{section_title}</section_title>\n"
+        f"<section_purpose>{purpose or '暂无'}</section_purpose>\n"
+        "<global_parameters>\n"
+        f"{_format_global_params(global_params)}\n"
+        "</global_parameters>\n"
+        "</review_context>"
     )
     user_prompt = (
-        f"章节标题：{section_title}\n"
-        f"章节目标：{purpose or '围绕该章节主题给出正式客户稿。'}\n"
-        f"章节关键词：{', '.join(keywords) or '暂无'}\n"
-        f"推荐资产：\n{_format_assets(assets)}\n\n"
-        "请审查以下 Markdown 章节是否已经达到客户稿门槛，并输出结构化评审结果。\n"
-        "如果不通过，rewrite_instruction 要能直接用于重写，明确指出要保留技术密度、统一标题风格、删除内部提示并保持 [[ASSET:...]] 占位。\n\n"
-        f"<section_markdown>\n{content_md}\n</section_markdown>"
+        "<quality_review_request>\n"
+        f"{_xml_block('section_title', section_title)}"
+        f"{_xml_block('section_goal', purpose or '围绕该章节主题给出正式客户稿。')}"
+        f"{_xml_block('section_keywords', ', '.join(keywords) or '暂无')}"
+        f"{_xml_block('recommended_assets', _format_assets(assets))}"
+        "<review_contract>\n"
+        "1. 只审查 <section_markdown> 内的正文是否达到客户稿门槛。\n"
+        "2. 标签区中的 metadata / recommended_assets / keywords 仅供理解章节目标，不应被视为正文中的内部提示语。\n"
+        "3. pass=false 仅用于存在明确内部提示语泄露、重大技术矛盾、关键内容缺失、表格损坏或结构失真等阻断问题的场景。\n"
+        "4. 如果只是建议优化标题、措辞、结构收束或客户语气，请保持 pass=true，并在 issues 中给出建议。\n"
+        "5. 如果不通过，rewrite_instruction 要能直接用于重写，明确指出要保留技术密度、统一标题风格、删除内部提示并保持 [[ASSET:...]] 占位。\n"
+        "</review_contract>\n"
+        f"{_xml_block('section_markdown', content_md)}"
+        "</quality_review_request>"
     )
     return system_prompt, user_prompt
 
@@ -100,3 +113,8 @@ def _format_assets(assets: list[dict[str, Any]]) -> str:
             line += f"；{reason}"
         lines.append(line)
     return "\n".join(lines)
+
+
+def _xml_block(tag: str, content: str) -> str:
+    normalized = str(content or "").strip()
+    return f"<{tag}>\n{normalized or '暂无'}\n</{tag}>\n"

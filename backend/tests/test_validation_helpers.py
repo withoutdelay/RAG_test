@@ -59,7 +59,10 @@ class ValidationHelperTests(unittest.TestCase):
             SimpleNamespace(
                 section_id="1",
                 title="技术架构",
-                content_md="当前方案待确认系统拓扑，使用 [Company_A] 占位，并引用旧项目A 的拓扑描述，补充了足够多的技术说明文字用于测试。",
+                content_md=(
+                    "当前方案待确认系统拓扑，使用 [Company_A] 占位，并引用旧项目A 的拓扑描述，"
+                    "补充了足够多的技术说明文字用于测试。\n\n[[ASSET:FIGURE:asset-001]]"
+                ),
                 citation_refs=[
                     {
                         "evidence_id": "ev_001",
@@ -71,7 +74,7 @@ class ValidationHelperTests(unittest.TestCase):
                 assumptions=[],
                 global_param_snapshot={"total_power": "5200kW"},
                 validator_result={
-                    "recommended_assets": [{"asset_id": "asset-001", "asset_type": "figure"}],
+                    "recommended_assets": [{"asset_id": "asset-001", "asset_type": "figure", "risk_level": "high"}],
                     "reuse_pack": {"banned_terms": ["旧项目A"]},
                 },
             )
@@ -85,7 +88,7 @@ class ValidationHelperTests(unittest.TestCase):
         )
 
         self.assertEqual({item["code"] for item in errors}, {"VAL002", "VAL003", "VAL006", "VAL007", "VAL008"})
-        self.assertEqual({item["code"] for item in warnings}, {"VAL101", "VAL102", "VAL103", "VAL104"})
+        self.assertEqual({item["code"] for item in warnings}, {"VAL101", "VAL102", "VAL103"})
         self.assertEqual({item["code"] for item in section_results["1"]["errors"]}, {"VAL006", "VAL007", "VAL008"})
 
     def test_collect_validation_findings_flags_similarity_and_parameter_replacement_risk(self) -> None:
@@ -247,7 +250,85 @@ class ValidationHelperTests(unittest.TestCase):
         self.assertNotIn("VAL005", {item["code"] for item in errors})
         self.assertNotIn("VAL005", {item["code"] for item in section_results["3"]["errors"]})
 
-    def test_collect_validation_findings_blocks_internal_heading_and_warns_quality_gate(self) -> None:
+    def test_collect_validation_findings_skips_val103_when_case_fallback_is_acceptable(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.6200"),
+            content={
+                "results": [
+                    {
+                        "evidence_id": "case_ev_001",
+                        "source_doc_id": "sample-a",
+                        "source_title": "历史方案A",
+                        "type": "case_summary",
+                    }
+                ],
+                "fallback_results": [
+                    {
+                        "evidence_id": "case_ev_001",
+                        "source_doc_id": "sample-a",
+                        "source_title": "历史方案A",
+                        "type": "case_summary",
+                        "relevance_score": 0.51,
+                    }
+                ],
+                "quality_trace": {
+                    "primary_results_source": "case_fallback",
+                    "case_fallback_used": True,
+                    "case_fallback_count": 1,
+                    "case_fallback_top_score": 0.51,
+                },
+            },
+        )
+        outline = SimpleNamespace(outline_json={"title": "测试方案", "sections": []})
+
+        errors, warnings, _ = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=[],
+        )
+
+        self.assertEqual(errors, [])
+        self.assertNotIn("VAL103", {item["code"] for item in warnings})
+
+    def test_collect_validation_findings_warns_precisely_for_weak_case_fallback(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.5800"),
+            content={
+                "results": [],
+                "fallback_results": [
+                    {
+                        "evidence_id": "case_ev_001",
+                        "source_doc_id": "sample-a",
+                        "source_title": "历史方案A",
+                        "type": "case_summary",
+                        "relevance_score": 0.32,
+                    }
+                ],
+                "quality_trace": {
+                    "primary_results_source": "case_fallback",
+                    "case_fallback_used": True,
+                    "case_fallback_count": 1,
+                    "case_fallback_top_score": 0.32,
+                },
+            },
+        )
+        outline = SimpleNamespace(outline_json={"title": "测试方案", "sections": []})
+
+        _, warnings, _ = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=[],
+        )
+
+        warning = next(item for item in warnings if item["code"] == "VAL103")
+        self.assertIn("案例级 fallback", warning["message"])
+        self.assertEqual(warning["details"]["primary_results_source"], "case_fallback")
+
+    def test_collect_validation_findings_blocks_internal_heading_and_quality_gate(self) -> None:
         requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
         evidence_bundle = SimpleNamespace(
             quality_score=Decimal("0.9000"),
@@ -312,10 +393,339 @@ class ValidationHelperTests(unittest.TestCase):
         )
 
         self.assertIn("VAL010", {item["code"] for item in errors})
-        self.assertIn("VAL108", {item["code"] for item in warnings})
+        self.assertIn("VAL108", {item["code"] for item in errors})
         self.assertIn("VAL010", {item["code"] for item in section_results["3"]["errors"]})
+        self.assertIn("VAL108", {item["code"] for item in section_results["3"]["errors"]})
 
-    def test_build_review_task_blueprints_creates_manual_tasks_and_final_review(self) -> None:
+    def test_collect_validation_findings_skips_table_confirmation_when_table_is_already_materialized(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(quality_score=Decimal("0.9000"), content={"results": []})
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "12",
+                        "title": "供货范围",
+                        "mandatory": True,
+                        "expected_evidence_types": ["table"],
+                        "asset_required": True,
+                        "needs_human_review": True,
+                        "children": [],
+                    }
+                ],
+            }
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="12",
+                title="供货范围",
+                content_md=(
+                    "| 序号 | 设备 |\n"
+                    "| --- | --- |\n"
+                    "| 1 | LCI 变频软起动装置 |\n\n"
+                    "[[ASSET:TABLE:asset-table-1]]"
+                ),
+                citation_refs=[],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={
+                    "recommended_assets": [
+                        {"asset_id": "asset-table-1", "asset_type": "table", "risk_level": "high"}
+                    ]
+                },
+            )
+        ]
+
+        errors, _, section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+        )
+
+        self.assertNotIn("VAL006", {item["code"] for item in errors})
+        self.assertNotIn("VAL006", {item["code"] for item in section_results["12"]["errors"]})
+
+    def test_collect_validation_findings_accepts_quantity_unit_pairs_as_replaced(self) -> None:
+        requirement_card = SimpleNamespace(
+            content={"key_parameters": {"quantity": "1套软起系统，服务2台同步电机", "voltage_level": "10kV"}},
+            blocking_items=[],
+        )
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.9000"),
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_quantity",
+                        "source_doc_id": "doc_quantity",
+                        "source_title": "历史方案",
+                        "type": "section",
+                    }
+                ]
+            },
+        )
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "3",
+                        "title": "总体方案",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section", "parameter"],
+                        "asset_required": False,
+                        "parameter_sensitive": True,
+                        "needs_human_review": False,
+                        "children": [],
+                    }
+                ],
+            }
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="3",
+                title="总体方案",
+                content_md=(
+                    "本项目配置 1 套 LCI/SFC 变频软启动系统，服务 2 台 10kV 同步电机，"
+                    "用于完成高炉鼓风机启动、同步切换及转工频运行，关键参数已按当前项目替换。"
+                ),
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_quantity",
+                        "source_doc_id": "doc_quantity",
+                        "source_title": "历史方案",
+                        "type": "section",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={"quantity": "1套软起系统，服务2台同步电机", "voltage_level": "10kV"},
+                validator_result={
+                    "reuse_pack": {
+                        "must_replace_fields": ["quantity", "voltage_level"],
+                        "replacement_hints": {
+                            "quantity": "1套软起系统，服务2台同步电机",
+                            "voltage_level": "10kV",
+                        },
+                    }
+                },
+            )
+        ]
+
+        errors, warnings, section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+        )
+
+        self.assertNotIn("VAL009", {item["code"] for item in errors})
+        self.assertNotIn("VAL106", {item["code"] for item in warnings})
+        self.assertNotIn("VAL009", {item["code"] for item in section_results["3"]["errors"]})
+        self.assertNotIn("VAL106", {item["code"] for item in section_results["3"]["warnings"]})
+
+    def test_collect_validation_findings_skips_val104_when_table_asset_is_materialized(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.9000"),
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_table",
+                        "source_doc_id": "doc_table",
+                        "source_title": "历史方案",
+                        "type": "table",
+                    }
+                ]
+            },
+        )
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "3",
+                        "title": "供货范围",
+                        "mandatory": True,
+                        "expected_evidence_types": ["table"],
+                        "asset_required": True,
+                        "needs_human_review": False,
+                        "children": [],
+                    }
+                ],
+            }
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="3",
+                title="供货范围",
+                content_md=(
+                    "本章说明主要设备供货边界。\n\n"
+                    "| 序号 | 设备 | 数量 |\n"
+                    "|---|---|---:|\n"
+                    "| 1 | LCI/SFC 变频软起动系统 | 1 套 |\n"
+                    "| 2 | 同步电机接口 | 2 台 |\n"
+                ),
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_table",
+                        "source_doc_id": "doc_table",
+                        "source_title": "历史方案",
+                        "type": "table",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={
+                    "recommended_assets": [
+                        {"asset_id": "asset-table-1", "asset_type": "table", "risk_level": "high"}
+                    ]
+                },
+            )
+        ]
+
+        _, warnings, section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+        )
+
+        self.assertNotIn("VAL104", {item["code"] for item in warnings})
+        self.assertNotIn("VAL104", {item["code"] for item in section_results["3"]["warnings"]})
+
+    def test_collect_validation_findings_keeps_val104_for_missing_figure_placeholder(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.9000"),
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_figure",
+                        "source_doc_id": "doc_figure",
+                        "source_title": "历史方案",
+                        "type": "figure",
+                    }
+                ]
+            },
+        )
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "7",
+                        "title": "接口联锁方案",
+                        "mandatory": True,
+                        "expected_evidence_types": ["figure"],
+                        "asset_required": True,
+                        "needs_human_review": False,
+                        "children": [],
+                    }
+                ],
+            }
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="7",
+                title="接口联锁方案",
+                content_md="系统按主回路、控制回路和联锁回路组织接口说明，但尚未插入系统结构图引用。",
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_figure",
+                        "source_doc_id": "doc_figure",
+                        "source_title": "历史方案",
+                        "type": "figure",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={
+                    "recommended_assets": [
+                        {"asset_id": "asset-figure-1", "asset_type": "figure", "risk_level": "medium"}
+                    ]
+                },
+            )
+        ]
+
+        _, warnings, section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+        )
+
+        self.assertIn("VAL104", {item["code"] for item in warnings})
+        self.assertIn("VAL104", {item["code"] for item in section_results["7"]["warnings"]})
+
+    def test_collect_validation_findings_treats_declared_assumption_context_as_not_implicit(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.9000"),
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_assumption",
+                        "source_doc_id": "doc_assumption",
+                        "source_title": "历史方案",
+                        "type": "section",
+                    }
+                ]
+            },
+        )
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "2",
+                        "title": "供电条件",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section", "table"],
+                        "asset_required": False,
+                        "needs_human_review": False,
+                        "children": [],
+                    }
+                ],
+            }
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="2",
+                title="供电条件",
+                content_md=(
+                    "本章说明供电条件边界。\n\n"
+                    "### 待确认供电参数\n\n"
+                    "| 项目 | 状态 |\n"
+                    "|---|---|\n"
+                    "| 输入变压器型号 | 待确认 |\n"
+                    "注：表中待确认项目以最终技术协议及供货清单约定为准。"
+                ),
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_assumption",
+                        "source_doc_id": "doc_assumption",
+                        "source_title": "历史方案",
+                        "type": "section",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={},
+            )
+        ]
+
+        _, warnings, section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+        )
+
+        self.assertNotIn("VAL102", {item["code"] for item in warnings})
+        self.assertNotIn("VAL102", {item["code"] for item in section_results["2"]["warnings"]})
+
+    def test_build_review_task_blueprints_creates_manual_tasks_without_final_review_by_default(self) -> None:
         outline = SimpleNamespace(id=uuid4(), outline_json={"title": "测试方案"})
         existing_open_task = SimpleNamespace(
             status="open",
@@ -334,6 +744,12 @@ class ValidationHelperTests(unittest.TestCase):
                     "section_id": "1",
                     "section_title": "技术架构",
                     "message": "图表待确认",
+                },
+                {
+                    "code": "VAL108",
+                    "section_id": "3",
+                    "section_title": "总体方案",
+                    "message": "章节质量审查未通过",
                 },
             ],
             warnings=[
@@ -356,7 +772,24 @@ class ValidationHelperTests(unittest.TestCase):
         )
 
         task_types = {item["task_type"] for item in blueprints}
-        self.assertEqual(task_types, {"param_conflict", "figure_confirm", "content_review", "final_review"})
+        self.assertEqual(task_types, {"param_conflict", "figure_confirm", "content_review"})
+        blocking_by_code = {item["payload"]["code"]: item["blocking_level"] for item in blueprints}
+        self.assertEqual(blocking_by_code["VAL108"], "P0")
+        self.assertEqual(blocking_by_code["VAL105"], "P1")
+
+    def test_build_review_task_blueprints_can_opt_in_final_review(self) -> None:
+        outline = SimpleNamespace(id=uuid4(), outline_json={"title": "测试方案"})
+
+        blueprints = build_review_task_blueprints(
+            errors=[],
+            warnings=[],
+            outline=outline,
+            draft_version=1,
+            existing_tasks=[],
+            require_final_review=True,
+        )
+
+        self.assertEqual([item["task_type"] for item in blueprints], ["final_review"])
 
     def test_derive_validation_status_marks_review_and_passed(self) -> None:
         self.assertEqual(

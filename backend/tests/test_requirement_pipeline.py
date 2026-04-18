@@ -52,10 +52,32 @@ class RequirementPipelineHelperTests(unittest.TestCase):
                 "product_line": "hv_vfd",
                 "industry": "电气",
                 "business_objective": "提升系统稳定性",
+                "key_parameters": {"voltage_level": "10kV", "motor_type": "同步电机"},
+                "source_excerpt": "本项目采用LCI软起动，需接入DCS并保留联锁接口。",
             }
         )
         self.assertIn("hv_vfd", query)
         self.assertIn("电气", query)
+        self.assertIn("10kV", query)
+        self.assertIn("同步电机", query)
+        self.assertIn("LCI", query)
+        self.assertIn("DCS", query)
+
+    def test_build_requirement_query_does_not_inject_lci_for_generic_hv_vfd(self) -> None:
+        query = build_requirement_query(
+            {
+                "project_name": "110kV变电站智能化项目",
+                "product_line": "hv_vfd",
+                "industry": "电气",
+                "business_objective": "提供综合自动化改造和高压变频器配置方案",
+                "source_excerpt": "方案采用站控层、间隔层和网络层架构，配置HV-VFD高压变频器。",
+            }
+        )
+
+        self.assertIn("高压变频器", query)
+        self.assertIn("HV-VFD", query)
+        self.assertNotIn("LCI", query)
+        self.assertNotIn("软起动", query)
 
     def test_build_evidence_items_translates_retrieval_results(self) -> None:
         items = build_evidence_items(

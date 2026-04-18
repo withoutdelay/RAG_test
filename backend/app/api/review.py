@@ -10,12 +10,17 @@ from app.db import get_db_session
 from app.schemas.common import APIResponse
 from app.schemas.review import ReviewActionData, ReviewActionRequest, ReviewPointRead, ReviewRejectRequest
 from app.services.generation import GenerationNotFoundError, GenerationService, GenerationValidationError
+from app.services.generation import LegacyGenerationDisabledError
 
 
 router = APIRouter()
 
 
-@router.get("/generation/{task_id}/reviews", response_model=APIResponse[list[ReviewPointRead]])
+@router.get(
+    "/generation/{task_id}/reviews",
+    response_model=APIResponse[list[ReviewPointRead]],
+    include_in_schema=False,
+)
 async def list_generation_reviews(
     task_id: UUID,
     session: AsyncSession = Depends(get_db_session),
@@ -23,6 +28,8 @@ async def list_generation_reviews(
 ) -> APIResponse[list[ReviewPointRead]]:
     try:
         reviews = await service.list_reviews(session=session, task_id=task_id)
+    except LegacyGenerationDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
     except GenerationNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(
@@ -32,7 +39,11 @@ async def list_generation_reviews(
     )
 
 
-@router.post("/review/{review_id}/approve", response_model=APIResponse[ReviewActionData])
+@router.post(
+    "/review/{review_id}/approve",
+    response_model=APIResponse[ReviewActionData],
+    include_in_schema=False,
+)
 async def approve_review(
     review_id: UUID,
     payload: ReviewActionRequest,
@@ -41,6 +52,8 @@ async def approve_review(
 ) -> APIResponse[ReviewActionData]:
     try:
         result = await service.approve_review(session=session, review_id=review_id, feedback=payload.feedback)
+    except LegacyGenerationDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
     except GenerationNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except GenerationValidationError as exc:
@@ -48,7 +61,11 @@ async def approve_review(
     return APIResponse(code=200, message="success", data=ReviewActionData.model_validate(result))
 
 
-@router.post("/review/{review_id}/reject", response_model=APIResponse[ReviewActionData])
+@router.post(
+    "/review/{review_id}/reject",
+    response_model=APIResponse[ReviewActionData],
+    include_in_schema=False,
+)
 async def reject_review(
     review_id: UUID,
     payload: ReviewRejectRequest,
@@ -57,6 +74,8 @@ async def reject_review(
 ) -> APIResponse[ReviewActionData]:
     try:
         result = await service.reject_review(session=session, review_id=review_id, feedback=payload.feedback)
+    except LegacyGenerationDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(exc)) from exc
     except GenerationNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except GenerationValidationError as exc:

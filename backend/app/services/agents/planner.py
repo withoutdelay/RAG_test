@@ -31,7 +31,7 @@ class PlannerAgent:
                 session_id=task_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=1200,
+                max_tokens=2000,
                 metadata={
                     "project_name": project_name,
                     "instructions": instructions,

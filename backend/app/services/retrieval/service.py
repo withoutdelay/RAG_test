@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -19,6 +20,97 @@ from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationErro
 from app.services.vectorstore.chunk_quality import flatten_heading_text, is_noise_chunk
 from app.services.vectorstore.retriever import Retriever
 
+PRODUCT_LINE_QUERY_HINTS: dict[str, tuple[str, ...]] = {
+    "hv_vfd": ("高压变频", "高压变频器", "HV-VFD", "变频器"),
+}
+TECHNICAL_QUERY_TERMS = (
+    "LCI",
+    "变频",
+    "变频器",
+    "软起",
+    "软起动",
+    "同步电机",
+    "异步电机",
+    "永磁电机",
+    "鼓风机",
+    "高炉鼓风机",
+    "环冷风机",
+    "压缩机",
+    "DCS",
+    "PLC",
+    "联锁",
+    "接口",
+    "供货范围",
+    "输入变压器",
+    "输出变压器",
+    "控制盘",
+)
+TECHNICAL_PATTERN = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:kV|KV|V|MW|kW|KW|MVA|kVA|Hz|A)\b|"
+    r"(?:同步电机|异步电机|永磁电机|高炉鼓风机|鼓风机|压缩机|LCI|DCS|PLC|联锁|供货范围|接口|变频器|软起动)",
+    re.IGNORECASE,
+)
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for raw_value in values:
+        value = str(raw_value or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _normalize_query_values(values: Any) -> list[str]:
+    if isinstance(values, dict):
+        flattened: list[str] = []
+        for key, value in values.items():
+            normalized_value = str(value or "").strip()
+            if normalized_value:
+                flattened.append(normalized_value)
+            normalized_key = str(key or "").strip()
+            if normalized_key and any(token in normalized_key.casefold() for token in ("voltage", "power", "motor", "control", "interface")):
+                flattened.append(normalized_key)
+        return _dedupe_keep_order(flattened)
+    if isinstance(values, (list, tuple, set)):
+        return _dedupe_keep_order([str(item) for item in values if str(item or "").strip()])
+    normalized = str(values or "").strip()
+    return [normalized] if normalized else []
+
+
+def _extract_requirement_query_hints(content: dict[str, Any]) -> list[str]:
+    hints: list[str] = []
+    product_line = str(content.get("product_line") or "").strip().lower()
+    hints.extend(PRODUCT_LINE_QUERY_HINTS.get(product_line, ()))
+    for value in _normalize_query_values(content.get("key_parameters") or {}):
+        hints.append(value)
+    for value in _normalize_query_values(content.get("constraints") or []):
+        hints.append(value)
+    source_text = " ".join(
+        part
+        for part in (
+            str(content.get("business_objective") or "").strip(),
+            str(content.get("source_excerpt") or "").strip(),
+        )
+        if part
+    )
+    if source_text:
+        for pattern_match in TECHNICAL_PATTERN.findall(source_text):
+            if isinstance(pattern_match, tuple):
+                for item in pattern_match:
+                    if item:
+                        hints.append(str(item))
+            elif pattern_match:
+                hints.append(str(pattern_match))
+        lowered_source = source_text.casefold()
+        for token in TECHNICAL_QUERY_TERMS:
+            if token.casefold() in lowered_source:
+                hints.append(token)
+    return _dedupe_keep_order(hints)
+
 
 def build_requirement_query(content: dict[str, Any]) -> str:
     parts = [
@@ -27,7 +119,8 @@ def build_requirement_query(content: dict[str, Any]) -> str:
         str(content.get("business_objective") or "").strip(),
         str(content.get("project_name") or "").strip(),
     ]
-    query = " ".join(part for part in parts if part)
+    parts.extend(_extract_requirement_query_hints(content))
+    query = " ".join(part for part in _dedupe_keep_order(parts) if part)
     return query or "售前方案 需求分析"
 
 
@@ -181,6 +274,49 @@ def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return items
 
 
+def build_case_fallback_evidence_items(case_candidates: list[dict[str, Any]], *, limit: int = 3) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for index, candidate in enumerate(case_candidates[:limit], start=1):
+        top_level_titles = [str(item).strip() for item in (candidate.get("top_level_titles") or []) if str(item).strip()]
+        retrieval_text = str(candidate.get("retrieval_text") or "").strip()
+        reason = str(candidate.get("reason") or "").strip()
+        summary_parts = [
+            f"匹配原因：{reason}" if reason else "",
+            f"可参考章节：{'；'.join(top_level_titles[:5])}" if top_level_titles else "",
+        ]
+        raw_content = "\n".join(part for part in summary_parts if part).strip() or retrieval_text[:420]
+        items.append(
+            {
+                "evidence_id": f"case_ev_{index:03d}",
+                "type": "case_summary",
+                "source_chunk_id": f"case:{candidate.get('sample_id')}",
+                "source_chunk_type": "CASE_SUMMARY",
+                "source_doc_id": str(candidate.get("sample_id") or ""),
+                "source_title": candidate.get("file_name"),
+                "page_range": [],
+                "heading_path": top_level_titles[:3],
+                "summary": raw_content[:180],
+                "raw_content": raw_content,
+                "relevance_score": float(candidate.get("score") or 0),
+                "reusability_score": round(min(max(float(candidate.get("score") or 0) * 0.92, 0.0), 1.0), 4),
+                "recommended_use": "可用于整份方案结构参考和章节定位。",
+                "risk_note": "当前为案例级 fallback 证据，非精确 chunk 命中。",
+                "section_type": "case_summary",
+                "equipment_type": "generic",
+                "content_form": "outline_summary",
+                "metadata": {
+                    "fallback_source": "case_library",
+                    "sample_id": candidate.get("sample_id"),
+                    "profile": candidate.get("profile"),
+                    "library_track": candidate.get("library_track"),
+                    "reason": reason,
+                    "top_level_titles": top_level_titles[:8],
+                },
+            }
+        )
+    return items
+
+
 class EvidenceBundleService:
     def __init__(
         self,
@@ -238,6 +374,7 @@ class EvidenceBundleService:
         retrieval_strategy = search_plan[0][0]
         active_filters = search_plan[0][2]
         results: list[dict[str, Any]] = []
+        retrieval_attempts: list[dict[str, Any]] = []
 
         for strategy_name, search_project_id, filters in search_plan:
             response = await self.retriever.search(
@@ -252,12 +389,35 @@ class EvidenceBundleService:
             )
             raw_results = [item.model_dump(mode="json") for item in response.results]
             results = filter_evidence_results(raw_results, limit=top_k)
+            retrieval_attempts.append(
+                {
+                    "strategy": strategy_name,
+                    "project_scope": str(search_project_id) if search_project_id is not None else "global",
+                    "raw_result_count": len(raw_results),
+                    "filtered_result_count": len(results),
+                    "filters": filters.model_dump(exclude_none=True),
+                }
+            )
             retrieval_strategy = strategy_name
             active_filters = filters
             if results:
                 break
         evidence_items = build_evidence_items(results)
-        quality_score = self._compute_quality_score(results)
+        fallback_items = build_case_fallback_evidence_items(case_candidates, limit=min(top_k, 3)) if not evidence_items else []
+        bundle_results = evidence_items or fallback_items
+        quality_source = "retrieval_results" if evidence_items else ("case_fallback" if fallback_items else "empty")
+        quality_score = self._compute_quality_score(bundle_results, quality_source=quality_source)
+        quality_trace = {
+            "query": query,
+            "query_hints": _extract_requirement_query_hints(card.content or {}),
+            "search_attempts": retrieval_attempts,
+            "case_candidate_count": len(case_candidates),
+            "case_fallback_used": bool(fallback_items),
+            "case_fallback_count": len(fallback_items),
+            "case_fallback_top_score": max((float(item.get("relevance_score") or 0) for item in fallback_items), default=0.0),
+            "primary_results_source": quality_source,
+            "primary_result_count": len(bundle_results),
+        }
         retrieval_version = await self._next_version(session=session, project_id=project_id)
 
         bundle = EvidenceBundle(
@@ -269,7 +429,9 @@ class EvidenceBundleService:
                 "filters": active_filters.model_dump(exclude_none=True),
                 "retrieval_strategy": retrieval_strategy,
                 "case_candidates": case_candidates,
-                "results": evidence_items,
+                "results": bundle_results,
+                "fallback_results": fallback_items,
+                "quality_trace": quality_trace,
                 "source_requirement_card_id": str(card.id),
             },
             quality_score=quality_score,
@@ -333,9 +495,21 @@ class EvidenceBundleService:
         )
         return int(latest or 0) + 1
 
-    def _compute_quality_score(self, results: list[dict[str, Any]]) -> Decimal:
+    def _compute_quality_score(
+        self,
+        results: list[dict[str, Any]],
+        *,
+        quality_source: str = "retrieval_results",
+    ) -> Decimal:
         if not results:
             return Decimal("0.0000")
-        score = sum(float(item.get("score") or 0) for item in results[:3]) / min(len(results), 3)
-        bounded = min(max(score, 0.0), 1.0)
+        score_values = [
+            float(item.get("relevance_score") or item.get("score") or 0)
+            for item in results[:3]
+        ]
+        base_score = sum(score_values) / min(len(score_values), 3)
+        if quality_source == "case_fallback":
+            bounded = min(max(0.39 + (base_score * 0.35) + (min(len(score_values), 3) * 0.03), 0.0), 0.79)
+        else:
+            bounded = min(max(base_score, 0.0), 1.0)
         return Decimal(f"{bounded:.4f}")

@@ -290,6 +290,17 @@ def mark_outline_as_approved(
     return normalized
 
 
+def _advance_project_to_outline_state(
+    *,
+    project: Project,
+    outline: ProposalOutline,
+    status: str,
+) -> None:
+    project.current_outline_id = outline.id
+    project.current_draft_version = 0
+    project.status = status
+
+
 def build_outline_inputs(
     *,
     requirement_card: RequirementCard,
@@ -405,8 +416,7 @@ class OutlineService:
         session.add(outline)
         await session.flush()
 
-        project.current_outline_id = outline.id
-        project.status = "OUTLINE_READY"
+        _advance_project_to_outline_state(project=project, outline=outline, status="OUTLINE_READY")
         job.status = "succeeded"
         job.output_ref = {"outline_id": str(outline.id)}
         job.completed_at = datetime.now(timezone.utc)
@@ -448,8 +458,7 @@ class OutlineService:
 
         outline.outline_json = normalize_outline_payload(outline_json, project_name=project.name)
         outline.validator_status = "pending"
-        project.current_outline_id = outline.id
-        project.status = "OUTLINE_READY"
+        _advance_project_to_outline_state(project=project, outline=outline, status="OUTLINE_READY")
         await session.commit()
         await session.refresh(outline)
         return outline
@@ -481,8 +490,7 @@ class OutlineService:
             approved_by_user=approved_by_user,
         )
         outline.validator_status = "approved"
-        project.current_outline_id = outline.id
-        project.status = "OUTLINE_APPROVED"
+        _advance_project_to_outline_state(project=project, outline=outline, status="OUTLINE_APPROVED")
         await session.commit()
         await session.refresh(outline)
         return outline

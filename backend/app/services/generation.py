@@ -11,6 +11,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings, get_settings
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.generation_task import GenerationTask
@@ -40,15 +41,35 @@ class GenerationValidationError(ValueError):
     pass
 
 
+class LegacyGenerationDisabledError(GenerationValidationError):
+    pass
+
+
 class GenerationService:
+    """Legacy generation workflow.
+
+    The active production path is the composition/artifacts pipeline.
+    This service remains opt-in only for backward compatibility and tests.
+    """
+
     def __init__(
         self,
         *,
         llm_client: LLMClient | None = None,
         workflow: WorkflowOrchestrator | None = None,
+        settings: Settings | None = None,
     ) -> None:
+        self.settings = settings or get_settings()
         self.llm_client = llm_client or LLMClient()
         self.workflow = workflow or WorkflowOrchestrator()
+
+    def _ensure_legacy_generation_enabled(self) -> None:
+        if bool(getattr(self.settings, "legacy_generation_enabled", False)):
+            return
+        raise LegacyGenerationDisabledError(
+            "Legacy /generation workflow is disabled. Use the composition/artifacts pipeline instead: "
+            "/api/v1/projects/{project_id}/generate-outline and /api/v1/projects/{project_id}/generate-sections."
+        )
 
     async def start_generation(
         self,
@@ -56,6 +77,7 @@ class GenerationService:
         session: AsyncSession,
         payload: GenerationStartRequest,
     ) -> GenerationTask:
+        self._ensure_legacy_generation_enabled()
         project = await session.get(Project, payload.project_id)
         if not project:
             raise GenerationValidationError("Project not found")
@@ -103,6 +125,7 @@ class GenerationService:
             raise
 
     async def get_task(self, *, session: AsyncSession, task_id: UUID) -> GenerationTask:
+        self._ensure_legacy_generation_enabled()
         task = await session.get(GenerationTask, task_id)
         if not task:
             raise GenerationNotFoundError("Generation task not found")
@@ -115,6 +138,7 @@ class GenerationService:
         task_id: UUID,
         payload: OutlineConfirmRequest,
     ) -> GenerationTask:
+        self._ensure_legacy_generation_enabled()
         task = await self.get_task(session=session, task_id=task_id)
         if payload.outline is not None:
             task.outline = self._normalize_outline(payload.outline)
@@ -171,6 +195,7 @@ class GenerationService:
         section_index: int,
         payload: SectionRewriteRequest,
     ) -> dict[str, Any]:
+        self._ensure_legacy_generation_enabled()
         task = await self.get_task(session=session, task_id=task_id)
         sections_state = list(task.sections or [])
         if section_index < 0 or section_index >= len(sections_state):
@@ -212,6 +237,7 @@ class GenerationService:
         }
 
     async def list_reviews(self, *, session: AsyncSession, task_id: UUID) -> list[ReviewPoint]:
+        self._ensure_legacy_generation_enabled()
         await self.get_task(session=session, task_id=task_id)
         result = await session.scalars(
             select(ReviewPoint)
@@ -227,6 +253,7 @@ class GenerationService:
         review_id: UUID,
         feedback: str | None = None,
     ) -> dict[str, Any]:
+        self._ensure_legacy_generation_enabled()
         review = await self._get_review(session=session, review_id=review_id)
         if review.status != "pending":
             raise GenerationValidationError("Review point is not pending")
@@ -265,6 +292,7 @@ class GenerationService:
         review_id: UUID,
         feedback: str,
     ) -> dict[str, Any]:
+        self._ensure_legacy_generation_enabled()
         review = await self._get_review(session=session, review_id=review_id)
         if review.status != "pending":
             raise GenerationValidationError("Review point is not pending")
@@ -335,6 +363,7 @@ class GenerationService:
         session: AsyncSession,
         task_id: UUID,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        self._ensure_legacy_generation_enabled()
         task = await self.get_task(session=session, task_id=task_id)
 
         if task.outline:
