@@ -3718,9 +3718,15 @@ class SectionDraftService:
         quality_gate: SectionQualityGateService | None = None,
     ) -> None:
         self.executor = executor or ExecutorAgent()
-        self.asset_retriever = asset_retriever or AssetRetrievalService()
+        self._asset_retriever = asset_retriever
         self.case_library = case_library or CaseLibraryService()
         self.quality_gate = quality_gate or SectionQualityGateService(executor=self.executor)
+
+    @property
+    def asset_retriever(self) -> AssetRetrievalService:
+        if self._asset_retriever is None:
+            self._asset_retriever = AssetRetrievalService()
+        return self._asset_retriever
 
     async def generate_sections(
         self,

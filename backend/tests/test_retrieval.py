@@ -255,6 +255,12 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         self.assertGreater(score, 0)
         self.assertLess(score, 0.70)
 
+    def test_evidence_bundle_service_defers_retriever_initialization(self) -> None:
+        with patch("app.services.retrieval.service.Retriever", side_effect=AssertionError("retriever should be lazy")):
+            service = EvidenceBundleService()
+            with self.assertRaises(AssertionError):
+                _ = service.retriever
+
     def test_embedder_returns_configured_dimension(self) -> None:
         embedder = Embedder()
         vector = asyncio.run(embedder.embed_text("110kV 变电站综合自动化方案"))

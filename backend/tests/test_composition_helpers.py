@@ -4,6 +4,7 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.services.composition.outline_service import (
     OutlineService,
@@ -365,6 +366,15 @@ class CompositionHelperTests(unittest.TestCase):
         )
         section = service._find_section(outline=outline, section_id="1.1")
         self.assertEqual(section["title"], "项目背景")
+
+    def test_section_draft_service_defers_asset_retriever_initialization(self) -> None:
+        with patch(
+            "app.services.composition.section_service.AssetRetrievalService",
+            side_effect=AssertionError("asset retriever should be lazy"),
+        ):
+            service = SectionDraftService()
+            with self.assertRaises(AssertionError):
+                _ = service.asset_retriever
 
     def test_build_section_global_params_enriches_writer_context(self) -> None:
         params = build_section_global_params(

@@ -324,8 +324,14 @@ class EvidenceBundleService:
         retriever: Retriever | None = None,
         case_library: CaseLibraryService | None = None,
     ) -> None:
-        self.retriever = retriever or Retriever()
+        self._retriever = retriever
         self.case_library = case_library or CaseLibraryService()
+
+    @property
+    def retriever(self) -> Retriever:
+        if self._retriever is None:
+            self._retriever = Retriever()
+        return self._retriever
 
     async def retrieve_evidence(
         self,
