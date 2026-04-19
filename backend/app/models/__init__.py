@@ -7,6 +7,9 @@ from app.models.generation_task import GenerationTask
 from app.models.job import Job
 from app.models.knowledge_chunk import KnowledgeChunk
 from app.models.parsed_block import ParsedBlock
+from app.models.product_constraint import ProductConstraint
+from app.models.product_series import ProductSeries
+from app.models.product_standard_config import ProductStandardConfig
 from app.models.project import Project
 from app.models.project_export import ProjectExport
 from app.models.proposal_outline import ProposalOutline
@@ -15,6 +18,7 @@ from app.models.requirement_card import RequirementCard
 from app.models.review_point import ReviewPoint
 from app.models.review_task import ReviewTask
 from app.models.section_draft import SectionDraft
+from app.models.solution_snapshot import SolutionSnapshot
 from app.models.validation_report import ValidationReport
 
 __all__ = [
@@ -28,6 +32,9 @@ __all__ = [
     "KnowledgeChunk",
     "MaskingAuditLog",
     "ParsedBlock",
+    "ProductConstraint",
+    "ProductSeries",
+    "ProductStandardConfig",
     "Project",
     "ProjectExport",
     "ProposalOutline",
@@ -36,5 +43,6 @@ __all__ = [
     "ReviewPoint",
     "ReviewTask",
     "SectionDraft",
+    "SolutionSnapshot",
     "ValidationReport",
 ]

@@ -83,6 +83,50 @@ class EvidenceBundleRead(BaseModel):
     created_at: datetime
 
 
+class SolutionDesignRequest(BaseModel):
+    requirement_card_id: UUID | None = None
+    force_refresh: bool = True
+
+
+class SolutionSnapshotRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    requirement_card_id: UUID | None
+    version: int
+    status: str
+    solution_summary: str
+    selected_products: list[dict[str, Any]]
+    interface_plan: dict[str, Any]
+    key_constraints: list[str]
+    open_questions: list[str]
+    suggested_chapters: list[str]
+    selection_reason: dict[str, Any]
+    source_catalog_version: str | None = None
+    confirmation_notes: str | None
+    confirmed_by_user: bool
+    confirmed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SolutionUpdateRequest(BaseModel):
+    solution_summary: str | None = None
+    selected_products: list[dict[str, Any]] | None = None
+    interface_plan: dict[str, Any] | None = None
+    key_constraints: list[str] | None = None
+    open_questions: list[str] | None = None
+    suggested_chapters: list[str] | None = None
+    selection_reason: dict[str, Any] | None = None
+    confirmation_notes: str | None = None
+
+
+class SolutionConfirmRequest(BaseModel):
+    confirmation_notes: str | None = None
+    confirmed_by_user: bool = True
+
+
 class OutlineGenerateRequest(BaseModel):
     requirement_card_id: UUID | None = None
     evidence_bundle_id: UUID | None = None

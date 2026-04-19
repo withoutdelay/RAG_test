@@ -1,5 +1,23 @@
 # Presale Copilot
 
+当前版本：`2.3.0`
+
+## Super Dev 安装与触发
+
+推荐在宿主中保持以下入口一致：
+
+- `pip install -U super-dev`
+- `uv tool install super-dev`
+- `super-dev update`
+- Slash 入口：`/super-dev`
+- 消息前缀入口：`super-dev:`
+
+建议的宿主首句：
+
+```text
+super-dev: 请用 Super Dev 流程开始处理当前项目，先做 research，再产出 PRD、Architecture、UIUX 三文档，完成后停下来等我确认。
+```
+
 面向工业电气售前场景的方案生成系统。系统把客户需求、真实历史方案、图表资产和质量门禁串成一条端到端链路，目标不是“凭空写一份方案”，而是“优先复用相似历史方案中的高价值工程内容，再用 LLM 做受控改写、补齐和审校”。
 
 当前 MVP 的核心路线是 `reuse-first`：

@@ -27,6 +27,10 @@ from app.schemas.artifacts import (
     SectionDraftUpdateRequest,
     SectionGenerateRequest,
     SectionRegenerateRequest,
+    SolutionConfirmRequest,
+    SolutionDesignRequest,
+    SolutionSnapshotRead,
+    SolutionUpdateRequest,
     ValidationReportRead,
     ValidationTriggerRequest,
 )
@@ -36,6 +40,7 @@ from app.services.export import ExportService
 from app.services.jobs import JobService
 from app.services.requirement import RequirementService
 from app.services.retrieval import EvidenceBundleService
+from app.services.solution import SolutionService
 from app.services.validation import ValidationService
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
@@ -69,6 +74,10 @@ def get_validation_service() -> ValidationService:
 
 def get_export_service() -> ExportService:
     return ExportService()
+
+
+def get_solution_service() -> SolutionService:
+    return SolutionService()
 
 
 @router.post(
@@ -213,6 +222,100 @@ async def get_latest_evidence_bundle(
     except ArtifactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(code=200, message="success", data=EvidenceBundleRead.model_validate(bundle))
+
+
+@router.post("/projects/{project_id}/design-solution", response_model=APIResponse[SolutionSnapshotRead])
+async def design_solution(
+    project_id: UUID,
+    payload: SolutionDesignRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SolutionService = Depends(get_solution_service),
+) -> APIResponse[SolutionSnapshotRead]:
+    try:
+        snapshot = await service.design_solution(
+            session=session,
+            project_id=project_id,
+            requirement_card_id=payload.requirement_card_id,
+            force_refresh=payload.force_refresh,
+        )
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ArtifactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=SolutionSnapshotRead.model_validate(snapshot))
+
+
+@router.get("/projects/{project_id}/solutions/latest", response_model=APIResponse[SolutionSnapshotRead])
+async def get_latest_solution(
+    project_id: UUID,
+    session: AsyncSession = Depends(get_db_session),
+    service: SolutionService = Depends(get_solution_service),
+) -> APIResponse[SolutionSnapshotRead]:
+    try:
+        snapshot = await service.get_latest_solution(session=session, project_id=project_id)
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=SolutionSnapshotRead.model_validate(snapshot))
+
+
+@router.get("/projects/{project_id}/solutions", response_model=APIResponse[list[SolutionSnapshotRead]])
+async def list_solutions(
+    project_id: UUID,
+    limit: int = Query(default=10, ge=1, le=30),
+    session: AsyncSession = Depends(get_db_session),
+    service: SolutionService = Depends(get_solution_service),
+) -> APIResponse[list[SolutionSnapshotRead]]:
+    rows = await service.list_solutions(session=session, project_id=project_id, limit=limit)
+    return APIResponse(
+        code=200,
+        message="success",
+        data=[SolutionSnapshotRead.model_validate(row) for row in rows],
+    )
+
+
+@router.patch("/projects/{project_id}/solutions/{snapshot_id}", response_model=APIResponse[SolutionSnapshotRead])
+async def update_solution(
+    project_id: UUID,
+    snapshot_id: UUID,
+    payload: SolutionUpdateRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SolutionService = Depends(get_solution_service),
+) -> APIResponse[SolutionSnapshotRead]:
+    try:
+        snapshot = await service.update_solution(
+            session=session,
+            project_id=project_id,
+            snapshot_id=snapshot_id,
+            payload=payload.model_dump(exclude_unset=True),
+        )
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ArtifactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=SolutionSnapshotRead.model_validate(snapshot))
+
+
+@router.post("/projects/{project_id}/solutions/{snapshot_id}/confirm", response_model=APIResponse[SolutionSnapshotRead])
+async def confirm_solution(
+    project_id: UUID,
+    snapshot_id: UUID,
+    payload: SolutionConfirmRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: SolutionService = Depends(get_solution_service),
+) -> APIResponse[SolutionSnapshotRead]:
+    try:
+        snapshot = await service.confirm_solution(
+            session=session,
+            project_id=project_id,
+            snapshot_id=snapshot_id,
+            confirmation_notes=payload.confirmation_notes,
+            confirmed_by_user=payload.confirmed_by_user,
+        )
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ArtifactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=SolutionSnapshotRead.model_validate(snapshot))
 
 
 @router.post(

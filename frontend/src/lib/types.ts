@@ -111,6 +111,112 @@ export interface EvidenceBundle {
   created_at?: string;
 }
 
+export interface SolutionSelectedProduct {
+  role: string;
+  series_code: string;
+  name: string;
+  family?: string;
+  topology?: string;
+  rated_voltage?: string;
+  rated_power_kw?: number | null;
+  quantity: number;
+  config?: string;
+  vendor?: string;
+  rationale?: string;
+}
+
+export interface SolutionInterfacePlan {
+  dcs_protocol?: string;
+  io_allocation?: Record<string, number>;
+  notes?: string;
+}
+
+export interface SolutionSelectionReason {
+  matching_signals?: string[];
+  why_selected?: string[];
+  risk_flags?: string[];
+  source_mode?: string;
+  catalog_version?: string;
+  candidate_scores?: CatalogCandidateScore[];
+}
+
+export interface SolutionSnapshot {
+  id: string;
+  project_id: string;
+  requirement_card_id?: string | null;
+  version: number;
+  status: string;
+  solution_summary: string;
+  selected_products: SolutionSelectedProduct[];
+  interface_plan: SolutionInterfacePlan;
+  key_constraints: string[];
+  open_questions: string[];
+  suggested_chapters: string[];
+  selection_reason: SolutionSelectionReason;
+  source_catalog_version?: string | null;
+  confirmation_notes?: string | null;
+  confirmed_by_user: boolean;
+  confirmed_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CatalogCandidateScore {
+  series_code: string;
+  series_name: string;
+  score: number;
+  reasons: string[];
+}
+
+export interface ProductCatalogConstraint {
+  id?: string | null;
+  constraint_type: string;
+  condition: string;
+  action: string;
+  severity: string;
+}
+
+export interface ProductCatalogStandardConfig {
+  id?: string | null;
+  config_name: string;
+  components: Array<Record<string, unknown>>;
+  applicable_scenarios: string[];
+  description?: string | null;
+}
+
+export interface ProductCatalogSeries {
+  id?: string | null;
+  catalog_version: string;
+  is_published: boolean;
+  role_type: string;
+  family: string;
+  series_name: string;
+  code: string;
+  vendor?: string | null;
+  description?: string | null;
+  voltage_levels: string[];
+  min_power_kw?: number | null;
+  max_power_kw?: number | null;
+  topology?: string | null;
+  applicable_motors: string[];
+  applicable_loads: string[];
+  communication_protocols: string[];
+  io_allocation: Record<string, number>;
+  protection_features: string[];
+  preferred_scenarios: string[];
+  default_chapters: string[];
+  standard_configs: ProductCatalogStandardConfig[];
+  constraints: ProductCatalogConstraint[];
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface CatalogVersion {
+  catalog_version: string;
+  is_published: boolean;
+  series_count: number;
+}
+
 export interface OutlineNode {
   section_id: string;
   title: string;

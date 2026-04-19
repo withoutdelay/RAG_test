@@ -24,12 +24,13 @@ from app.models.section_draft import SectionDraft
 from app.models.validation_report import ValidationReport
 from app.services.evidence_binding import resolve_outline_evidence_bundle
 from app.services.composition.section_quality import analyze_section_heading_quality
+from app.services.solution.context import get_preferred_solution_snapshot
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
-HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008", "VAL009", "VAL010"}
+HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008", "VAL009", "VAL010", "VAL011", "VAL012", "VAL013"}
 CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103", "VAL104", "VAL105", "VAL106", "VAL107", "VAL108"}
-BLOCKING_CONTENT_REVIEW_CODES = {"VAL108"}
+BLOCKING_CONTENT_REVIEW_CODES = {"VAL011", "VAL012", "VAL013", "VAL108"}
 ASSUMPTION_HINTS = ("待确认", "待补充", "TBD", "暂定", "后续确认")
 DECLARED_ASSUMPTION_CONTEXT_TOKENS = (
     "以最终",
@@ -138,6 +139,7 @@ def collect_validation_findings(
     evidence_bundle: EvidenceBundle,
     outline: ProposalOutline,
     section_drafts: list[SectionDraft],
+    solution_snapshot: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, list[dict[str, Any]]]]]:
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -433,6 +435,34 @@ def collect_validation_findings(
             warnings.append(warning)
             section_results[section_id]["warnings"].append(warning)
 
+        if solution_snapshot is not None:
+            product_parameter_issue = _build_solution_parameter_issue(
+                section=section,
+                draft=draft,
+                solution_snapshot=solution_snapshot,
+            )
+            if product_parameter_issue is not None:
+                errors.append(product_parameter_issue)
+                section_results[section_id]["errors"].append(product_parameter_issue)
+
+            interface_issue = _build_solution_interface_issue(
+                section=section,
+                draft=draft,
+                solution_snapshot=solution_snapshot,
+            )
+            if interface_issue is not None:
+                errors.append(interface_issue)
+                section_results[section_id]["errors"].append(interface_issue)
+
+            supply_scope_issue = _build_solution_supply_scope_issue(
+                section=section,
+                draft=draft,
+                solution_snapshot=solution_snapshot,
+            )
+            if supply_scope_issue is not None:
+                errors.append(supply_scope_issue)
+                section_results[section_id]["errors"].append(supply_scope_issue)
+
         reuse_similarity = _compute_reuse_similarity(
             content=draft.content_md,
             reusable_blocks=reuse_pack.get("reusable_blocks") or [],
@@ -704,6 +734,7 @@ class ValidationService:
         outline = await self._resolve_outline(session=session, project_id=project_id, outline_id=outline_id)
         requirement_card = await self._resolve_requirement_card(session=session, outline=outline)
         evidence_bundle = await self._resolve_evidence_bundle(session=session, outline=outline)
+        solution_snapshot = await get_preferred_solution_snapshot(session=session, project_id=project_id)
         target_draft_version = draft_version or int(project.current_draft_version or 0)
         if target_draft_version <= 0:
             raise ArtifactValidationError("No draft version exists for this project")
@@ -735,6 +766,7 @@ class ValidationService:
             evidence_bundle=evidence_bundle,
             outline=outline,
             section_drafts=section_drafts,
+            solution_snapshot=solution_snapshot,
         )
 
         existing_tasks = await self._list_review_tasks_raw(session=session, project_id=project_id)
@@ -1208,6 +1240,187 @@ def _contains_replacement_value(content: str, *, field_name: str, expected_value
 def _extract_quantity_pairs(value: str) -> list[str]:
     normalized = re.sub(r"\s+", "", str(value or "")).lower()
     return sorted(set(match.group(0) for match in QUANTITY_PAIR_PATTERN.finditer(normalized)))
+
+
+def _solution_selected_products(solution_snapshot: Any) -> list[dict[str, Any]]:
+    products = getattr(solution_snapshot, "selected_products", None)
+    if not isinstance(products, list):
+        return []
+    return [item for item in products if isinstance(item, dict)]
+
+
+def _solution_interface_plan(solution_snapshot: Any) -> dict[str, Any]:
+    interface_plan = getattr(solution_snapshot, "interface_plan", None)
+    if not isinstance(interface_plan, dict):
+        return {}
+    return interface_plan
+
+
+def _section_signal_text(*, section: dict[str, Any], draft: SectionDraft) -> str:
+    return " ".join(
+        [
+            str(section.get("title") or draft.title or "").strip(),
+            str(section.get("purpose") or section.get("description") or "").strip(),
+            " ".join(str(item).strip() for item in (section.get("keywords") or []) if str(item).strip()),
+        ]
+    ).lower()
+
+
+def _is_solution_parameter_section(*, section: dict[str, Any], draft: SectionDraft) -> bool:
+    text = _section_signal_text(section=section, draft=draft)
+    return bool(section.get("parameter_sensitive")) or any(token in text for token in ("参数", "规格", "配置", "主回路", "设备"))
+
+
+def _is_solution_interface_section(*, section: dict[str, Any], draft: SectionDraft) -> bool:
+    text = _section_signal_text(section=section, draft=draft)
+    return any(token in text for token in ("接口", "通讯", "通信", "dcs", "plc", "点表", "联锁"))
+
+
+def _is_solution_supply_scope_section(*, section: dict[str, Any], draft: SectionDraft) -> bool:
+    text = _section_signal_text(section=section, draft=draft)
+    return any(token in text for token in ("供货", "清单", "配置", "物料", "范围"))
+
+
+def _product_aliases(product: dict[str, Any]) -> list[str]:
+    aliases: list[str] = []
+    for field_name in ("name", "role", "family", "topology"):
+        value = str(product.get(field_name) or "").strip()
+        if value and value not in aliases:
+            aliases.append(value)
+    return aliases
+
+
+def _contains_any_product_alias(content: str, product: dict[str, Any]) -> bool:
+    return any(_contains_normalized_value(content, alias) for alias in _product_aliases(product))
+
+
+def _has_markdown_table(content: str) -> bool:
+    return bool(MARKDOWN_TABLE_ROW_PATTERN.search(content or "")) and bool(MARKDOWN_TABLE_SEPARATOR_PATTERN.search(content or ""))
+
+
+def _contains_interface_capability(content: str, *, label: str, value: Any) -> bool:
+    if value in (None, ""):
+        return True
+    normalized = re.sub(r"\s+", "", str(content or "")).lower()
+    label_text = str(label or "").strip().lower()
+    value_text = str(value).strip().lower()
+    return label_text in normalized and value_text in normalized
+
+
+def _build_solution_parameter_issue(
+    *,
+    section: dict[str, Any],
+    draft: SectionDraft,
+    solution_snapshot: Any,
+) -> dict[str, Any] | None:
+    if not _is_solution_parameter_section(section=section, draft=draft):
+        return None
+    products = _solution_selected_products(solution_snapshot)
+    if not products:
+        return None
+
+    primary = products[0]
+    missing_fields: list[str] = []
+    primary_name = str(primary.get("name") or "").strip()
+    if primary_name and not _contains_any_product_alias(draft.content_md, primary):
+        missing_fields.append("primary_product")
+    voltage = str(primary.get("rated_voltage") or "").strip()
+    if voltage and not _contains_replacement_value(draft.content_md, field_name="voltage_level", expected_value=voltage):
+        missing_fields.append("voltage_level")
+    power_kw = primary.get("rated_power_kw")
+    if power_kw not in (None, "") and not _contains_replacement_value(
+        draft.content_md,
+        field_name="power_rating",
+        expected_value=f"{power_kw}kW",
+    ):
+        missing_fields.append("power_rating")
+    if not missing_fields:
+        return None
+    return make_issue(
+        code="VAL011",
+        level="P0",
+        section_id=draft.section_id,
+        section_title=draft.title,
+        message=f"章节《{draft.title}》未完整体现已确认方案快照中的主设备和关键参数。",
+        suggested_action="补齐主设备名称、电压等级和容量等方案快照参数，再重新校验。",
+        details={
+            "missing_fields": missing_fields,
+            "expected_primary_product": primary_name or None,
+            "expected_voltage_level": voltage or None,
+            "expected_power_rating": f"{power_kw}kW" if power_kw not in (None, "") else None,
+        },
+    )
+
+
+def _build_solution_interface_issue(
+    *,
+    section: dict[str, Any],
+    draft: SectionDraft,
+    solution_snapshot: Any,
+) -> dict[str, Any] | None:
+    if not _is_solution_interface_section(section=section, draft=draft):
+        return None
+    interface_plan = _solution_interface_plan(solution_snapshot)
+    if not interface_plan:
+        return None
+
+    missing_items: list[str] = []
+    protocol = str(interface_plan.get("dcs_protocol") or "").strip()
+    if protocol and not _contains_normalized_value(draft.content_md, protocol):
+        missing_items.append("dcs_protocol")
+    io_allocation = interface_plan.get("io_allocation") if isinstance(interface_plan.get("io_allocation"), dict) else {}
+    for label in ("DI", "DO", "AI", "AO"):
+        if not _contains_interface_capability(draft.content_md, label=label, value=io_allocation.get(label)):
+            missing_items.append(label)
+    if not missing_items:
+        return None
+    return make_issue(
+        code="VAL012",
+        level="P0",
+        section_id=draft.section_id,
+        section_title=draft.title,
+        message=f"章节《{draft.title}》未完整覆盖方案快照中的接口协议或 IO 能力。",
+        suggested_action="补齐 DCS 协议、DI/DO/AI/AO 分配或明确接口边界后重新校验。",
+        details={
+            "missing_items": missing_items,
+            "expected_protocol": protocol or None,
+            "expected_io_allocation": io_allocation,
+        },
+    )
+
+
+def _build_solution_supply_scope_issue(
+    *,
+    section: dict[str, Any],
+    draft: SectionDraft,
+    solution_snapshot: Any,
+) -> dict[str, Any] | None:
+    if not _is_solution_supply_scope_section(section=section, draft=draft):
+        return None
+    products = _solution_selected_products(solution_snapshot)
+    if not products:
+        return None
+
+    missing_products = [
+        str(product.get("name") or product.get("role") or "未命名设备")
+        for product in products
+        if not _contains_any_product_alias(draft.content_md, product)
+    ]
+    if not missing_products and (len(products) <= 1 or _has_markdown_table(draft.content_md)):
+        return None
+    return make_issue(
+        code="VAL013",
+        level="P0",
+        section_id=draft.section_id,
+        section_title=draft.title,
+        message=f"章节《{draft.title}》与方案快照的供货范围不一致。",
+        suggested_action="补齐缺失设备，并优先用表格方式呈现供货范围与配置清单。",
+        details={
+            "missing_products": missing_products,
+            "expected_products": [str(item.get("name") or item.get("role") or "未命名设备") for item in products],
+            "markdown_table_present": _has_markdown_table(draft.content_md),
+        },
+    )
 
 
 def _compute_reuse_similarity(*, content: str, reusable_blocks: list[dict[str, Any]]) -> dict[str, Any]:

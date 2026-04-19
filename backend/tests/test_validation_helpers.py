@@ -594,6 +594,156 @@ class ValidationHelperTests(unittest.TestCase):
         self.assertNotIn("VAL104", {item["code"] for item in warnings})
         self.assertNotIn("VAL104", {item["code"] for item in section_results["3"]["warnings"]})
 
+    def test_collect_validation_findings_flags_solution_snapshot_alignment_issues(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.9000"),
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_solution_1",
+                        "source_doc_id": "doc_solution_1",
+                        "source_title": "历史方案A",
+                        "type": "section",
+                    },
+                    {
+                        "evidence_id": "ev_solution_2",
+                        "source_doc_id": "doc_solution_2",
+                        "source_title": "历史方案B",
+                        "type": "table",
+                    },
+                    {
+                        "evidence_id": "ev_solution_3",
+                        "source_doc_id": "doc_solution_3",
+                        "source_title": "历史方案C",
+                        "type": "section",
+                    },
+                ]
+            },
+        )
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "1",
+                        "title": "主要设备技术参数",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section", "parameter"],
+                        "parameter_sensitive": True,
+                        "asset_required": False,
+                        "needs_human_review": False,
+                        "children": [],
+                    },
+                    {
+                        "section_id": "2",
+                        "title": "DCS 通讯接口方案",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section", "parameter"],
+                        "asset_required": False,
+                        "needs_human_review": False,
+                        "children": [],
+                    },
+                    {
+                        "section_id": "3",
+                        "title": "供货范围与配置清单",
+                        "mandatory": True,
+                        "expected_evidence_types": ["table", "parameter"],
+                        "parameter_sensitive": True,
+                        "asset_required": False,
+                        "needs_human_review": False,
+                        "children": [],
+                    },
+                ],
+            }
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="1",
+                title="主要设备技术参数",
+                content_md="本章仅描述一般性技术原则，尚未落入当前项目的设备名称、电压等级和容量信息，但篇幅足够用于通过基础长度检查。",
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_solution_1",
+                        "source_doc_id": "doc_solution_1",
+                        "source_title": "历史方案A",
+                        "type": "section",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={"reuse_pack": {}},
+            ),
+            SimpleNamespace(
+                section_id="2",
+                title="DCS 通讯接口方案",
+                content_md="本章仅说明系统具备远程监控接口和信号传输能力，但未落入协议类型、点数分配及具体接口边界，文本长度同样足够。",
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_solution_2",
+                        "source_doc_id": "doc_solution_2",
+                        "source_title": "历史方案B",
+                        "type": "table",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={"reuse_pack": {}},
+            ),
+            SimpleNamespace(
+                section_id="3",
+                title="供货范围与配置清单",
+                content_md="本章仅写入主驱动系统，不含旁路切换柜，也未采用表格列出供货清单，导致方案快照中的供货范围没有完整覆盖。",
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_solution_3",
+                        "source_doc_id": "doc_solution_3",
+                        "source_title": "历史方案C",
+                        "type": "section",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={"reuse_pack": {}},
+            ),
+        ]
+        solution_snapshot = SimpleNamespace(
+            selected_products=[
+                {
+                    "role": "主驱动",
+                    "name": "LCI 同步电机变频软起动系统",
+                    "rated_voltage": "10kV",
+                    "rated_power_kw": 4500,
+                    "quantity": 1,
+                    "config": "旁路配置",
+                },
+                {
+                    "role": "旁路柜",
+                    "name": "旁路切换柜",
+                    "rated_voltage": "10kV",
+                    "rated_power_kw": 4500,
+                    "quantity": 1,
+                    "config": "旁路配置",
+                },
+            ],
+            interface_plan={"dcs_protocol": "Profibus-DP", "io_allocation": {"DI": 16, "DO": 8, "AI": 4, "AO": 2}},
+        )
+
+        errors, _, section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+            solution_snapshot=solution_snapshot,
+        )
+
+        self.assertIn("VAL011", {item["code"] for item in errors})
+        self.assertIn("VAL012", {item["code"] for item in errors})
+        self.assertIn("VAL013", {item["code"] for item in errors})
+        self.assertIn("VAL011", {item["code"] for item in section_results["1"]["errors"]})
+        self.assertIn("VAL012", {item["code"] for item in section_results["2"]["errors"]})
+        self.assertIn("VAL013", {item["code"] for item in section_results["3"]["errors"]})
+
     def test_collect_validation_findings_keeps_val104_for_missing_figure_placeholder(self) -> None:
         requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
         evidence_bundle = SimpleNamespace(

@@ -299,6 +299,50 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(outline_examples[0]["file_name"], "高浓磨机LCI方案.pdf")
         self.assertIn("LCI 变频软起系统方案", outline_examples[0]["top_level_titles"])
 
+    def test_build_outline_inputs_includes_solution_snapshot_context(self) -> None:
+        requirement_card = SimpleNamespace(
+            content={
+                "project_name": "高炉鼓风机同步电机改造",
+                "business_objective": "形成面向客户的 LCI 技术方案目录",
+                "industry": "钢铁",
+                "product_line": "lci",
+            }
+        )
+        evidence_bundle = SimpleNamespace(content={"results": [], "case_candidates": []})
+        solution_snapshot = SimpleNamespace(
+            id="solution-1",
+            version=2,
+            confirmed_by_user=True,
+            solution_summary="推荐采用 LCI 同步电机变频软起动系统，并保留旁路切换方案。",
+            selected_products=[
+                {
+                    "role": "主驱动",
+                    "name": "LCI 同步电机变频软起动系统",
+                    "rated_voltage": "10kV",
+                    "rated_power_kw": 4500,
+                    "quantity": 1,
+                    "config": "旁路配置",
+                }
+            ],
+            interface_plan={"dcs_protocol": "Profibus-DP", "io_allocation": {"DI": 16, "DO": 8, "AI": 4, "AO": 2}},
+            suggested_chapters=["总体方案", "主回路方案", "DCS 通讯接口方案"],
+            key_constraints=["需要明确旁路切换与联锁边界。"],
+            open_questions=["待确认现场冷却方式。"],
+        )
+
+        instructions, global_params, rfp_context, outline_examples = build_outline_inputs(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            solution_snapshot=solution_snapshot,
+        )
+
+        self.assertIn("已确认方案快照", instructions)
+        self.assertEqual(global_params["primary_product"], "LCI 同步电机变频软起动系统")
+        self.assertEqual(global_params["dcs_protocol"], "Profibus-DP")
+        self.assertIn("DCS 通讯接口方案", rfp_context)
+        self.assertIn("LCI 同步电机变频软起动系统", rfp_context)
+        self.assertEqual(outline_examples, [])
+
     def test_parse_outline_response_accepts_outline_array_shape(self) -> None:
         service = OutlineService()
         parsed = service._parse_outline_response(
@@ -391,6 +435,85 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(params["product_line"], "hv_vfd")
         self.assertEqual(params["business_objective"], "提升站内自动化运行可靠性")
         self.assertEqual(params["voltage_level"], "110kV")
+
+    def test_build_section_global_params_merges_solution_snapshot(self) -> None:
+        solution_snapshot = SimpleNamespace(
+            version=1,
+            selected_products=[
+                {
+                    "role": "主驱动",
+                    "name": "LCI 同步电机变频软起动系统",
+                    "family": "同步电机软起动",
+                    "rated_voltage": "10kV",
+                    "rated_power_kw": 4500,
+                    "quantity": 1,
+                }
+            ],
+            interface_plan={"dcs_protocol": "Profibus-DP"},
+        )
+
+        params = build_section_global_params(
+            {
+                "project_name": "测试项目",
+                "industry": "钢铁",
+                "product_line": "lci",
+                "business_objective": "降低同步电机启动冲击",
+                "key_parameters": {"voltage_level": "10kV"},
+            },
+            solution_snapshot=solution_snapshot,
+        )
+
+        self.assertEqual(params["primary_product"], "LCI 同步电机变频软起动系统")
+        self.assertEqual(params["primary_product_family"], "同步电机软起动")
+        self.assertEqual(params["dcs_protocol"], "Profibus-DP")
+        self.assertEqual(params["selected_products"], "主驱动:LCI 同步电机变频软起动系统 x1")
+        self.assertEqual(params["voltage_level"], "10kV")
+
+    def test_build_section_context_includes_solution_snapshot_tables(self) -> None:
+        bundle = SimpleNamespace(content={"results": []})
+        solution_snapshot = SimpleNamespace(
+            id="solution-1",
+            version=1,
+            solution_summary="推荐采用 LCI 同步电机变频软起动系统，并配置旁路切换与励磁控制。",
+            selected_products=[
+                {
+                    "role": "主驱动",
+                    "name": "LCI 同步电机变频软起动系统",
+                    "rated_voltage": "10kV",
+                    "rated_power_kw": 4500,
+                    "quantity": 1,
+                    "config": "旁路配置",
+                },
+                {
+                    "role": "旁路柜",
+                    "name": "旁路切换柜",
+                    "rated_voltage": "10kV",
+                    "rated_power_kw": 4500,
+                    "quantity": 1,
+                    "config": "旁路配置",
+                },
+            ],
+            interface_plan={
+                "dcs_protocol": "Profibus-DP",
+                "io_allocation": {"DI": 16, "DO": 8, "AI": 4, "AO": 2},
+                "notes": "每套主驱动配置独立控制节点。",
+            },
+            key_constraints=["旁路切换条件必须单独说明。"],
+            open_questions=["待确认调试窗口。"],
+        )
+
+        context, citations = build_section_context(
+            section={"title": "供货范围与 DCS 通讯接口方案", "expected_evidence_types": ["table", "parameter"]},
+            evidence_bundle=bundle,
+            solution_snapshot=solution_snapshot,
+        )
+
+        self.assertIn("推荐设备清单", context)
+        self.assertIn("| 角色 | 产品 | 电压等级 | 功率 | 数量 | 配置 |", context)
+        self.assertIn("| 协议 | DI | DO | AI | AO |", context)
+        self.assertIn("旁路切换条件必须单独说明", context)
+        self.assertEqual(citations[0]["source_title"], "方案快照 v1")
+        self.assertEqual(citations[0]["type"], "solution_snapshot")
 
     def test_build_section_prompts_avoids_internal_process_language(self) -> None:
         system_prompt, user_prompt = build_section_prompts(

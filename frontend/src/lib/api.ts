@@ -1,6 +1,7 @@
 import axios from 'axios';
 
 const rawBaseURL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000/api/v1';
+const LOCAL_HOST_ALIASES = new Set(['localhost', '127.0.0.1', 'host.docker.internal']);
 
 function resolveApiBaseURL(): string {
   if (typeof window === 'undefined') {
@@ -10,7 +11,7 @@ function resolveApiBaseURL(): string {
   try {
     const url = new URL(rawBaseURL);
     const currentHost = window.location.hostname;
-    const isLocalPair = ['localhost', '127.0.0.1'].includes(url.hostname) && ['localhost', '127.0.0.1'].includes(currentHost);
+    const isLocalPair = LOCAL_HOST_ALIASES.has(url.hostname) && LOCAL_HOST_ALIASES.has(currentHost);
 
     if (isLocalPair && url.hostname !== currentHost) {
       url.hostname = currentHost;

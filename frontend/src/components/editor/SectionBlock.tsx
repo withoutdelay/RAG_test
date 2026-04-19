@@ -405,7 +405,7 @@ function AssetPreviewCard({
       )}
       {visualAsset && assetContentUrl && !imageFailed ? (
         <div className="mt-3 overflow-hidden rounded-[1.25rem] border border-white/80 bg-white/90 p-3 shadow-[0_20px_50px_-28px_rgba(15,23,42,0.45)]">
-          <div className="relative overflow-hidden rounded-[1rem] border border-slate-200/80 bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.14),_rgba(255,255,255,0.96)_48%,_rgba(241,245,249,1)_100%)]">
+          <div className="relative overflow-hidden rounded-[1rem] border border-slate-200/80 bg-slate-50">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={assetContentUrl}
@@ -414,7 +414,6 @@ function AssetPreviewCard({
               className={`block w-full bg-transparent object-contain ${embedded ? 'max-h-[300px]' : 'max-h-[420px]'}`}
               onError={() => setImageState({ assetId: currentAssetId, failed: true })}
             />
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-slate-950/10 to-transparent" />
           </div>
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -648,7 +647,7 @@ export function SectionBlock({
   return (
     <>
       <Card className="mb-8 overflow-hidden border-slate-200 shadow-sm">
-        <div className="border-b bg-[linear-gradient(135deg,rgba(248,250,252,0.96),rgba(239,246,255,0.88))] px-5 py-4">
+        <div className="border-b bg-slate-50 px-5 py-4">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2">
@@ -730,7 +729,7 @@ export function SectionBlock({
 
               <TabsContent value="preview" className="p-5">
                 {content.trim() ? (
-                  <div className="rounded-3xl border border-slate-200 bg-[linear-gradient(180deg,#ffffff,rgba(248,250,252,0.9))] p-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]">
+                  <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]">
                     <div className="space-y-6">
                       {previewSegments.map((segment, index) => {
                         if (segment.kind === 'markdown') {
@@ -821,7 +820,7 @@ export function SectionBlock({
             </Tabs>
           </div>
 
-          <div className="space-y-6 bg-[linear-gradient(180deg,rgba(248,250,252,0.9),rgba(255,255,255,0.95))] p-5">
+          <div className="space-y-6 bg-slate-50 p-5">
             <div className="rounded-2xl border border-slate-200 bg-white p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>

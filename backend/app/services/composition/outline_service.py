@@ -17,6 +17,11 @@ from app.models.proposal_outline import ProposalOutline
 from app.models.requirement_card import RequirementCard
 from app.services.agents.planner import PlannerAgent
 from app.services.retrieval.case_service import build_outline_examples
+from app.services.solution.context import (
+    build_solution_outline_params,
+    get_preferred_solution_snapshot,
+    render_solution_outline_context,
+)
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
@@ -305,6 +310,7 @@ def build_outline_inputs(
     *,
     requirement_card: RequirementCard,
     evidence_bundle: EvidenceBundle,
+    solution_snapshot: Any | None = None,
 ) -> tuple[str, dict[str, Any], str, list[dict[str, Any]]]:
     content = requirement_card.content or {}
     global_params = content.get("key_parameters") if isinstance(content.get("key_parameters"), dict) else {}
@@ -321,6 +327,9 @@ def build_outline_inputs(
             if value not in (None, "", [], {})
         },
     }
+    for key, value in build_solution_outline_params(solution_snapshot).items():
+        if value not in (None, "", [], {}):
+            global_params.setdefault(key, value)
     evidence_results = (evidence_bundle.content or {}).get("results") or []
     evidence_summary = "\n\n".join(
         f"- {item.get('source_title')}: {str(item.get('raw_content') or item.get('summary') or '').strip()[:420]}"
@@ -329,15 +338,23 @@ def build_outline_inputs(
     )
     case_candidates = (evidence_bundle.content or {}).get("case_candidates") or []
     outline_examples = build_outline_examples(case_candidates, max_cases=3, max_titles=12)
+    solution_context = render_solution_outline_context(solution_snapshot)
+    solution_instruction = (
+        " 已确认方案快照给出了主设备、接口计划和建议章节；请优先围绕这些产品事实组织目录，可按客户口径合并或重命名。"
+        if solution_context
+        else ""
+    )
     instructions = (
         f"请基于需求卡生成一份面向客户技术方案的大纲。"
         f"项目名称：{content.get('project_name') or '未命名项目'}。"
         f"业务目标：{content.get('business_objective') or '请结合检索证据归纳'}。"
+        f"{solution_instruction}"
     )
     rfp_context = "\n\n".join(
         part
         for part in [
             str(content.get("source_excerpt") or "").strip(),
+            f"方案快照：\n{solution_context}" if solution_context else "",
             f"证据摘要：\n{evidence_summary}" if evidence_summary else "",
         ]
         if part
@@ -372,6 +389,7 @@ class OutlineService:
             project_id=project_id,
             evidence_bundle_id=evidence_bundle_id,
         )
+        solution_snapshot = await get_preferred_solution_snapshot(session=session, project_id=project_id)
         if any(item.get("status") != "resolved" for item in (requirement_card.blocking_items or [])):
             raise ArtifactValidationError("Requirement card still has unresolved blocking items")
 
@@ -384,6 +402,7 @@ class OutlineService:
                 "project_id": str(project_id),
                 "requirement_card_id": str(requirement_card.id),
                 "evidence_bundle_id": str(evidence_bundle.id),
+                "solution_snapshot_id": str(solution_snapshot.id) if solution_snapshot else None,
             },
             started_at=datetime.now(timezone.utc),
         )
@@ -393,6 +412,7 @@ class OutlineService:
         default_instructions, global_params, rfp_context, outline_examples = build_outline_inputs(
             requirement_card=requirement_card,
             evidence_bundle=evidence_bundle,
+            solution_snapshot=solution_snapshot,
         )
         response = await self.planner.generate_outline(
             task_id=str(job.id),

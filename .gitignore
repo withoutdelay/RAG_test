@@ -24,3 +24,19 @@ scripts/*.pid
 
 private_samples/real_proposals/*
 !private_samples/real_proposals/.gitkeep
+
+output/
+artifacts/
+.super-dev/runs/
+.super-dev/review-state/
+/.agent/
+/.claude/
+/.codebuddy/
+/.cursor/
+/.gemini/
+/.kiro/
+/.opencode/
+/.qoder/
+/.trae/
+/.windsurf/
+/GEMINI.md

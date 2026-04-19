@@ -39,3 +39,4 @@ class RequirementCard(Base):
     project = relationship("Project", back_populates="requirement_cards", foreign_keys=[project_id])
     evidence_bundles = relationship("EvidenceBundle", back_populates="requirement_card")
     proposal_outlines = relationship("ProposalOutline", back_populates="requirement_card")
+    solution_snapshots = relationship("SolutionSnapshot", back_populates="requirement_card")

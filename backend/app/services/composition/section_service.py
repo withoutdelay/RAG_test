@@ -24,6 +24,13 @@ from app.services.composition.section_quality import SectionQualityGateService
 from app.services.evidence_binding import resolve_outline_evidence_bundle
 from app.services.retrieval import AssetRetrievalService
 from app.services.retrieval.case_service import CaseLibraryService
+from app.services.solution.context import (
+    build_solution_reusable_blocks,
+    build_solution_section_citations,
+    build_solution_section_context,
+    build_solution_writer_params,
+    get_preferred_solution_snapshot,
+)
 from app.services.validation.service import flatten_outline_sections
 from app.services.vectorstore.block_taxonomy import (
     content_form_is_table,
@@ -331,6 +338,7 @@ def build_section_context(
     global_params: dict[str, Any] | None = None,
     limit: int = 3,
     preferred_evidence_ids: set[str] | None = None,
+    solution_snapshot: Any | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     selected = _select_evidence_items(
         section=section,
@@ -360,6 +368,10 @@ def build_section_context(
                 "excerpt": raw_excerpt,
             }
         )
+    solution_context = build_solution_section_context(section=section, solution_snapshot=solution_snapshot)
+    if solution_context:
+        context_lines.insert(0, solution_context)
+        citations = [*build_solution_section_citations(section=section, solution_snapshot=solution_snapshot), *citations]
     return "\n".join(context_lines), citations
 
 
@@ -2485,9 +2497,13 @@ def section_outline_to_executor_payload(section: dict[str, Any]) -> dict[str, An
     }
 
 
-def build_section_global_params(requirement_content: dict[str, Any] | None) -> dict[str, Any]:
+def build_section_global_params(
+    requirement_content: dict[str, Any] | None,
+    *,
+    solution_snapshot: Any | None = None,
+) -> dict[str, Any]:
     if not isinstance(requirement_content, dict):
-        return {}
+        requirement_content = {}
 
     merged: dict[str, Any] = {}
     key_parameters = requirement_content.get("key_parameters")
@@ -2496,6 +2512,9 @@ def build_section_global_params(requirement_content: dict[str, Any] | None) -> d
 
     for field_name in ("project_name", "industry", "product_line", "business_objective"):
         value = requirement_content.get(field_name)
+        if value not in (None, "", [], {}):
+            merged.setdefault(field_name, value)
+    for field_name, value in build_solution_writer_params(solution_snapshot).items():
         if value not in (None, "", [], {}):
             merged.setdefault(field_name, value)
     return merged
@@ -3744,6 +3763,7 @@ class SectionDraftService:
             raise ArtifactValidationError("Outline must be approved before generating sections")
         requirement_card = await self._resolve_requirement_card(session=session, outline=outline)
         evidence_bundle = await self._resolve_evidence_bundle(session=session, outline=outline)
+        solution_snapshot = await get_preferred_solution_snapshot(session=session, project_id=project_id)
 
         sections = flatten_outline_sections(((outline.outline_json or {}).get("sections") or []))
         if not sections:
@@ -3769,7 +3789,10 @@ class SectionDraftService:
         )
         generated_drafts: list[SectionDraft] = []
         generation_metrics: list[dict[str, Any]] = []
-        global_params = build_section_global_params(requirement_card.content)
+        global_params = build_section_global_params(
+            requirement_card.content,
+            solution_snapshot=solution_snapshot,
+        )
         outline_title = (outline.outline_json or {}).get("title", "技术方案")
         inter_section_state = _new_inter_section_state(
             task_id=str(job.id),
@@ -3789,6 +3812,7 @@ class SectionDraftService:
                 section=section,
                 evidence_bundle=evidence_bundle,
                 global_params=global_params,
+                solution_snapshot=solution_snapshot,
             )
             evidence_trace = _build_evidence_retrieval_trace(citations=citations)
             case_library_result = self._retrieve_case_library_matches(
@@ -3802,6 +3826,10 @@ class SectionDraftService:
                 global_params=global_params,
                 case_library_matches=case_library_result.get("matches") or [],
             )
+            reusable_blocks = [
+                *build_solution_reusable_blocks(section=section, solution_snapshot=solution_snapshot),
+                *reusable_blocks,
+            ]
             reusable_blocks = self._expand_reusable_blocks_from_neighbors(
                 section=section,
                 reusable_blocks=reusable_blocks,
@@ -3955,6 +3983,7 @@ class SectionDraftService:
             raise ArtifactValidationError("Outline must be approved before regenerating sections")
         requirement_card = await self._resolve_requirement_card(session=session, outline=outline)
         evidence_bundle = await self._resolve_evidence_bundle(session=session, outline=outline)
+        solution_snapshot = await get_preferred_solution_snapshot(session=session, project_id=project_id)
         sections = flatten_outline_sections(((outline.outline_json or {}).get("sections") or []))
         section = self._find_section(outline=outline, section_id=section_id)
         draft = await self._get_current_section_draft(
@@ -3977,7 +4006,10 @@ class SectionDraftService:
 
         generation_mode = str(section.get("generation_mode") or "baseline")
         normalized_preferred_citation_ids = _normalize_preferred_citation_ids(preferred_citation_ids)
-        global_params = build_section_global_params(requirement_card.content)
+        global_params = build_section_global_params(
+            requirement_card.content,
+            solution_snapshot=solution_snapshot,
+        )
         outline_title = (outline.outline_json or {}).get("title", "技术方案")
         existing_drafts = await self._load_section_drafts(
             session=session,
@@ -3997,6 +4029,7 @@ class SectionDraftService:
             evidence_bundle=evidence_bundle,
             global_params=global_params,
             preferred_evidence_ids=normalized_preferred_citation_ids,
+            solution_snapshot=solution_snapshot,
         )
         evidence_trace = _build_evidence_retrieval_trace(
             citations=citations,
@@ -4013,6 +4046,10 @@ class SectionDraftService:
             global_params=global_params,
             case_library_matches=case_library_result.get("matches") or [],
         )
+        reusable_blocks = [
+            *build_solution_reusable_blocks(section=section, solution_snapshot=solution_snapshot),
+            *reusable_blocks,
+        ]
         reusable_blocks = prioritize_reusable_blocks_for_citations(
             reusable_blocks,
             preferred_citation_ids=preferred_citation_ids,

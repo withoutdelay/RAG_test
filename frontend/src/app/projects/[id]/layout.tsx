@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useParams } from 'next/navigation';
-import { FileText, ClipboardList, Database, LayoutList, PenTool, CheckCircle, Download, Loader2, ArrowLeft } from 'lucide-react';
+import { FileText, ClipboardList, Database, LayoutList, PenTool, CheckCircle, Download, Loader2, ArrowLeft, GitBranch } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import api from '@/lib/api';
 import { useProjectStore } from '@/stores/projectStore';
@@ -39,6 +39,7 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     { name: 'Documents', href: `/projects/${projectId}/documents`, icon: Database },
     { name: 'Requirement', href: `/projects/${projectId}/requirement`, icon: ClipboardList },
     { name: 'Evidence', href: `/projects/${projectId}/evidence`, icon: LayoutList },
+    { name: 'Solution', href: `/projects/${projectId}/solution`, icon: GitBranch },
     { name: 'Outline', href: `/projects/${projectId}/outline`, icon: PenTool },
     { name: 'Drafts', href: `/projects/${projectId}/editor`, icon: FileText },
     { name: 'Validation', href: `/projects/${projectId}/validation`, icon: CheckCircle },
