@@ -160,6 +160,130 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(response.model_used, "doubao:mock")
         self.assertIn("项目概述", response.content)
 
+    def test_mock_provider_section_write_uses_retrieved_context_without_outline_description(self) -> None:
+        client = self._make_client(MockLLMProvider(chunk_size=12))
+
+        response = asyncio.run(
+            client.invoke(
+                LLMRequest(
+                    task_type=TaskType.SECTION_WRITE,
+                    session_id="context-session",
+                    system_prompt="system",
+                    user_prompt="请撰写需求分析。",
+                    metadata={
+                        "section": {"title": "需求分析", "description": "梳理客户核心需求、约束条件与关键指标。"},
+                        "retrieved_context": (
+                            "- 历史方案A 需求分析: 系统需支持 10kV / 4500kW 同步电机软起动，并与 DCS 保持联锁一致。\n"
+                            "- 历史方案B 约束条件: 旁路切换需保留原高压开关柜接口边界。"
+                        ),
+                    },
+                )
+            )
+        )
+
+        self.assertIn("### 关键信息提炼", response.content)
+        self.assertIn("系统需支持 10kV / 4500kW 同步电机软起动", response.content)
+        self.assertNotIn("梳理客户核心需求、约束条件与关键指标。", response.content)
+
+    def test_mock_provider_section_write_prefers_assembled_draft(self) -> None:
+        client = self._make_client(MockLLMProvider(chunk_size=12))
+
+        response = asyncio.run(
+            client.invoke(
+                LLMRequest(
+                    task_type=TaskType.SECTION_WRITE,
+                    session_id="assembled-draft-session",
+                    system_prompt="system",
+                    user_prompt="请整理成正式客户稿。",
+                    metadata={
+                        "section": {"title": "技术架构", "description": "说明系统总体架构、模块划分与接口关系。"},
+                        "assembled_draft": (
+                            "## 技术架构\n\n"
+                            "### 系统组成\n\n"
+                            "主回路由 LCI 软起动装置、整流变压器、励磁控制柜和旁路切换柜组成。\n"
+                        ),
+                    },
+                )
+            )
+        )
+
+        self.assertIn("### 系统组成", response.content)
+        self.assertIn("LCI 软起动装置", response.content)
+        self.assertNotIn("说明系统总体架构、模块划分与接口关系。", response.content)
+
+    def test_mock_provider_section_write_skips_unreadable_reuse_blocks(self) -> None:
+        client = self._make_client(MockLLMProvider(chunk_size=12))
+
+        response = asyncio.run(
+            client.invoke(
+                LLMRequest(
+                    task_type=TaskType.SECTION_WRITE,
+                    session_id="unreadable-reuse-session",
+                    system_prompt="system",
+                    user_prompt="请撰写需求分析。",
+                    metadata={
+                        "section": {"title": "需求分析", "description": "梳理客户核心需求、约束条件与关键指标。"},
+                        "reuse_pack": {
+                            "reusable_blocks": [
+                                {
+                                    "source_heading": "¤¤¤ ／／ ###",
+                                    "content_md": "## 乱码块\n\n¤¤¤ ／／ ■■ …… ——",
+                                }
+                            ]
+                        },
+                        "retrieved_context": "- 案例来源：历史方案A.docx\n- 系统需支持 10kV / 4500kW 同步电机软起动，并保留 DCS 联锁接口。",
+                    },
+                )
+            )
+        )
+
+        self.assertIn("### 关键信息提炼", response.content)
+        self.assertIn("10kV / 4500kW 同步电机软起动", response.content)
+        self.assertNotIn("¤¤¤", response.content)
+        self.assertNotIn("梳理客户核心需求、约束条件与关键指标。", response.content)
+
+    def test_mock_provider_baseline_section_write_prefers_structured_global_params_over_reuse_blocks(self) -> None:
+        client = self._make_client(MockLLMProvider(chunk_size=12))
+
+        response = asyncio.run(
+            client.invoke(
+                LLMRequest(
+                    task_type=TaskType.SECTION_WRITE,
+                    session_id="baseline-structured-session",
+                    system_prompt="system",
+                    user_prompt="请撰写项目概述。",
+                    metadata={
+                        "section": {
+                            "title": "项目概述",
+                            "description": "介绍项目背景、建设目标与总体范围。",
+                            "generation_mode": "baseline",
+                            "section_class": "overview",
+                        },
+                        "global_params": {
+                            "solution_summary": "本项目方案围绕 LCI 同步电机变频软起动系统组织主回路、接口与供货配置。",
+                            "selected_products": "主驱动:LCI 同步电机变频软起动系统 x1；整流变压器:整流变压器 x1",
+                            "primary_model_number": "GBT.LCI.SO-A0606-211N465",
+                            "catalog_interface_summary": "LCI 同步电机变频软起动系统通讯接口采用 Profibus-DP，接口范围覆盖 LCI 主驱动、高压开关柜、润滑油站与冷却系统",
+                        },
+                        "reuse_pack": {
+                            "reusable_blocks": [
+                                {
+                                    "source_heading": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+                                    "content_md": "变频器已配置的选项 Converter Selected Options...",
+                                }
+                            ]
+                        },
+                        "retrieved_context": "- 宝山钢铁股份有限公司三鼓风LCI改造方案.docx 项目概述: 变频器已配置的选项 Converter Selected Options...",
+                    },
+                )
+            )
+        )
+
+        self.assertIn("### 项目背景与方案范围", response.content)
+        self.assertIn("本项目方案围绕 LCI 同步电机变频软起动系统组织主回路、接口与供货配置。", response.content)
+        self.assertIn("GBT.LCI.SO-A0606-211N465", response.content)
+        self.assertNotIn("Converter Selected Options", response.content)
+
     def test_live_provider_falls_back_from_deepseek_to_qwen_for_extraction(self) -> None:
         seen_hosts: list[str] = []
 

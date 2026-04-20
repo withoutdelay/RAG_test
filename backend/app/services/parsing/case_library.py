@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from app.services.composition.outline_service import _suggest_customer_specificity, _suggest_reuse_level, _suggest_section_class
+from app.services.retrieval.query_hints import normalize_string_list
 from app.services.parsing.section_catalog import (
     build_section_catalog,
     flatten_section_catalog,
@@ -108,6 +109,7 @@ def build_outline_library_entry(
     top_level_titles = [str(section.get("title") or "").strip() for section in sections if str(section.get("title") or "").strip()]
     if not top_level_titles and document_title:
         top_level_titles = [document_title]
+    secondary_family_codes = _extract_secondary_family_codes(sample_entry)
     return {
         "sample_id": sample_entry["sample_id"],
         "file_name": sample_entry["file_name"],
@@ -115,6 +117,15 @@ def build_outline_library_entry(
         "library_track": sample_entry.get("library_track") or sample_entry.get("track") or "pilot_main",
         "profile": sample_entry.get("profile") or sample_entry.get("detected_profile"),
         "ingestion_recommendation": sample_entry.get("ingestion_recommendation"),
+        "parse_source_path": sample_entry.get("parse_source_path"),
+        "parse_source_kind": sample_entry.get("parse_source_kind"),
+        "family_code": sample_entry.get("family_code"),
+        "secondary_family_codes": secondary_family_codes,
+        "material_type": sample_entry.get("material_type"),
+        "product_line": sample_entry.get("product_line"),
+        "solution_family": sample_entry.get("solution_family"),
+        "tags": normalize_string_list(sample_entry.get("tags")),
+        "key_equipment": normalize_string_list(sample_entry.get("key_equipment")),
         "document_title": document_title or None,
         "heading_count": len(flattened),
         "max_heading_level": max((item["level"] for item in flattened), default=0),
@@ -139,6 +150,9 @@ def build_reusable_block_entries(
         structure_hints=structure_hints,
         chunker=chunker,
     )
+    secondary_family_codes = _extract_secondary_family_codes(sample_entry)
+    tags = normalize_string_list(sample_entry.get("tags"))
+    key_equipment = normalize_string_list(sample_entry.get("key_equipment"))
     blocks: list[dict[str, Any]] = []
     current_section_index = -1
     current_section: dict[str, Any] | None = None
@@ -190,6 +204,15 @@ def build_reusable_block_entries(
                 "file_name": sample_entry["file_name"],
                 "file_format": sample_entry["file_format"],
                 "library_track": sample_entry.get("library_track") or sample_entry.get("track") or "pilot_main",
+                "parse_source_path": sample_entry.get("parse_source_path"),
+                "parse_source_kind": sample_entry.get("parse_source_kind"),
+                "family_code": sample_entry.get("family_code"),
+                "secondary_family_codes": secondary_family_codes,
+                "material_type": sample_entry.get("material_type"),
+                "product_line": sample_entry.get("product_line"),
+                "solution_family": sample_entry.get("solution_family"),
+                "tags": tags,
+                "key_equipment": key_equipment,
                 "chunk_index": chunk.chunk_index,
                 "chunk_type": chunk.chunk_type,
                 "heading_path": section_heading_path or chunk.heading_path,
@@ -567,3 +590,9 @@ def _normalize_section_summary_text(text: str) -> str:
     if len(normalized) > 180:
         normalized = normalized[:179].rstrip() + "…"
     return normalized
+
+
+def _extract_secondary_family_codes(sample_entry: dict[str, Any]) -> list[str]:
+    primary_values = normalize_string_list(sample_entry.get("secondary_family_codes"))
+    detail_values = normalize_string_list((sample_entry.get("details") or {}).get("secondary_family_codes"))
+    return normalize_string_list(primary_values + detail_values)

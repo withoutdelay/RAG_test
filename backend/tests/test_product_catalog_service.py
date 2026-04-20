@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
+from app.models.product_compatibility import ProductCompatibility
 from app.models.product_constraint import ProductConstraint
+from app.models.product_interface import ProductInterface
+from app.models.product_material import ProductMaterial
+from app.models.product_model import ProductModel
 from app.models.product_series import ProductSeries
 from app.models.product_standard_config import ProductStandardConfig
 from app.services.catalog import ProductCatalogService
@@ -124,6 +133,94 @@ class ProductCatalogServiceTests(unittest.TestCase):
             ],
             topology="工频旁路",
         )
+        self.rectifier_series = _make_series(
+            code="rectifier_transformer",
+            family="配套设备",
+            series_name="整流变压器",
+            applicable_motors=["同步电机"],
+            applicable_loads=["鼓风机", "压缩机"],
+            communication_protocols=[],
+            voltage_levels=["6kV", "10kV"],
+            min_power_kw=2000,
+            max_power_kw=20000,
+            standard_configs=[self.standard_config],
+            topology="隔离降压",
+        )
+        self.excitation_series = _make_series(
+            code="excitation_cabinet",
+            family="配套设备",
+            series_name="励磁控制柜",
+            applicable_motors=["同步电机"],
+            applicable_loads=["鼓风机", "压缩机"],
+            communication_protocols=["硬接点"],
+            voltage_levels=["6kV", "10kV"],
+            min_power_kw=2000,
+            max_power_kw=20000,
+            standard_configs=[self.standard_config],
+            topology="同步励磁",
+        )
+        self.lci_compatibility = ProductCompatibility(
+            catalog_version="seed-20260419-v1",
+            is_published=True,
+            source_family_code="lci_sync_drive",
+            target_family_code="support_equipment",
+            relation_type="requires",
+            condition="同步电机软起及主回路成套场景",
+            description="LCI 主驱动通常需要整流变压器和励磁控制柜；若要求工频旁路，则追加旁路柜。",
+            preferred_series_codes=["rectifier_transformer", "excitation_cabinet"],
+            optional_series_codes=["bypass_cabinet"],
+            sort_order=10,
+        )
+        self.vfd_compatibility = ProductCompatibility(
+            catalog_version="seed-20260419-v1",
+            is_published=True,
+            source_family_code="hv_vfd_multilevel",
+            target_family_code="support_equipment",
+            relation_type="recommended",
+            condition="要求工频旁路、检修不停机或改造保留原系统切换",
+            description="高压变频主驱动在特定改造场景下推荐配置旁路切换柜。",
+            preferred_series_codes=["bypass_cabinet"],
+            optional_series_codes=[],
+            sort_order=20,
+        )
+        self.lci_model = ProductModel(
+            catalog_version="seed-20260419-v1",
+            is_published=True,
+            series_id=uuid4(),
+            series_code="lci_sync_drive",
+            model_number="GBT.LCI.SO-A0606-211N465",
+            rated_voltage="10kV",
+            rated_power_kw=4208,
+            rated_current="277.5A",
+            specs={"input_transformer_kva": 5458, "output_transformer_kva": 4807},
+            source_material_key="vera-46268861",
+        )
+        self.lci_interface = ProductInterface(
+            catalog_version="seed-20260419-v1",
+            is_published=True,
+            series_id=uuid4(),
+            series_code="lci_sync_drive",
+            interface_type="communication",
+            protocol="Profibus-DP",
+            signal_spec={"adapter": "fieldbus_adapter", "digital_input_voltage": "24VDC"},
+            notes="现场总线适配器 Profibus-DP（暂定）",
+            source_material_key="vera-46268861",
+            sort_order=10,
+        )
+        self.lci_material = ProductMaterial(
+            material_key="lci-bf49f75e",
+            family_code="lci_sync_drive",
+            material_type="proposal_sample",
+            document_name="宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+            availability_status="available",
+            assigned_track="pilot_main",
+            notes="覆盖 LCI 成套方案、供货边界和接口配套。",
+            details={
+                "quality_tier": "high",
+                "solution_family": "LCI / 同步电机变频软起动",
+                "key_equipment": ["LCI变频启动装置", "整流变压器", "励磁控制柜"],
+            },
+        )
 
     def test_build_requirement_signals_extracts_catalog_inputs(self) -> None:
         project = SimpleNamespace(
@@ -191,16 +288,383 @@ class ProductCatalogServiceTests(unittest.TestCase):
         payload = self.solution_service._build_solution_payload(
             signals=signals,
             candidates=candidates,
-            series_map={"lci_sync_drive": self.lci_series, "bypass_cabinet": self.bypass_series},
+            series_map={
+                "lci_sync_drive": self.lci_series,
+                "bypass_cabinet": self.bypass_series,
+                "rectifier_transformer": self.rectifier_series,
+                "excitation_cabinet": self.excitation_series,
+            },
             source_catalog_version="seed-20260419-v1",
+            compatibility_rules=[self.lci_compatibility],
+            catalog_models_by_series={"lci_sync_drive": [self.lci_model]},
+            catalog_interfaces_by_series={"lci_sync_drive": [self.lci_interface]},
+            catalog_material_rows=[self.lci_material],
         )
 
+        selected_codes = [item["series_code"] for item in payload["selected_products"]]
         self.assertEqual(payload["source_catalog_version"], "seed-20260419-v1")
         self.assertEqual(payload["selected_products"][0]["series_code"], "lci_sync_drive")
         self.assertEqual(payload["selected_products"][0]["config"], "旁路配置")
-        self.assertTrue(any(item["series_code"] == "bypass_cabinet" for item in payload["selected_products"]))
+        self.assertEqual(payload["selected_products"][0]["model_number"], "GBT.LCI.SO-A0606-211N465")
+        self.assertIn("bypass_cabinet", selected_codes)
+        self.assertIn("rectifier_transformer", selected_codes)
+        self.assertIn("excitation_cabinet", selected_codes)
         self.assertEqual(payload["interface_plan"]["dcs_protocol"], "Profibus-DP")
+        self.assertEqual(payload["interface_plan"]["catalog_interface_entries"][0]["protocol"], "Profibus-DP")
         self.assertEqual(payload["selection_reason"]["source_mode"], "catalog_plus_requirement_card")
+        self.assertTrue(any("产品族兼容规则" in item for item in payload["selection_reason"]["why_selected"]))
+        self.assertEqual(payload["selection_reason"]["catalog_model_matches"][0]["model_number"], "GBT.LCI.SO-A0606-211N465")
+        self.assertIn("vera-46268861", payload["selection_reason"]["catalog_source_material_keys"])
+        self.assertIn("lci-bf49f75e", payload["selection_reason"]["catalog_source_material_keys"])
+        self.assertEqual(
+            payload["selection_reason"]["catalog_material_entries"][0]["document_name"],
+            "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        )
+        self.assertTrue(
+            any("产品资料库材料" in item for item in payload["selection_reason"]["why_selected"])
+        )
+        self.assertEqual(payload["selection_reason"]["compatibility_actions"][0]["relation_type"], "requires")
+        self.assertIn("rectifier_transformer", payload["selection_reason"]["compatibility_actions"][0]["added_series_codes"])
+
+    def test_solution_payload_applies_recommended_bypass_compatibility_when_bypass_required(self) -> None:
+        project = SimpleNamespace(
+            name="风机改造",
+            industry="冶金",
+            product_line="hv_vfd",
+            description="10kV 3200kW 风机变频改造，要求工频旁路切换。",
+        )
+        requirement_card = SimpleNamespace(content={"motor_type": "异步电机"})
+        signals = self.catalog_service.build_requirement_signals(project=project, requirement_card=requirement_card)
+        candidates = [
+            SimpleNamespace(
+                series=self.vfd_series,
+                selected_config=self.standard_config,
+                score=1.11,
+                reasons=["产品线 hv_vfd 与目录系列匹配", "适用负载覆盖风机"],
+            )
+        ]
+
+        payload = self.solution_service._build_solution_payload(
+            signals=signals,
+            candidates=candidates,
+            series_map={
+                "hv_vfd_multilevel": self.vfd_series,
+                "bypass_cabinet": self.bypass_series,
+            },
+            source_catalog_version="seed-20260419-v1",
+            compatibility_rules=[self.vfd_compatibility],
+        )
+
+        self.assertTrue(any(item["series_code"] == "bypass_cabinet" for item in payload["selected_products"]))
+        self.assertTrue(any("建议补齐 bypass_cabinet" in item for item in payload["selection_reason"]["why_selected"]))
+        self.assertEqual(payload["selection_reason"]["compatibility_actions"][0]["relation_type"], "recommended")
+
+    def test_solution_payload_does_not_apply_recommended_bypass_without_trigger(self) -> None:
+        project = SimpleNamespace(
+            name="风机改造",
+            industry="冶金",
+            product_line="hv_vfd",
+            description="10kV 3200kW 风机变频改造。",
+        )
+        requirement_card = SimpleNamespace(content={"motor_type": "异步电机"})
+        signals = self.catalog_service.build_requirement_signals(project=project, requirement_card=requirement_card)
+        candidates = [
+            SimpleNamespace(
+                series=self.vfd_series,
+                selected_config=self.standard_config,
+                score=1.11,
+                reasons=["产品线 hv_vfd 与目录系列匹配", "适用负载覆盖风机"],
+            )
+        ]
+
+        payload = self.solution_service._build_solution_payload(
+            signals=signals,
+            candidates=candidates,
+            series_map={
+                "hv_vfd_multilevel": self.vfd_series,
+                "bypass_cabinet": self.bypass_series,
+            },
+            source_catalog_version="seed-20260419-v1",
+            compatibility_rules=[self.vfd_compatibility],
+        )
+
+        self.assertFalse(any(item["series_code"] == "bypass_cabinet" for item in payload["selected_products"]))
+        self.assertFalse(payload["selection_reason"]["compatibility_actions"][0]["applies"])
+
+    def test_build_material_record_infers_family_type_and_status(self) -> None:
+        record = self.catalog_service._build_material_record(
+            {
+                "sample_id": "lci-bf49f75e",
+                "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+                "file_path": "/tmp/lci.docx",
+                "file_format": "docx",
+                "file_size_bytes": 1024,
+                "assigned_track": "needs_review",
+                "suggested_track": "needs_review",
+                "document_type_hint": "unknown",
+                "manual_notes": "需要后续补接口资料",
+            }
+        )
+
+        self.assertEqual(record["family_code"], "lci_sync_drive")
+        self.assertEqual(record["material_type"], "proposal_sample")
+        self.assertEqual(record["availability_status"], "review_needed")
+        self.assertIn("docx", record["tags"])
+
+    def test_build_material_record_detects_manual_asset_types(self) -> None:
+        record = self.catalog_service._build_material_record(
+            {
+                "material_key": "manual-001",
+                "document_name": "高压变频产品手册.pdf",
+                "source_path": "/tmp/manual.pdf",
+                "file_format": "pdf",
+            }
+        )
+
+        self.assertEqual(record["family_code"], "hv_vfd_multilevel")
+        self.assertEqual(record["material_type"], "product_manual")
+        self.assertEqual(record["availability_status"], "available")
+
+    def test_build_material_record_respects_explicit_manifest_overrides(self) -> None:
+        record = self.catalog_service._build_material_record(
+            {
+                "material_key": "sample-explicit",
+                "document_name": "某项目技术协议.pdf",
+                "family_code": "lci_sync_drive",
+                "material_type": "product_manual",
+                "availability_status": "available",
+                "tags": ["curated", "lci"],
+                "details": {"source_confidence": "llm_curated"},
+                "solution_family": "LCI / 同步电机变频软起动",
+                "manual_notes": "由当前会话补标。",
+            }
+        )
+
+        self.assertEqual(record["family_code"], "lci_sync_drive")
+        self.assertEqual(record["material_type"], "product_manual")
+        self.assertEqual(record["availability_status"], "available")
+        self.assertIn("curated", record["tags"])
+        self.assertEqual(record["details"]["source_confidence"], "llm_curated")
+        self.assertEqual(record["details"]["solution_family"], "LCI / 同步电机变频软起动")
+
+    def test_import_material_manifest_adds_rows_and_returns_family_counts(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8", delete=False) as handle:
+            json.dump(
+                {
+                    "entries": [
+                        {
+                            "sample_id": "sample-1",
+                            "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+                            "file_path": "/tmp/sample-1.docx",
+                            "file_format": "docx",
+                            "assigned_track": "needs_review",
+                        },
+                        {
+                            "sample_id": "sample-2",
+                            "file_name": "10KV-高压固态及变频软起动技术方案-2025.3-荣信.doc",
+                            "file_path": "/tmp/sample-2.doc",
+                            "file_format": "doc",
+                            "assigned_track": "needs_review",
+                        },
+                    ]
+                },
+                handle,
+                ensure_ascii=False,
+            )
+            manifest_path = handle.name
+
+        session = SimpleNamespace()
+        session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
+        session.add = Mock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+
+        result = asyncio.run(
+            self.catalog_service.import_material_manifest(
+                session=session,
+                manifest_path=manifest_path,
+                replace_existing=False,
+                source_kind="private_sample",
+            )
+        )
+
+        self.assertEqual(result["imported_material_count"], 2)
+        self.assertEqual(result["skipped_existing_count"], 0)
+        self.assertEqual(result["family_counts"]["lci_sync_drive"], 1)
+        self.assertEqual(result["family_counts"]["hv_solid_state_starter"], 1)
+        self.assertEqual(session.add.call_count, 2)
+        session.commit.assert_awaited_once()
+
+    def test_get_material_readiness_marks_gate_failed_when_entry_materials_missing(self) -> None:
+        available_rows = [
+            ProductMaterial(
+                material_key="manual-hvss-001",
+                family_code="hv_solid_state_starter",
+                material_type="product_manual",
+                document_name="高压固态软起动装置手册.pdf",
+                availability_status="available",
+                source_kind="private_sample",
+                tags=[],
+                details={},
+            ),
+            ProductMaterial(
+                material_key="sample-lci-001",
+                family_code="lci_sync_drive",
+                material_type="proposal_sample",
+                document_name="宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+                availability_status="available",
+                source_kind="private_sample",
+                tags=[],
+                details={},
+            ),
+        ]
+        self.catalog_service.list_materials = AsyncMock(return_value=available_rows)
+        self.catalog_service.get_active_catalog_version = AsyncMock(return_value="seed-20260419-v1")
+
+        result = asyncio.run(self.catalog_service.get_material_readiness(session=object()))
+
+        self.assertFalse(result["gate_passed"])
+        self.assertEqual(result["catalog_version"], "seed-20260419-v1")
+        self.assertIn("core_product_manuals", result["missing_items"])
+        self.assertIn("standard_bom", result["missing_items"])
+        self.assertFalse(result["phase_allowances"][2]["allowed"])
+        self.assertEqual(result["family_material_counts"]["hv_solid_state_starter"]["product_manual"], 1)
+        self.assertEqual(result["family_material_counts"]["lci_sync_drive"]["proposal_sample"], 1)
+
+    def test_get_material_readiness_marks_gate_passed_when_all_entry_materials_exist(self) -> None:
+        available_rows = [
+            ProductMaterial(
+                material_key="manual-lci-001",
+                family_code="lci_sync_drive",
+                material_type="product_manual",
+                document_name="LCI 产品手册.pdf",
+                availability_status="available",
+                source_kind="private_sample",
+                tags=[],
+                details={},
+            ),
+            ProductMaterial(
+                material_key="manual-vfd-001",
+                family_code="hv_vfd_multilevel",
+                material_type="product_manual",
+                document_name="高压变频器样本册.pdf",
+                availability_status="available",
+                source_kind="private_sample",
+                tags=[],
+                details={},
+            ),
+            ProductMaterial(
+                material_key="bom-001",
+                family_code="lci_sync_drive",
+                material_type="standard_bom",
+                document_name="LCI 标准 BOM.xlsx",
+                availability_status="available",
+                source_kind="private_sample",
+                tags=[],
+                details={},
+            ),
+            ProductMaterial(
+                material_key="interface-001",
+                family_code="lci_sync_drive",
+                material_type="interface_schedule",
+                document_name="LCI 点表.xlsx",
+                availability_status="available",
+                source_kind="private_sample",
+                tags=[],
+                details={},
+            ),
+            ProductMaterial(
+                material_key="rule-001",
+                family_code="hv_solid_state_starter",
+                material_type="selection_rule",
+                document_name="高压固态软起动选型规则.docx",
+                availability_status="available",
+                source_kind="private_sample",
+                tags=[],
+                details={},
+            ),
+            ProductMaterial(
+                material_key="alias-001",
+                family_code=None,
+                material_type="model_alias_map",
+                document_name="型号术语映射表.xlsx",
+                availability_status="available",
+                source_kind="private_sample",
+                tags=[],
+                details={},
+            ),
+        ]
+        self.catalog_service.list_materials = AsyncMock(return_value=available_rows)
+        self.catalog_service.get_active_catalog_version = AsyncMock(return_value="seed-20260419-v1")
+
+        result = asyncio.run(
+            self.catalog_service.get_material_readiness(
+                session=object(),
+                target_family_codes=["lci_sync_drive", "hv_vfd_multilevel"],
+            )
+        )
+
+        self.assertTrue(result["gate_passed"])
+        self.assertEqual(result["required_core_manual_family_count"], 2)
+        self.assertEqual(result["missing_items"], [])
+        self.assertTrue(all(item["allowed"] for item in result["phase_allowances"][2:]))
+        self.assertEqual(result["material_type_counts"]["product_manual"], 2)
+        self.assertEqual(result["family_material_counts"]["unclassified"]["model_alias_map"], 1)
+
+
+class SolutionServiceDesignTests(unittest.IsolatedAsyncioTestCase):
+    async def test_design_solution_loads_compatibility_rules_by_primary_family(self) -> None:
+        project_id = uuid4()
+        requirement_card_id = uuid4()
+        candidate = SimpleNamespace(
+            series=SimpleNamespace(
+                catalog_version="seed-20260419-v1",
+                family_code="lci_sync_drive",
+                code="lci_primary",
+            ),
+            selected_config=None,
+            score=1.0,
+            reasons=["目录匹配"],
+        )
+        fake_catalog = SimpleNamespace(
+            shortlist_primary_products=AsyncMock(
+                return_value=(SimpleNamespace(matching_signals=[]), [candidate])
+            ),
+            get_series_map=AsyncMock(return_value={}),
+            list_models=AsyncMock(return_value=[]),
+            list_interfaces=AsyncMock(return_value=[]),
+            list_materials=AsyncMock(return_value=[]),
+            list_compatibility_rules=AsyncMock(return_value=[]),
+        )
+        service = SolutionService(product_catalog=fake_catalog)
+        service._resolve_requirement_card = AsyncMock(return_value=SimpleNamespace(id=requirement_card_id))
+        service._next_version = AsyncMock(return_value=1)
+        service._build_solution_payload = lambda **_: {
+            "solution_summary": "测试方案",
+            "selected_products": [],
+            "interface_plan": {},
+            "key_constraints": [],
+            "open_questions": [],
+            "suggested_chapters": [],
+            "selection_reason": {},
+            "source_catalog_version": "seed-20260419-v1",
+        }
+
+        added: list[object] = []
+        session = SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(id=project_id)),
+            add=lambda row: added.append(row),
+            commit=AsyncMock(),
+            refresh=AsyncMock(),
+        )
+
+        await service.design_solution(session=session, project_id=project_id)
+
+        fake_catalog.list_compatibility_rules.assert_awaited_once()
+        _, kwargs = fake_catalog.list_compatibility_rules.await_args
+        self.assertEqual(kwargs["source_family_code"], "lci_sync_drive")
+        self.assertEqual(kwargs["catalog_version"], "seed-20260419-v1")
+        self.assertEqual(len(added), 1)
 
 
 if __name__ == "__main__":

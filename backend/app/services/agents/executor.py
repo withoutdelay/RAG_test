@@ -43,6 +43,7 @@ class ExecutorAgent:
                 max_tokens=max_tokens,
                 metadata={
                     "section": section,
+                    "global_params": global_params,
                     "retrieved_context": retrieved_context,
                     "recommended_assets": recommended_assets or [],
                     "reuse_pack": prompt_reuse_pack,

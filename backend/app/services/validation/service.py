@@ -28,9 +28,9 @@ from app.services.solution.context import get_preferred_solution_snapshot
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
-HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008", "VAL009", "VAL010", "VAL011", "VAL012", "VAL013"}
+HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008", "VAL009", "VAL010", "VAL011", "VAL012", "VAL013", "VAL014"}
 CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103", "VAL104", "VAL105", "VAL106", "VAL107", "VAL108"}
-BLOCKING_CONTENT_REVIEW_CODES = {"VAL011", "VAL012", "VAL013", "VAL108"}
+BLOCKING_CONTENT_REVIEW_CODES = {"VAL011", "VAL012", "VAL013", "VAL014", "VAL108"}
 ASSUMPTION_HINTS = ("待确认", "待补充", "TBD", "暂定", "后续确认")
 DECLARED_ASSUMPTION_CONTEXT_TOKENS = (
     "以最终",
@@ -54,6 +54,16 @@ ASSET_PLACEHOLDER_DETAIL_PATTERN = re.compile(r"\[\[ASSET:(FIGURE|TABLE|FORMULA)
 MARKDOWN_TABLE_ROW_PATTERN = re.compile(r"(?m)^\|.+\|\s*$")
 MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(r"(?m)^\|\s*:?-{3,}.*\|\s*$")
 QUANTITY_PAIR_PATTERN = re.compile(r"\d+(?:\.\d+)?(?:套|台|个|项|柜|面|回|路|只|组|根|支)")
+INTERFACE_SIGNAL_TOKEN_ALIASES = {
+    "fieldbus_adapter": ("fieldbus_adapter", "fieldbus adapter", "现场总线适配器", "总线适配器"),
+    "switchgear": ("switchgear", "开关柜"),
+    "oil_station": ("oil_station", "oil station", "油站"),
+    "cooler": ("cooler", "冷却器", "冷却系统"),
+    "excitation_cabinet": ("excitation_cabinet", "excitation cabinet", "励磁控制柜", "励磁"),
+    "sync_switching": ("sync_switching", "sync switching", "同步切换"),
+    "24vdc": ("24vdc", "24v dc"),
+}
+INTERFACE_SIGNAL_IGNORED_TOKENS = {"lci"}
 
 
 def flatten_outline_sections(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -463,6 +473,15 @@ def collect_validation_findings(
                 errors.append(supply_scope_issue)
                 section_results[section_id]["errors"].append(supply_scope_issue)
 
+            compatibility_issue = _build_solution_compatibility_issue(
+                section=section,
+                draft=draft,
+                solution_snapshot=solution_snapshot,
+            )
+            if compatibility_issue is not None:
+                errors.append(compatibility_issue)
+                section_results[section_id]["errors"].append(compatibility_issue)
+
         reuse_similarity = _compute_reuse_similarity(
             content=draft.content_md,
             reusable_blocks=reuse_pack.get("reusable_blocks") or [],
@@ -588,6 +607,9 @@ def build_review_task_blueprints(
                             "message": issue.get("message"),
                             "section_id": section_id or None,
                             "section_title": issue.get("section_title"),
+                            "level": issue.get("level"),
+                            "suggested_action": issue.get("suggested_action"),
+                            "details": (issue.get("details") or {}),
                         },
                     }
                 )
@@ -613,6 +635,9 @@ def build_review_task_blueprints(
                             "message": issue.get("message"),
                             "param_name": param_name,
                             "values": (issue.get("details") or {}).get("values") or [],
+                            "level": issue.get("level"),
+                            "suggested_action": issue.get("suggested_action"),
+                            "details": (issue.get("details") or {}),
                         },
                     }
                 )
@@ -637,6 +662,9 @@ def build_review_task_blueprints(
                             "message": issue.get("message"),
                             "section_id": section_id,
                             "section_title": issue.get("section_title"),
+                            "level": issue.get("level"),
+                            "suggested_action": issue.get("suggested_action"),
+                            "details": (issue.get("details") or {}),
                         },
                     }
                 )
@@ -665,6 +693,9 @@ def build_review_task_blueprints(
                     "message": issue.get("message"),
                     "section_id": section_id or None,
                     "section_title": issue.get("section_title"),
+                    "level": issue.get("level"),
+                    "suggested_action": issue.get("suggested_action"),
+                    "details": (issue.get("details") or {}),
                 },
             }
         )
@@ -713,6 +744,48 @@ def task_signature(
     if extra:
         parts.append(extra)
     return ":".join(parts)
+
+
+def _append_review_resolution_trace(
+    current: dict[str, Any],
+    *,
+    task: ReviewTask,
+    resolution: Any,
+    status: str,
+    resolved_at: str | None = None,
+) -> dict[str, Any]:
+    next_current = dict(current or {})
+    payload = task.payload if isinstance(task.payload, dict) else {}
+    raw_trace = next_current.get("review_resolution_trace")
+    trace = list(raw_trace) if isinstance(raw_trace, list) else []
+    trace_entry = {
+        "task_id": str(task.id),
+        "task_type": str(task.task_type),
+        "code": payload.get("code"),
+        "message": payload.get("message"),
+        "section_id": payload.get("section_id"),
+        "section_title": payload.get("section_title"),
+        "level": payload.get("level"),
+        "blocking_level": str(task.blocking_level),
+        "status": status,
+        "resolution": resolution,
+        "resolved_at": resolved_at or datetime.now(timezone.utc).isoformat(),
+        "suggested_action": payload.get("suggested_action"),
+    }
+    details = payload.get("details")
+    if isinstance(details, dict) and details:
+        trace_entry["details"] = details
+    trace.append(trace_entry)
+    next_current["review_resolution_trace"] = trace[-20:]
+
+    raw_review_resolutions = next_current.get("review_resolutions")
+    review_resolutions = dict(raw_review_resolutions) if isinstance(raw_review_resolutions, dict) else {}
+    review_resolutions[str(task.task_type)] = resolution
+    code = str(payload.get("code") or "").strip()
+    if code:
+        review_resolutions[code] = resolution
+    next_current["review_resolutions"] = review_resolutions
+    return next_current
 
 
 class ValidationService:
@@ -812,6 +885,7 @@ class ValidationService:
                     "figure_confirmed",
                     "accepted_param_values",
                     "review_resolutions",
+                    "review_resolution_trace",
                     "final_reviewed_at",
                     "recommended_assets",
                     "generation_mode",
@@ -1086,6 +1160,11 @@ class ValidationService:
         payload = task.payload if isinstance(task.payload, dict) else {}
         draft_version = int(payload.get("draft_version") or project.current_draft_version or 0)
         section_id = payload.get("section_id")
+        resolved_at = (
+            task.resolved_at.isoformat()
+            if isinstance(task.resolved_at, datetime)
+            else datetime.now(timezone.utc).isoformat()
+        )
         draft = None
         if section_id:
             result = await session.scalars(
@@ -1101,8 +1180,14 @@ class ValidationService:
 
         if task.task_type == "figure_confirm" and draft:
             current = draft.validator_result if isinstance(draft.validator_result, dict) else {}
+            current = _append_review_resolution_trace(
+                current,
+                task=task,
+                resolution=resolution,
+                status=status,
+                resolved_at=resolved_at,
+            )
             current["figure_confirmed"] = status == "resolved"
-            current.setdefault("review_resolutions", {})["figure_confirm"] = resolution
             draft.validator_result = current
             draft.status = "approved" if status == "resolved" else "rejected"
             session.add(draft)
@@ -1110,7 +1195,13 @@ class ValidationService:
         if task.task_type == "content_review" and draft:
             draft.status = "approved" if status == "resolved" else "rejected"
             current = draft.validator_result if isinstance(draft.validator_result, dict) else {}
-            current.setdefault("review_resolutions", {})["content_review"] = resolution
+            current = _append_review_resolution_trace(
+                current,
+                task=task,
+                resolution=resolution,
+                status=status,
+                resolved_at=resolved_at,
+            )
             draft.validator_result = current
             session.add(draft)
 
@@ -1141,21 +1232,35 @@ class ValidationService:
                     accepted = dict(current.get("accepted_param_values") or {})
                     accepted[str(param_name)] = resolved_value
                     current["accepted_param_values"] = accepted
+                    current = _append_review_resolution_trace(
+                        current,
+                        task=task,
+                        resolution=resolution,
+                        status=status,
+                        resolved_at=resolved_at,
+                    )
                     item.validator_result = current
                     session.add(item)
 
-        if task.task_type == "final_review" and status == "resolved":
+        if task.task_type == "final_review":
             drafts = await self._load_section_drafts(
                 session=session,
                 project_id=project.id,
                 draft_version=draft_version,
             )
-            reviewed_at = datetime.now(timezone.utc).isoformat()
             for item in drafts:
                 current = item.validator_result if isinstance(item.validator_result, dict) else {}
-                current["final_reviewed_at"] = reviewed_at
+                current = _append_review_resolution_trace(
+                    current,
+                    task=task,
+                    resolution=resolution,
+                    status=status,
+                    resolved_at=resolved_at,
+                )
+                if status == "resolved":
+                    current["final_reviewed_at"] = resolved_at
                 item.validator_result = current
-                if item.status in {"generated", "edited", "review_required"}:
+                if status == "resolved" and item.status in {"generated", "edited", "review_required"}:
                     item.status = "approved"
                 session.add(item)
 
@@ -1256,6 +1361,34 @@ def _solution_interface_plan(solution_snapshot: Any) -> dict[str, Any]:
     return interface_plan
 
 
+def _solution_selection_reason(solution_snapshot: Any) -> dict[str, Any]:
+    selection_reason = getattr(solution_snapshot, "selection_reason", None)
+    if not isinstance(selection_reason, dict):
+        return {}
+    return selection_reason
+
+
+def _solution_compatibility_actions(solution_snapshot: Any) -> list[dict[str, Any]]:
+    actions = _solution_selection_reason(solution_snapshot).get("compatibility_actions")
+    if not isinstance(actions, list):
+        return []
+    return [item for item in actions if isinstance(item, dict)]
+
+
+def _solution_catalog_model_matches(solution_snapshot: Any) -> list[dict[str, Any]]:
+    matches = _solution_selection_reason(solution_snapshot).get("catalog_model_matches")
+    if not isinstance(matches, list):
+        return []
+    return [item for item in matches if isinstance(item, dict)]
+
+
+def _solution_catalog_interface_entries(solution_snapshot: Any) -> list[dict[str, Any]]:
+    entries = _solution_interface_plan(solution_snapshot).get("catalog_interface_entries")
+    if not isinstance(entries, list):
+        return []
+    return [item for item in entries if isinstance(item, dict)]
+
+
 def _section_signal_text(*, section: dict[str, Any], draft: SectionDraft) -> str:
     return " ".join(
         [
@@ -1279,6 +1412,13 @@ def _is_solution_interface_section(*, section: dict[str, Any], draft: SectionDra
 def _is_solution_supply_scope_section(*, section: dict[str, Any], draft: SectionDraft) -> bool:
     text = _section_signal_text(section=section, draft=draft)
     return any(token in text for token in ("供货", "清单", "配置", "物料", "范围"))
+
+
+def _is_solution_compatibility_section(*, section: dict[str, Any], draft: SectionDraft) -> bool:
+    if _is_solution_supply_scope_section(section=section, draft=draft):
+        return True
+    text = _section_signal_text(section=section, draft=draft)
+    return any(token in text for token in ("主回路", "切换", "同步", "联锁", "旁路", "励磁", "整流", "配套"))
 
 
 def _product_aliases(product: dict[str, Any]) -> list[str]:
@@ -1307,6 +1447,43 @@ def _contains_interface_capability(content: str, *, label: str, value: Any) -> b
     return label_text in normalized and value_text in normalized
 
 
+def _expand_interface_signal_token(token: str) -> list[str]:
+    normalized = str(token or "").strip()
+    if not normalized:
+        return []
+    key = re.sub(r"\s+", "_", normalized).lower()
+    aliases = INTERFACE_SIGNAL_TOKEN_ALIASES.get(key)
+    if aliases:
+        return [item for item in aliases if item]
+    return [normalized]
+
+
+def _catalog_interface_signal_tokens(interface_entries: list[dict[str, Any]]) -> list[str]:
+    tokens: list[str] = []
+    for entry in interface_entries:
+        summaries = _stringify_items(entry.get("signal_summary"))
+        for summary in summaries:
+            candidate_values = [summary]
+            if "=" in summary:
+                _, rhs = summary.split("=", 1)
+                candidate_values = [rhs]
+            for value in candidate_values:
+                for fragment in re.split(r"[，,；;]+", value):
+                    fragment = str(fragment).strip()
+                    if not fragment:
+                        continue
+                    normalized_fragment = re.sub(r"\s+", "_", fragment).lower()
+                    if normalized_fragment in INTERFACE_SIGNAL_IGNORED_TOKENS:
+                        continue
+                    for alias in _expand_interface_signal_token(fragment):
+                        alias = str(alias).strip()
+                        if len(alias) < 3 and alias.upper() not in {"DCS", "PLC"}:
+                            continue
+                        if alias not in tokens:
+                            tokens.append(alias)
+    return tokens
+
+
 def _build_solution_parameter_issue(
     *,
     section: dict[str, Any],
@@ -1320,6 +1497,7 @@ def _build_solution_parameter_issue(
         return None
 
     primary = products[0]
+    model_matches = _solution_catalog_model_matches(solution_snapshot)
     missing_fields: list[str] = []
     primary_name = str(primary.get("name") or "").strip()
     if primary_name and not _contains_any_product_alias(draft.content_md, primary):
@@ -1334,6 +1512,13 @@ def _build_solution_parameter_issue(
         expected_value=f"{power_kw}kW",
     ):
         missing_fields.append("power_rating")
+    model_number = str(
+        (model_matches[0].get("model_number") if model_matches else None)
+        or primary.get("model_number")
+        or ""
+    ).strip()
+    if model_number and not _contains_normalized_value(draft.content_md, model_number):
+        missing_fields.append("model_number")
     if not missing_fields:
         return None
     return make_issue(
@@ -1348,6 +1533,7 @@ def _build_solution_parameter_issue(
             "expected_primary_product": primary_name or None,
             "expected_voltage_level": voltage or None,
             "expected_power_rating": f"{power_kw}kW" if power_kw not in (None, "") else None,
+            "expected_model_number": model_number or None,
         },
     )
 
@@ -1365,6 +1551,7 @@ def _build_solution_interface_issue(
         return None
 
     missing_items: list[str] = []
+    interface_entries = _solution_catalog_interface_entries(solution_snapshot)
     protocol = str(interface_plan.get("dcs_protocol") or "").strip()
     if protocol and not _contains_normalized_value(draft.content_md, protocol):
         missing_items.append("dcs_protocol")
@@ -1372,6 +1559,12 @@ def _build_solution_interface_issue(
     for label in ("DI", "DO", "AI", "AO"):
         if not _contains_interface_capability(draft.content_md, label=label, value=io_allocation.get(label)):
             missing_items.append(label)
+    interface_signal_tokens = _catalog_interface_signal_tokens(interface_entries)
+    if interface_signal_tokens and not any(
+        _contains_normalized_value(draft.content_md, token)
+        for token in interface_signal_tokens
+    ):
+        missing_items.append("catalog_interface_signals")
     if not missing_items:
         return None
     return make_issue(
@@ -1385,6 +1578,7 @@ def _build_solution_interface_issue(
             "missing_items": missing_items,
             "expected_protocol": protocol or None,
             "expected_io_allocation": io_allocation,
+            "expected_catalog_interface_signals": interface_signal_tokens[:8],
         },
     )
 
@@ -1420,6 +1614,92 @@ def _build_solution_supply_scope_issue(
             "expected_products": [str(item.get("name") or item.get("role") or "未命名设备") for item in products],
             "markdown_table_present": _has_markdown_table(draft.content_md),
         },
+    )
+
+
+def _stringify_items(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _compatibility_content_tokens(action: dict[str, Any], *, risk_flags: list[str]) -> list[str]:
+    tokens: list[str] = []
+    for value in [
+        str(action.get("target_family_code") or "").strip(),
+        str(action.get("condition") or "").strip(),
+        *_stringify_items(action.get("preferred_series_codes")),
+        *_stringify_items(action.get("optional_series_codes")),
+        *_stringify_items(action.get("covered_series_codes")),
+        *_stringify_items(action.get("added_series_codes")),
+        *_stringify_items(action.get("missing_series_codes")),
+        *risk_flags,
+    ]:
+        normalized = str(value or "").strip()
+        if not normalized:
+            continue
+        if normalized not in tokens:
+            tokens.append(normalized)
+        for fragment in re.split(r"[，,；;。:\s/、()（）或与及]+", normalized):
+            fragment = fragment.strip()
+            if len(fragment) < 2:
+                continue
+            if fragment.lower() in {"requires", "recommended", "optional", "conflicts_with"}:
+                continue
+            if fragment not in tokens:
+                tokens.append(fragment)
+    return tokens
+
+
+def _build_solution_compatibility_issue(
+    *,
+    section: dict[str, Any],
+    draft: SectionDraft,
+    solution_snapshot: Any,
+) -> dict[str, Any] | None:
+    if not _is_solution_compatibility_section(section=section, draft=draft):
+        return None
+
+    selection_reason = _solution_selection_reason(solution_snapshot)
+    compatibility_actions = _solution_compatibility_actions(solution_snapshot)
+    if not compatibility_actions:
+        return None
+
+    risk_flags = [
+        str(item).strip()
+        for item in (selection_reason.get("risk_flags") or [])
+        if str(item).strip()
+    ]
+    uncovered_actions: list[dict[str, Any]] = []
+    for action in compatibility_actions:
+        if not bool(action.get("applies")):
+            continue
+        missing_series_codes = _stringify_items(action.get("missing_series_codes"))
+        if not missing_series_codes:
+            continue
+        expected_tokens = _compatibility_content_tokens(action, risk_flags=risk_flags)
+        if any(_contains_normalized_value(draft.content_md, token) for token in expected_tokens):
+            continue
+        uncovered_actions.append(
+            {
+                "target_family_code": action.get("target_family_code"),
+                "relation_type": action.get("relation_type"),
+                "condition": action.get("condition"),
+                "missing_series_codes": missing_series_codes,
+            }
+        )
+
+    if not uncovered_actions:
+        return None
+
+    return make_issue(
+        code="VAL014",
+        level="P0",
+        section_id=draft.section_id,
+        section_title=draft.title,
+        message=f"章节《{draft.title}》未体现方案快照中的配套兼容规则或缺口提示。",
+        suggested_action="补充已触发的配套规则、缺失配套目录项或切换条件说明，再重新校验。",
+        details={"uncovered_actions": uncovered_actions, "risk_flags": risk_flags},
     )
 
 

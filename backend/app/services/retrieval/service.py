@@ -16,13 +16,11 @@ from app.models.project import Project
 from app.models.requirement_card import RequirementCard
 from app.schemas.retrieval import RetrievalFilters, RetrievalSearchRequest
 from app.services.retrieval.case_service import CaseLibraryService
+from app.services.retrieval.query_hints import PRODUCT_LINE_QUERY_HINTS
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 from app.services.vectorstore.chunk_quality import flatten_heading_text, is_noise_chunk
 from app.services.vectorstore.retriever import Retriever
 
-PRODUCT_LINE_QUERY_HINTS: dict[str, tuple[str, ...]] = {
-    "hv_vfd": ("高压变频", "高压变频器", "HV-VFD", "变频器"),
-}
 TECHNICAL_QUERY_TERMS = (
     "LCI",
     "变频",
@@ -50,6 +48,32 @@ TECHNICAL_PATTERN = re.compile(
     r"(?:同步电机|异步电机|永磁电机|高炉鼓风机|鼓风机|压缩机|LCI|DCS|PLC|联锁|供货范围|接口|变频器|软起动)",
     re.IGNORECASE,
 )
+CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+READABLE_CHAR_PATTERN = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]")
+
+
+def _strip_nul_text(value: str) -> str:
+    return CONTROL_CHAR_PATTERN.sub("", str(value or ""))
+
+
+def _looks_readable_text(value: str) -> bool:
+    normalized = _strip_nul_text(value).strip()
+    if not normalized:
+        return False
+    readable_count = len(READABLE_CHAR_PATTERN.findall(normalized))
+    return readable_count / max(len(normalized), 1) >= 0.35
+
+
+def _sanitize_json_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _strip_nul_text(value)
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _sanitize_json_value(item) for key, item in value.items()}
+    return value
 
 
 def _dedupe_keep_order(values: list[str]) -> list[str]:
@@ -137,11 +161,13 @@ def _compute_reusability_score(result: dict[str, Any]) -> float:
     if metadata.get("needs_asset_lookup"):
         score *= 0.85
     return round(min(max(score, 0.0), 1.0), 4)
+
+
 def _is_noise_evidence_result(result: dict[str, Any]) -> bool:
     raw_content = str(result.get("content") or "").strip()
     if not raw_content:
         return True
-    heading_text = flatten_heading_text(result.get("heading_path"))
+    heading_text = _strip_nul_text(flatten_heading_text(result.get("heading_path")))
     chunk_type = str(result.get("chunk_type") or "PLAIN").upper()
     return is_noise_chunk(
         chunk_type=chunk_type,
@@ -248,7 +274,7 @@ def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif chunk_type == "IMAGE":
             evidence_type = "figure"
         metadata = result.get("metadata") or {}
-        raw_content = str(result.get("content") or "")
+        raw_content = _strip_nul_text(str(result.get("content") or ""))
         items.append(
             {
                 "evidence_id": f"ev_{index:03d}",
@@ -256,9 +282,9 @@ def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "source_chunk_id": str(result.get("chunk_id")),
                 "source_chunk_type": chunk_type,
                 "source_doc_id": str(result.get("document_id")),
-                "source_title": result.get("document_name"),
+                "source_title": _strip_nul_text(str(result.get("document_name") or "")),
                 "page_range": [],
-                "heading_path": path_segments,
+                "heading_path": [_strip_nul_text(segment) for segment in path_segments],
                 "summary": raw_content[:180],
                 "raw_content": raw_content,
                 "relevance_score": float(result.get("score") or 0),
@@ -277,12 +303,17 @@ def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def build_case_fallback_evidence_items(case_candidates: list[dict[str, Any]], *, limit: int = 3) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for index, candidate in enumerate(case_candidates[:limit], start=1):
-        top_level_titles = [str(item).strip() for item in (candidate.get("top_level_titles") or []) if str(item).strip()]
-        retrieval_text = str(candidate.get("retrieval_text") or "").strip()
-        reason = str(candidate.get("reason") or "").strip()
+        top_level_titles = [
+            _strip_nul_text(str(item).strip())
+            for item in (candidate.get("top_level_titles") or [])
+            if str(item).strip() and _looks_readable_text(str(item))
+        ]
+        retrieval_text = _strip_nul_text(str(candidate.get("retrieval_text") or "").strip())
+        reason = _strip_nul_text(str(candidate.get("reason") or "").strip())
+        source_title = _strip_nul_text(str(candidate.get("file_name") or "").strip())
         summary_parts = [
             f"匹配原因：{reason}" if reason else "",
-            f"可参考章节：{'；'.join(top_level_titles[:5])}" if top_level_titles else "",
+            f"案例来源：{source_title}" if source_title else "",
         ]
         raw_content = "\n".join(part for part in summary_parts if part).strip() or retrieval_text[:420]
         items.append(
@@ -292,9 +323,9 @@ def build_case_fallback_evidence_items(case_candidates: list[dict[str, Any]], *,
                 "source_chunk_id": f"case:{candidate.get('sample_id')}",
                 "source_chunk_type": "CASE_SUMMARY",
                 "source_doc_id": str(candidate.get("sample_id") or ""),
-                "source_title": candidate.get("file_name"),
+                "source_title": source_title,
                 "page_range": [],
-                "heading_path": top_level_titles[:3],
+                "heading_path": [source_title] if source_title else top_level_titles[:3],
                 "summary": raw_content[:180],
                 "raw_content": raw_content,
                 "relevance_score": float(candidate.get("score") or 0),
@@ -430,7 +461,7 @@ class EvidenceBundleService:
             project_id=project_id,
             requirement_card_id=card.id,
             retrieval_version=retrieval_version,
-            content={
+            content=_sanitize_json_value({
                 "query": query,
                 "filters": active_filters.model_dump(exclude_none=True),
                 "retrieval_strategy": retrieval_strategy,
@@ -439,7 +470,7 @@ class EvidenceBundleService:
                 "fallback_results": fallback_items,
                 "quality_trace": quality_trace,
                 "source_requirement_card_id": str(card.id),
-            },
+            }),
             quality_score=quality_score,
         )
         session.add(bundle)

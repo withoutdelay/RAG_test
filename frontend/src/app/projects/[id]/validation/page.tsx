@@ -10,9 +10,282 @@ import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from 'sonner';
 import api, { getApiErrorMessage, isNotFoundError } from '@/lib/api';
-import { ReviewTask, ValidationReport } from '@/lib/types';
+import {
+  ReviewTaskActionStatus,
+  buildReviewResolutionPayload,
+  issueFromTaskPayload,
+  toRecord,
+  toRecordArray,
+  toStringArray,
+} from '@/lib/review-tasks';
+import { ReviewTask, ValidationIssue, ValidationReport } from '@/lib/types';
 
-type ReviewTaskActionStatus = 'resolved' | 'rejected';
+const DETAIL_LABELS: Record<string, string> = {
+  missing_fields: 'Missing Fields',
+  missing_items: 'Missing Items',
+  values: 'Conflicting Values',
+  missing_products: 'Missing Products',
+  expected_products: 'Expected Products',
+  expected_catalog_interface_signals: 'Expected Interface Signals',
+  missing_series_codes: 'Missing Series',
+};
+
+const TOKEN_LABELS: Record<string, string> = {
+  primary_product: 'Primary Product',
+  voltage_level: 'Voltage Level',
+  power_rating: 'Power Rating',
+  model_number: 'Model Number',
+  dcs_protocol: 'DCS Protocol',
+  catalog_interface_signals: 'Catalog Interface Signals',
+  DI: 'DI',
+  DO: 'DO',
+  AI: 'AI',
+  AO: 'AO',
+};
+
+function humanizeToken(value: string): string {
+  return TOKEN_LABELS[value] || value.replace(/_/g, ' ');
+}
+
+function humanizeDetailKey(value: string): string {
+  return DETAIL_LABELS[value] || value.replace(/_/g, ' ');
+}
+
+function formatScalarValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map((item) => String(item)).join(', ');
+  if (value && typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function formatRelationType(value: unknown): string {
+  const relation = String(value || '').trim().toLowerCase();
+  if (relation === 'requires') return 'Required';
+  if (relation === 'recommended') return 'Recommended';
+  if (relation === 'optional') return 'Optional';
+  if (relation === 'conflicts_with') return 'Conflict';
+  return String(value || '');
+}
+
+function getOrderedActionableReviewTasks(tasks: ReviewTask[]): ReviewTask[] {
+  return [
+    ...tasks.filter((task) => task.status === 'open' || task.status === 'in_progress'),
+    ...tasks.filter((task) => task.status === 'rejected'),
+  ];
+}
+
+function pickNextReviewTask(tasks: ReviewTask[], excludedTaskIds: string[] = []): ReviewTask | null {
+  const actionableTasks = getOrderedActionableReviewTasks(tasks);
+  if (actionableTasks.length === 0) {
+    return null;
+  }
+  const excluded = new Set(excludedTaskIds.filter(Boolean));
+  return actionableTasks.find((task) => !excluded.has(task.id)) || actionableTasks[0] || null;
+}
+
+function buildExportReadyUrl(projectId: string): string {
+  return `/projects/${projectId}/export?review_completed=1&source=validation`;
+}
+
+function IssueStructuredDetails({ issue }: { issue: ValidationIssue }) {
+  const details = toRecord(issue.details);
+  const missingFields = toStringArray(details.missing_fields).map(humanizeToken);
+  const missingItems = toStringArray(details.missing_items).map(humanizeToken);
+  const values = toStringArray(details.values);
+  const missingProducts = toStringArray(details.missing_products);
+  const expectedProducts = toStringArray(details.expected_products);
+  const expectedSignals = toStringArray(details.expected_catalog_interface_signals);
+  const uncoveredActions = toRecordArray(details.uncovered_actions);
+  const genericDetails = Object.entries(details).filter(
+    ([key]) =>
+      ![
+        'missing_fields',
+        'missing_items',
+        'values',
+        'missing_products',
+        'expected_products',
+        'expected_catalog_interface_signals',
+        'uncovered_actions',
+      ].includes(key)
+  );
+
+  if (
+    missingFields.length === 0 &&
+    missingItems.length === 0 &&
+    values.length === 0 &&
+    missingProducts.length === 0 &&
+    expectedProducts.length === 0 &&
+    expectedSignals.length === 0 &&
+    uncoveredActions.length === 0 &&
+    genericDetails.length === 0
+  ) {
+    return null;
+  }
+
+  return (
+    <div className="mt-3 space-y-3 rounded-md border border-border/70 bg-white/70 p-3">
+      {missingFields.length > 0 && (
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Missing Fields</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {missingFields.map((item) => (
+              <Badge key={`missing-field-${item}`} variant="warning" className="text-[11px]">
+                {item}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {missingItems.length > 0 && (
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Missing Items</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {missingItems.map((item) => (
+              <Badge key={`missing-item-${item}`} variant="warning" className="text-[11px]">
+                {item}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {values.length > 0 && (
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Conflicting Values</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {values.map((item) => (
+              <Badge key={`value-${item}`} variant="outline" className="text-[11px]">
+                {item}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {missingProducts.length > 0 && (
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Missing Products</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {missingProducts.map((item) => (
+              <Badge key={`missing-product-${item}`} variant="warning" className="text-[11px]">
+                {item}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {expectedProducts.length > 0 && (
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Expected Products</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {expectedProducts.map((item) => (
+              <Badge key={`expected-product-${item}`} variant="outline" className="text-[11px]">
+                {item}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {expectedSignals.length > 0 && (
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Expected Interface Signals</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {expectedSignals.map((item) => (
+              <Badge key={`expected-signal-${item}`} variant="outline" className="text-[11px]">
+                {item}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {uncoveredActions.length > 0 && (
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Compatibility Gaps</p>
+          <div className="mt-2 space-y-2">
+            {uncoveredActions.map((action, index) => (
+              <div key={`uncovered-action-${index}`} className="rounded-md border border-border/70 bg-[#fbfcf8] px-3 py-2 text-xs leading-5 text-muted-foreground">
+                {(() => {
+                  const targetFamilyCode = String(action.target_family_code || '').trim();
+                  const relationType = String(action.relation_type || '').trim();
+                  const condition = String(action.condition || '').trim();
+                  const missingSeries = toStringArray(action.missing_series_codes);
+
+                  return (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {targetFamilyCode && (
+                          <Badge variant="outline" className="text-[11px]">
+                            {targetFamilyCode}
+                          </Badge>
+                        )}
+                        {relationType && (
+                          <Badge variant="warning" className="text-[11px]">
+                            {formatRelationType(relationType)}
+                          </Badge>
+                        )}
+                      </div>
+                      {condition && <p className="mt-2">{condition}</p>}
+                      {missingSeries.length > 0 && (
+                        <p className="mt-2">Missing: {missingSeries.join(', ')}</p>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {genericDetails.length > 0 && (
+        <div className="space-y-2">
+          {genericDetails.map(([key, value]) => (
+            <div key={`generic-detail-${key}`} className="text-xs leading-5 text-muted-foreground">
+              <span className="font-medium text-foreground">{humanizeDetailKey(key)}:</span>{' '}
+              {formatScalarValue(value)}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IssueSummaryCard({
+  issue,
+  tone,
+}: {
+  issue: ValidationIssue;
+  tone: 'error' | 'warning';
+}) {
+  const isError = tone === 'error';
+  return (
+    <div
+      className={`rounded-md border p-3 ${
+        isError ? 'border-red-200 bg-white text-red-900' : 'border-amber-200 bg-white text-amber-900'
+      }`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={isError ? 'destructive' : 'warning'} className="text-[11px]">
+          {issue.code}
+        </Badge>
+        {issue.section_title && (
+          <Badge variant="outline" className="text-[11px]">
+            {issue.section_title}
+          </Badge>
+        )}
+      </div>
+      <p className="mt-2 text-xs leading-5">{issue.message}</p>
+      {issue.suggested_action && (
+        <p className="mt-2 text-[11px] leading-5 text-muted-foreground">{issue.suggested_action}</p>
+      )}
+      <IssueStructuredDetails issue={issue} />
+    </div>
+  );
+}
 
 export default function ValidationPage() {
   const params = useParams();
@@ -23,39 +296,50 @@ export default function ValidationPage() {
   const [loading, setLoading] = useState(true);
   const [validating, setValidating] = useState(false);
   const [actingTaskId, setActingTaskId] = useState<string | null>(null);
+  const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
 
-  const fetchValidation = useCallback(async () => {
+  const loadValidationData = useCallback(async ({ showLoading = true }: { showLoading?: boolean } = {}) => {
     try {
-      const res = await api.get(`/projects/${projectId}/validation/latest`);
-      setReport(res.data);
-    } catch (error) {
-      if (!isNotFoundError(error)) {
-        console.error(error);
-        toast.error(getApiErrorMessage(error, 'Failed to load validation report'));
+      if (showLoading) {
+        setLoading(true);
       }
-      setReport(null);
-    }
-  }, [projectId]);
 
-  const fetchReviewTasks = useCallback(async () => {
-    try {
-      const res = await api.get(`/projects/${projectId}/review-tasks`);
-      setReviewTasks(Array.isArray(res.data) ? res.data : []);
-    } catch (error) {
-      console.error(error);
-      toast.error(getApiErrorMessage(error, 'Failed to load review tasks'));
-      setReviewTasks([]);
+      let nextReport: ValidationReport | null = null;
+      let nextReviewTasks: ReviewTask[] = [];
+      try {
+        const reportRes = await api.get(`/projects/${projectId}/validation/latest`);
+        nextReport = reportRes.data as ValidationReport;
+      } catch (error) {
+        if (!isNotFoundError(error)) {
+          console.error(error);
+          toast.error(getApiErrorMessage(error, 'Failed to load validation report'));
+        }
+      }
+
+      try {
+        const tasksRes = await api.get(`/projects/${projectId}/review-tasks`);
+        nextReviewTasks = Array.isArray(tasksRes.data) ? (tasksRes.data as ReviewTask[]) : [];
+      } catch (error) {
+        console.error(error);
+        toast.error(getApiErrorMessage(error, 'Failed to load review tasks'));
+      }
+
+      setReport(nextReport);
+      setReviewTasks(nextReviewTasks);
+      return {
+        report: nextReport,
+        reviewTasks: nextReviewTasks,
+      };
+    } finally {
+      if (showLoading) {
+        setLoading(false);
+      }
     }
   }, [projectId]);
 
   const refreshValidationData = useCallback(async () => {
-    try {
-      setLoading(true);
-      await Promise.all([fetchValidation(), fetchReviewTasks()]);
-    } finally {
-      setLoading(false);
-    }
-  }, [fetchReviewTasks, fetchValidation]);
+    await loadValidationData({ showLoading: true });
+  }, [loadValidationData]);
 
   useEffect(() => {
     if (projectId) {
@@ -68,7 +352,7 @@ export default function ValidationPage() {
     try {
       await api.post(`/projects/${projectId}/validate`, {});
       toast.success('Validation process started');
-      await refreshValidationData();
+      await loadValidationData({ showLoading: false });
     } catch (error) {
       console.error(error);
       toast.error(getApiErrorMessage(error, 'Error running validation'));
@@ -77,19 +361,56 @@ export default function ValidationPage() {
     }
   };
 
+  const rerunValidationAndAdvance = useCallback(
+    async (excludedTaskIds: string[]) => {
+      setValidating(true);
+      try {
+        await api.post(`/projects/${projectId}/validate`, {});
+        const nextData = await loadValidationData({ showLoading: false });
+        const nextTask = pickNextReviewTask(nextData.reviewTasks, excludedTaskIds);
+        setFocusedTaskId(nextTask?.id || null);
+        if (nextTask) {
+          const nextIssue = issueFromTaskPayload(nextTask.payload || {});
+          toast.success(
+            `Validation rerun complete. Next task: ${nextIssue.code || nextIssue.section_title || nextTask.task_type}`,
+          );
+        } else {
+          if (nextData.report?.status === 'passed') {
+            toast.success('Validation rerun complete. Export is ready.');
+            router.push(buildExportReadyUrl(projectId));
+            return;
+          }
+          toast.success('Validation rerun complete. No blocking tasks remain.');
+        }
+      } catch (error) {
+        console.error(error);
+        toast.error(getApiErrorMessage(error, 'Review task resolved, but validation rerun failed'));
+        await loadValidationData({ showLoading: false });
+      } finally {
+        setValidating(false);
+      }
+    },
+    [loadValidationData, projectId, router],
+  );
+
   const handleTaskAction = async (
-    taskId: string,
+    task: ReviewTask,
     resolution: string,
     status: ReviewTaskActionStatus,
   ) => {
-    setActingTaskId(taskId);
+    setActingTaskId(task.id);
     try {
-      await api.post(`/projects/${projectId}/review-tasks/${taskId}/resolve`, {
-        resolution,
+      await api.post(`/projects/${projectId}/review-tasks/${task.id}/resolve`, {
+        resolution: buildReviewResolutionPayload(task, resolution, status),
         status,
       });
-      toast.success(status === 'resolved' ? 'Review task resolved' : 'Review task rejected');
-      await refreshValidationData();
+      if (status === 'resolved') {
+        await rerunValidationAndAdvance([task.id]);
+      } else {
+        toast.success('Review task rejected');
+        await loadValidationData({ showLoading: false });
+        setFocusedTaskId(task.id);
+      }
     } catch (error) {
       console.error(error);
       toast.error(getApiErrorMessage(error, `Error ${status === 'resolved' ? 'resolving' : 'rejecting'} task`));
@@ -111,6 +432,37 @@ export default function ValidationPage() {
     () => reviewTasks.filter((task) => task.status === 'resolved'),
     [reviewTasks],
   );
+  const focusedTask = useMemo(
+    () => reviewTasks.find((task) => task.id === focusedTaskId) || null,
+    [focusedTaskId, reviewTasks],
+  );
+  const focusedIssue = focusedTask ? issueFromTaskPayload(focusedTask.payload || {}) : null;
+
+  useEffect(() => {
+    const orderedTasks = getOrderedActionableReviewTasks(reviewTasks);
+    if (orderedTasks.length === 0) {
+      if (focusedTaskId !== null) {
+        setFocusedTaskId(null);
+      }
+      return;
+    }
+    if (!focusedTaskId || !orderedTasks.some((task) => task.id === focusedTaskId)) {
+      setFocusedTaskId(orderedTasks[0].id);
+    }
+  }, [focusedTaskId, reviewTasks]);
+
+  useEffect(() => {
+    if (!focusedTaskId) {
+      return;
+    }
+    const element = document.getElementById(`review-task-${focusedTaskId}`);
+    if (!element) {
+      return;
+    }
+    window.setTimeout(() => {
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 120);
+  }, [focusedTaskId, reviewTasks]);
 
   return (
     <div className="p-6 space-y-6 flex flex-col h-full overflow-hidden">
@@ -125,7 +477,7 @@ export default function ValidationPage() {
         </div>
         <div className="flex space-x-2">
           {report?.status === 'passed' && blockingTasks.length === 0 && (
-            <Button onClick={() => router.push(`/projects/${projectId}/export`)} className="bg-green-600 hover:bg-green-700">
+            <Button onClick={() => router.push(buildExportReadyUrl(projectId))} className="bg-green-600 hover:bg-green-700">
               Proceed to Export <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           )}
@@ -211,15 +563,9 @@ export default function ValidationPage() {
                       {!report.errors?.length ? (
                         <p className="text-xs text-muted-foreground">No errors found.</p>
                       ) : (
-                        report.errors.map((err, index) => {
-                          const isHighPriority = err.code === 'VAL008' || err.code === 'VAL009' || err.code === 'VAL104' || err.code === 'VAL105' || err.code === 'VAL106';
-                          return (
-                            <div key={`error-${index}`} className={`text-xs p-2 rounded border ${isHighPriority ? 'bg-red-100 text-red-900 border-red-300 font-bold shadow-sm' : 'bg-white text-red-800 border-red-100'}`}>
-                              <span className="inline-block mr-1">[{err.code}]</span> {err.message}
-                              {isHighPriority && <span className="block mt-1 font-normal opacity-80 text-[10px]">Critical rule violation. Must be corrected in draft section directly.</span>}
-                            </div>
-                          );
-                        })
+                        report.errors.map((err, index) => (
+                          <IssueSummaryCard key={`error-${index}`} issue={err} tone="error" />
+                        ))
                       )}
                     </div>
                   </details>
@@ -234,9 +580,7 @@ export default function ValidationPage() {
                         <p className="text-xs text-muted-foreground">No warnings.</p>
                       ) : (
                         report.warnings.map((warn, index) => (
-                          <div key={`warn-${index}`} className="text-xs bg-white text-amber-800 p-2 rounded border border-amber-100">
-                            <span className="inline-block mr-1 font-semibold">[{warn.code}]</span> {warn.message}
-                          </div>
+                          <IssueSummaryCard key={`warn-${index}`} issue={warn} tone="warning" />
                         ))
                       )}
                     </div>
@@ -257,6 +601,19 @@ export default function ValidationPage() {
             </div>
 
             <ScrollArea className="flex-1 p-4">
+              {focusedTask && (
+                <div className="mb-4 rounded-md border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-950">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-semibold">Current review target</span>
+                    <Badge variant="outline">{focusedIssue?.code || focusedTask.task_type}</Badge>
+                    {focusedIssue?.section_title ? <Badge variant="outline">{focusedIssue.section_title}</Badge> : null}
+                  </div>
+                  <p className="mt-2 leading-6">
+                    {focusedIssue?.message || 'Resolve this item or open it in the editor for in-context revision.'}
+                  </p>
+                </div>
+              )}
+
               {blockingTasks.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
                   <CheckCircle2 className="w-12 h-12 text-green-500 mb-4 opacity-70" />
@@ -278,7 +635,10 @@ export default function ValidationPage() {
                           key={task.id}
                           task={task}
                           actingTaskId={actingTaskId}
+                          isFocused={focusedTaskId === task.id}
+                          onFocus={() => setFocusedTaskId(task.id)}
                           onAction={handleTaskAction}
+                          projectId={projectId}
                         />
                       ))}
                     </div>
@@ -300,7 +660,10 @@ export default function ValidationPage() {
                           key={task.id}
                           task={task}
                           actingTaskId={actingTaskId}
+                          isFocused={focusedTaskId === task.id}
+                          onFocus={() => setFocusedTaskId(task.id)}
                           onAction={handleTaskAction}
+                          projectId={projectId}
                         />
                       ))}
                     </div>
@@ -341,24 +704,56 @@ export default function ValidationPage() {
 function ReviewTaskCard({
   task,
   actingTaskId,
+  isFocused,
+  onFocus,
   onAction,
+  projectId,
 }: {
   task: ReviewTask;
   actingTaskId: string | null;
-  onAction: (taskId: string, resolution: string, status: ReviewTaskActionStatus) => void;
+  isFocused: boolean;
+  onFocus: () => void;
+  onAction: (task: ReviewTask, resolution: string, status: ReviewTaskActionStatus) => void;
+  projectId: string;
 }) {
   const [resolution, setResolution] = useState('');
   const isActionable = task.status === 'open' || task.status === 'in_progress';
   const isActing = actingTaskId === task.id;
+  const issue = issueFromTaskPayload(task.payload || {});
+  const payloadDetails = toRecord(task.payload?.details);
+  const router = useRouter();
 
   return (
-    <div className={`p-4 border rounded-lg ${task.blocking_level === 'P0' ? 'border-red-300 bg-red-50/30' : 'border-amber-200 bg-amber-50/20'}`}>
+    <div
+      id={`review-task-${task.id}`}
+      onClick={onFocus}
+      className={`rounded-lg border p-4 transition-all ${
+        isFocused
+          ? 'ring-2 ring-indigo-300 ring-offset-2 ring-offset-white'
+          : ''
+      } ${task.blocking_level === 'P0' ? 'border-red-300 bg-red-50/30' : 'border-amber-200 bg-amber-50/20'}`}
+    >
       <div className="flex justify-between items-start mb-2">
         <div className="flex items-center space-x-2">
           <Badge variant={task.blocking_level === 'P0' ? 'destructive' : 'warning'} className="text-xs">
             {task.blocking_level}
           </Badge>
           <span className="font-semibold text-sm uppercase text-slate-700">{task.task_type.replace('_', ' ')}</span>
+          {issue.code && (
+            <Badge variant="outline" className="text-[11px]">
+              {issue.code}
+            </Badge>
+          )}
+          {issue.section_title && (
+            <Badge variant="outline" className="text-[11px]">
+              {issue.section_title}
+            </Badge>
+          )}
+          {isFocused && (
+            <Badge variant="outline" className="text-[11px] border-indigo-300 bg-indigo-100 text-indigo-900">
+              Focused
+            </Badge>
+          )}
         </div>
         <Badge variant="outline" className="uppercase text-xs">
           {task.status}
@@ -371,10 +766,23 @@ function ReviewTaskCard({
           : 'Review consistency or verify content parameters.'}
       </div>
 
+      {issue.suggested_action && (
+        <p className="rounded-md border border-border/70 bg-white/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
+          {issue.suggested_action}
+        </p>
+      )}
+
+      <IssueStructuredDetails issue={{ ...issue, details: payloadDetails }} />
+
       {Object.keys(task.payload || {}).length > 0 && (
-        <pre className="text-xs bg-black/5 p-2 rounded font-mono mb-4 whitespace-pre-wrap">
-          {JSON.stringify(task.payload, null, 2)}
-        </pre>
+        <details className="mt-4 rounded-md border border-border/70 bg-white/70">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground">
+            Raw Payload
+          </summary>
+          <pre className="border-t border-border/70 p-3 text-xs font-mono whitespace-pre-wrap">
+            {JSON.stringify(task.payload, null, 2)}
+          </pre>
+        </details>
       )}
 
       <div className="mt-4 pt-4 border-t flex flex-col space-y-3">
@@ -385,13 +793,24 @@ function ReviewTaskCard({
           className="text-sm min-h-[80px]"
           disabled={!isActionable}
         />
+        {issue.section_id && (
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => router.push(`/projects/${projectId}/editor?section_id=${issue.section_id}&review_task_id=${task.id}`)}
+            >
+              Open in Editor
+            </Button>
+          </div>
+        )}
         {isActionable ? (
           <div className="flex items-center justify-end gap-2">
             <Button
               size="sm"
               variant="outline"
               className="text-slate-600 border-slate-300 hover:bg-slate-100"
-              onClick={() => onAction(task.id, resolution, 'rejected')}
+              onClick={() => onAction(task, resolution, 'rejected')}
               disabled={isActing || !resolution.trim()}
             >
               {isActing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ThumbsDown className="mr-2 h-4 w-4" />}
@@ -400,7 +819,7 @@ function ReviewTaskCard({
             <Button
               size="sm"
               className="self-end bg-green-600 hover:bg-green-700 text-white"
-              onClick={() => onAction(task.id, resolution, 'resolved')}
+              onClick={() => onAction(task, resolution, 'resolved')}
               disabled={isActing || !resolution.trim()}
             >
               {isActing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}

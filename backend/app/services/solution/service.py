@@ -7,12 +7,72 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.product_compatibility import ProductCompatibility
+from app.models.product_interface import ProductInterface
+from app.models.product_material import ProductMaterial
+from app.models.product_model import ProductModel
 from app.models.product_series import ProductSeries
 from app.models.project import Project
 from app.models.requirement_card import RequirementCard
 from app.models.solution_snapshot import SolutionSnapshot
 from app.services.catalog import CatalogCandidate, CatalogSignals, ProductCatalogService
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
+
+MATERIAL_SECTION_TYPE_MAP: dict[str, tuple[str, ...]] = {
+    "product_manual": (
+        "overall_solution",
+        "design_basis",
+        "main_circuit_scheme",
+        "starter_spec",
+        "motor_spec",
+        "communication_interface",
+        "control_logic",
+    ),
+    "standard_bom": (
+        "bom_or_supply_list",
+        "supply_scope",
+    ),
+    "interface_schedule": (
+        "communication_interface",
+        "control_logic",
+        "protection_interlock",
+    ),
+    "selection_rule": (
+        "design_basis",
+        "overall_solution",
+        "main_circuit_scheme",
+    ),
+    "diagram_template": (
+        "overall_solution",
+        "main_circuit_scheme",
+        "communication_interface",
+        "control_logic",
+        "installation_conditions",
+    ),
+    "service_plan": (
+        "service_support",
+    ),
+    "proposal_sample": (
+        "overall_solution",
+        "design_basis",
+        "main_circuit_scheme",
+        "communication_interface",
+        "bom_or_supply_list",
+        "supply_scope",
+        "commissioning_acceptance",
+        "service_support",
+    ),
+}
+
+MATERIAL_TYPE_PRIORITY = {
+    "product_manual": 5.0,
+    "standard_bom": 4.0,
+    "interface_schedule": 4.0,
+    "selection_rule": 3.5,
+    "diagram_template": 3.2,
+    "proposal_sample": 2.2,
+    "service_plan": 1.8,
+}
 
 
 class SolutionService:
@@ -51,17 +111,42 @@ class SolutionService:
         if not candidates:
             raise ArtifactValidationError("No published catalog candidate found for current project")
 
-        source_catalog_version = str(candidates[0].series.catalog_version or "")
+        primary_candidate = candidates[0]
+        source_catalog_version = str(primary_candidate.series.catalog_version or "")
         series_map = await self.product_catalog.get_series_map(
             session=session,
             catalog_version=source_catalog_version or None,
             published_only=True,
+        )
+        compatibility_rules = await self.product_catalog.list_compatibility_rules(
+            session=session,
+            published_only=True,
+            catalog_version=source_catalog_version or None,
+            source_family_code=str(primary_candidate.series.family_code or primary_candidate.series.code),
+        )
+        catalog_models = await self.product_catalog.list_models(
+            session=session,
+            published_only=True,
+            catalog_version=source_catalog_version or None,
+        )
+        catalog_interfaces = await self.product_catalog.list_interfaces(
+            session=session,
+            published_only=True,
+            catalog_version=source_catalog_version or None,
+        )
+        catalog_materials = await self.product_catalog.list_materials(
+            session=session,
+            availability_status="available",
         )
         payload = self._build_solution_payload(
             signals=signals,
             candidates=candidates,
             series_map=series_map,
             source_catalog_version=source_catalog_version,
+            compatibility_rules=compatibility_rules,
+            catalog_models_by_series=self._group_models_by_series(catalog_models),
+            catalog_interfaces_by_series=self._group_interfaces_by_series(catalog_interfaces),
+            catalog_material_rows=catalog_materials,
         )
 
         next_version = await self._next_version(session=session, project_id=project_id)
@@ -208,6 +293,10 @@ class SolutionService:
         candidates: list[CatalogCandidate],
         series_map: dict[str, ProductSeries],
         source_catalog_version: str,
+        compatibility_rules: list[ProductCompatibility] | None = None,
+        catalog_models_by_series: dict[str, list[ProductModel]] | None = None,
+        catalog_interfaces_by_series: dict[str, list[ProductInterface]] | None = None,
+        catalog_material_rows: list[ProductMaterial] | None = None,
     ) -> dict[str, Any]:
         primary_candidate = candidates[0]
         primary_series = primary_candidate.series
@@ -233,12 +322,14 @@ class SolutionService:
         ]
 
         component_series_rows: list[ProductSeries] = []
+        selected_series_codes = {primary_series.code}
         component_specs = list(selected_config.components or []) if selected_config else []
         for component in component_specs:
             component_code = str(component.get("series_code") or "").strip()
             component_series = series_map.get(component_code)
             if component_series is not None:
                 component_series_rows.append(component_series)
+                selected_series_codes.add(component_series.code)
             selected_products.append(
                 self._build_component_entry(
                     component=component,
@@ -249,14 +340,43 @@ class SolutionService:
                 )
             )
 
+        compatibility_actions = self._apply_compatibility_rules(
+            compatibility_rules=compatibility_rules or [],
+            selected_products=selected_products,
+            selected_series_codes=selected_series_codes,
+            component_series_rows=component_series_rows,
+            series_map=series_map,
+            signals=signals,
+            primary_series=primary_series,
+            selected_config_name=selected_config.config_name if selected_config else None,
+            rated_voltage=requested_voltage,
+            rated_power_kw=signals.power_value,
+            quantity=quantity,
+        )
+
+        catalog_model_matches = self._build_catalog_model_matches(
+            selected_products=selected_products,
+            catalog_models_by_series=catalog_models_by_series or {},
+        )
+        catalog_interface_entries = self._build_catalog_interface_entries(
+            selected_products=selected_products,
+            series_map=series_map,
+            catalog_interfaces_by_series=catalog_interfaces_by_series or {},
+        )
+        catalog_material_entries = self._build_catalog_material_entries(
+            primary_series=primary_series,
+            component_series_rows=component_series_rows,
+            material_rows=catalog_material_rows or [],
+        )
+
         interface_plan = self._build_interface_plan(
             primary_series=primary_series,
-            component_specs=component_specs,
+            selected_products=selected_products,
             series_map=series_map,
-            quantity=quantity,
             selected_protocol=selected_protocol,
             requested_protocol=signals.requested_protocol,
             selected_config_name=selected_config.config_name if selected_config else None,
+            catalog_interface_entries=catalog_interface_entries,
         )
 
         key_constraints = self._build_key_constraints(
@@ -269,6 +389,7 @@ class SolutionService:
             signals=signals,
             primary_series=primary_series,
             selected_protocol=selected_protocol,
+            selected_series_codes=selected_series_codes,
         )
         suggested_chapters = self._dedupe_list(
             list(primary_series.default_chapters or [])
@@ -278,20 +399,58 @@ class SolutionService:
         why_selected = list(primary_candidate.reasons)
         if selected_config and selected_config.description:
             why_selected.append(f"{selected_config.config_name} 已覆盖当前场景的标准配套边界。")
-        why_selected.append("主设备、配套设备、接口和章节建议已拆成结构化字段，可直接进入 Outline 与章节生成。")
+        why_selected.extend(self._build_compatibility_why_selected(compatibility_actions=compatibility_actions))
+        if catalog_model_matches:
+            why_selected.append(
+                f"已为当前方案绑定 {len(catalog_model_matches)} 条目录型号证据，可直接下沉到大纲与章节生成。"
+            )
+        if catalog_interface_entries:
+            why_selected.append(
+                f"已为当前方案绑定 {len(catalog_interface_entries)} 条目录接口定义，可直接进入接口章节与联锁描述。"
+            )
+        if catalog_material_entries:
+            why_selected.append(
+                f"已绑定 {len(catalog_material_entries)} 份产品资料库材料，可按章节类型优先锚定真实样本与产品手册。"
+            )
+        why_selected.append("主设备、配套设备、型号、接口和章节建议已拆成结构化字段，可直接进入 Outline 与章节生成。")
+
+        catalog_source_material_keys = self._dedupe_list(
+            [
+                *[
+                    str(item.get("source_material_key") or "").strip()
+                    for item in catalog_model_matches
+                    if str(item.get("source_material_key") or "").strip()
+                ],
+                *[
+                    str(item.get("source_material_key") or "").strip()
+                    for item in catalog_interface_entries
+                    if str(item.get("source_material_key") or "").strip()
+                ],
+                *[
+                    str(item.get("material_key") or "").strip()
+                    for item in catalog_material_entries
+                    if str(item.get("material_key") or "").strip()
+                ],
+            ]
+        )
 
         risk_flags = self._dedupe_list(
             open_questions
             + self._extract_blocking_risks([primary_series, *component_series_rows])
+            + self._build_compatibility_risk_flags(compatibility_actions=compatibility_actions)
+            + self._build_catalog_material_risk_flags(
+                primary_series=primary_series,
+                catalog_material_entries=catalog_material_entries,
+            )
         )
 
         power_label = self._format_power_label(signals.power_value)
         summary = (
-            f"推荐采用 {primary_series.series_name} 作为主驱动基线，"
-            f"围绕 {signals.motor_type} 的 {requested_voltage} / {power_label} 场景组织主回路、接口与供货配置。"
+            f"本项目方案围绕 {primary_series.series_name} 组织主回路、接口与供货配置，"
+            f"适配 {signals.motor_type} 的 {requested_voltage} / {power_label} 场景。"
         )
         if selected_config:
-            summary += f" 本轮默认采用 {selected_config.config_name}。"
+            summary += f" 当前按 {selected_config.config_name} 组织设备成套。"
 
         return {
             "solution_summary": summary,
@@ -306,6 +465,10 @@ class SolutionService:
                 "risk_flags": risk_flags,
                 "source_mode": "catalog_plus_requirement_card",
                 "catalog_version": source_catalog_version,
+                "compatibility_actions": compatibility_actions,
+                "catalog_model_matches": catalog_model_matches,
+                "catalog_material_entries": catalog_material_entries,
+                "catalog_source_material_keys": catalog_source_material_keys,
                 "candidate_scores": [
                     {
                         "series_code": candidate.series.code,
@@ -318,6 +481,94 @@ class SolutionService:
             },
             "source_catalog_version": source_catalog_version or None,
         }
+
+    def _build_catalog_material_entries(
+        self,
+        *,
+        primary_series: ProductSeries,
+        component_series_rows: list[ProductSeries],
+        material_rows: list[ProductMaterial],
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        if not material_rows:
+            return []
+
+        primary_family_code = str(primary_series.family_code or primary_series.code or "").strip()
+        secondary_family_codes = {
+            str(item.family_code or item.code or "").strip()
+            for item in component_series_rows
+            if str(item.family_code or item.code or "").strip()
+        }
+
+        def _score(row: ProductMaterial) -> tuple[float, float, str]:
+            family_code = str(row.family_code or "").strip()
+            score = MATERIAL_TYPE_PRIORITY.get(str(row.material_type or "").strip(), 1.0)
+            if family_code and family_code == primary_family_code:
+                score += 3.0
+            elif family_code and family_code in secondary_family_codes:
+                score += 1.6
+            if str(row.availability_status or "").strip() == "available":
+                score += 0.4
+            details = row.details if isinstance(row.details, dict) else {}
+            quality_tier = str(details.get("quality_tier") or "").strip().lower()
+            if quality_tier == "high":
+                score += 0.5
+            elif quality_tier == "medium":
+                score += 0.25
+            assigned_track = str(row.assigned_track or "").strip()
+            if assigned_track == "pilot_main":
+                score += 0.3
+            return (score, float(row.file_size_bytes or 0), str(row.document_name or ""))
+
+        relevant_rows = [
+            row
+            for row in material_rows
+            if str(row.availability_status or "").strip() == "available"
+            and str(row.family_code or "").strip() in {primary_family_code, *secondary_family_codes}
+        ]
+        prioritized_rows = sorted(relevant_rows, key=_score, reverse=True)
+        payloads: list[dict[str, Any]] = []
+        for row in prioritized_rows[:limit]:
+            details = row.details if isinstance(row.details, dict) else {}
+            payloads.append(
+                {
+                    "material_key": row.material_key,
+                    "document_name": row.document_name,
+                    "family_code": row.family_code,
+                    "material_type": row.material_type,
+                    "availability_status": row.availability_status,
+                    "assigned_track": row.assigned_track,
+                    "priority_tier": row.priority_tier,
+                    "solution_family": str(details.get("solution_family") or "").strip() or None,
+                    "quality_tier": str(details.get("quality_tier") or "").strip() or None,
+                    "key_equipment": [str(item).strip() for item in (details.get("key_equipment") or []) if str(item).strip()],
+                    "preferred_section_types": list(
+                        MATERIAL_SECTION_TYPE_MAP.get(str(row.material_type or "").strip(), MATERIAL_SECTION_TYPE_MAP["proposal_sample"])
+                    ),
+                    "notes": str(row.notes or "").strip() or None,
+                }
+            )
+        return payloads
+
+    def _build_catalog_material_risk_flags(
+        self,
+        *,
+        primary_series: ProductSeries,
+        catalog_material_entries: list[dict[str, Any]],
+    ) -> list[str]:
+        primary_family_code = str(primary_series.family_code or primary_series.code or "").strip()
+        if not primary_family_code:
+            return []
+        primary_entries = [
+            item
+            for item in catalog_material_entries
+            if str(item.get("family_code") or "").strip() == primary_family_code
+        ]
+        if not primary_entries:
+            return [f"当前主产品族 {primary_family_code} 尚未挂接可用产品资料，章节仍会更多依赖历史方案样本。"]
+        if not any(str(item.get("material_type") or "").strip() == "product_manual" for item in primary_entries):
+            return [f"当前主产品族 {primary_family_code} 尚缺产品手册级资料，部分章节仍需依赖方案样本补全。"]
+        return []
 
     def _build_series_entry(
         self,
@@ -388,20 +639,21 @@ class SolutionService:
         self,
         *,
         primary_series: ProductSeries,
-        component_specs: list[dict[str, Any]],
+        selected_products: list[dict[str, Any]],
         series_map: dict[str, ProductSeries],
-        quantity: int,
         selected_protocol: str,
         requested_protocol: str | None,
         selected_config_name: str | None,
+        catalog_interface_entries: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        io_totals = self._multiply_io_allocation(primary_series.io_allocation or {}, quantity)
-        for component in component_specs:
-            component_code = str(component.get("series_code") or "").strip()
+        primary_quantity = self._to_positive_int(selected_products[0].get("quantity"), default=1) if selected_products else 1
+        io_totals = self._multiply_io_allocation(primary_series.io_allocation or {}, primary_quantity)
+        for product in selected_products[1:]:
+            component_code = str(product.get("series_code") or "").strip()
             component_series = series_map.get(component_code)
             if component_series is None:
                 continue
-            component_quantity = self._to_positive_int(component.get("quantity"), default=1) * quantity
+            component_quantity = self._to_positive_int(product.get("quantity"), default=1)
             self._merge_io_allocation(
                 target=io_totals,
                 source=component_series.io_allocation or {},
@@ -417,10 +669,20 @@ class SolutionService:
             notes.append(f"需求偏好为 {requested_protocol}，当前目录优先落在 {selected_protocol}，需确认现场总线兼容性。")
         elif not requested_protocol:
             notes.append("DCS 标准协议尚未确认，当前先按目录默认协议生成。")
+        if catalog_interface_entries:
+            notes.append(f"已匹配 {len(catalog_interface_entries)} 条目录接口定义，可直接用于接口/联锁章节。")
 
         return {
             "dcs_protocol": selected_protocol,
             "io_allocation": io_totals,
+            "catalog_interface_entries": catalog_interface_entries,
+            "catalog_source_material_keys": self._dedupe_list(
+                [
+                    str(item.get("source_material_key") or "").strip()
+                    for item in catalog_interface_entries
+                    if str(item.get("source_material_key") or "").strip()
+                ]
+            ),
             "notes": " ".join(notes),
         }
 
@@ -458,6 +720,7 @@ class SolutionService:
         signals: CatalogSignals,
         primary_series: ProductSeries,
         selected_protocol: str,
+        selected_series_codes: set[str],
     ) -> list[str]:
         questions: list[str] = []
         if signals.power_value is None:
@@ -472,7 +735,7 @@ class SolutionService:
             questions.append(
                 f"需求偏好为 {signals.requested_protocol}，但当前推荐系列默认支持 {selected_protocol}，需确认协议兼容或网关方案。"
             )
-        if signals.bypass_required and not self._has_bypass_scope(primary_series):
+        if signals.bypass_required and not self._has_bypass_scope(primary_series) and not self._bypass_unit_selected(selected_series_codes):
             questions.append("需求包含旁路或工频切换，但当前主驱动系列未显式声明旁路配置，需确认是否追加切换单元。")
         return self._dedupe_list(questions)
 
@@ -491,6 +754,24 @@ class SolutionService:
         if series.code == "bypass_cabinet":
             return "旁路或工频切换场景需要独立切换单元保证连续运行与检修边界。"
         return f"{role} 已按标准产品目录纳入供货范围。"
+
+    def _build_compatibility_rationale(
+        self,
+        *,
+        series: ProductSeries,
+        relation_type: str,
+        primary_series: ProductSeries,
+        condition: str | None,
+        description: str | None,
+    ) -> str:
+        if relation_type == "requires":
+            prefix = f"{primary_series.series_name} 的产品族兼容规则要求补齐该配套设备。"
+        else:
+            prefix = f"{primary_series.series_name} 的产品族兼容规则建议补齐该配套设备。"
+        details = " ".join(part for part in [condition, description] if part)
+        if details:
+            return f"{prefix} {details}"
+        return prefix
 
     def _resolve_voltage_label(self, *, primary_series: ProductSeries, voltage_value: float | None) -> str:
         if voltage_value is not None:
@@ -517,6 +798,9 @@ class SolutionService:
     def _has_bypass_scope(self, series: ProductSeries) -> bool:
         return any("旁路" in str(config.config_name or "") for config in (series.standard_configs or []))
 
+    def _bypass_unit_selected(self, selected_series_codes: set[str]) -> bool:
+        return any("bypass" in str(code).lower() or "旁路" in str(code) for code in selected_series_codes)
+
     def _multiply_io_allocation(self, allocation: dict[str, Any], multiplier: int) -> dict[str, int]:
         return {
             str(key): int(value) * multiplier
@@ -538,6 +822,267 @@ class SolutionService:
                 if str(constraint.severity or "").lower() == "blocking":
                     risks.append(f"{series.series_name}：{constraint.action}")
         return risks
+
+    def _apply_compatibility_rules(
+        self,
+        *,
+        compatibility_rules: list[ProductCompatibility],
+        selected_products: list[dict[str, Any]],
+        selected_series_codes: set[str],
+        component_series_rows: list[ProductSeries],
+        series_map: dict[str, ProductSeries],
+        signals: CatalogSignals,
+        primary_series: ProductSeries,
+        selected_config_name: str | None,
+        rated_voltage: str,
+        rated_power_kw: float | None,
+        quantity: int,
+    ) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = []
+        for rule in compatibility_rules:
+            preferred_codes = self._dedupe_list([str(item).strip() for item in (rule.preferred_series_codes or []) if str(item).strip()])
+            optional_codes = self._dedupe_list([str(item).strip() for item in (rule.optional_series_codes or []) if str(item).strip()])
+            applies = self._compatibility_rule_applies(
+                rule=rule,
+                signals=signals,
+                selected_config_name=selected_config_name,
+            )
+            action: dict[str, Any] = {
+                "source_family_code": rule.source_family_code,
+                "target_family_code": rule.target_family_code,
+                "relation_type": rule.relation_type,
+                "condition": rule.condition,
+                "applies": applies,
+                "preferred_series_codes": preferred_codes,
+                "optional_series_codes": optional_codes,
+                "covered_series_codes": [],
+                "added_series_codes": [],
+                "missing_series_codes": [],
+            }
+            if not applies:
+                actions.append(action)
+                continue
+
+            candidate_codes = list(preferred_codes)
+            if self._compatibility_optional_applies(rule=rule, signals=signals, selected_config_name=selected_config_name):
+                candidate_codes.extend(optional_codes)
+
+            for series_code in candidate_codes:
+                if series_code in selected_series_codes:
+                    action["covered_series_codes"].append(series_code)
+                    continue
+                series = series_map.get(series_code)
+                if series is None:
+                    action["missing_series_codes"].append(series_code)
+                    continue
+                selected_products.append(
+                    self._build_series_entry(
+                        series=series,
+                        role=series.series_name,
+                        quantity=quantity,
+                        rated_voltage=rated_voltage if rated_voltage != "待确认电压" else self._first_voltage_level(series),
+                        rated_power_kw=rated_power_kw,
+                        config_name="兼容规则补充",
+                        rationale=self._build_compatibility_rationale(
+                            series=series,
+                            relation_type=str(rule.relation_type or "recommended"),
+                            primary_series=primary_series,
+                            condition=rule.condition,
+                            description=rule.description,
+                        ),
+                    )
+                )
+                selected_series_codes.add(series.code)
+                component_series_rows.append(series)
+                action["added_series_codes"].append(series.code)
+
+            actions.append(action)
+        return actions
+
+    def _compatibility_rule_applies(
+        self,
+        *,
+        rule: ProductCompatibility,
+        signals: CatalogSignals,
+        selected_config_name: str | None,
+    ) -> bool:
+        relation_type = str(rule.relation_type or "recommended").lower()
+        if relation_type == "requires":
+            return True
+
+        trigger_text = " ".join(
+            part for part in [str(rule.condition or "").strip(), str(rule.description or "").strip(), str(selected_config_name or "").strip()]
+            if part
+        )
+        if any(token in trigger_text for token in ("旁路", "切换", "检修不停机", "不停机")):
+            return signals.bypass_required or ("旁路" in str(selected_config_name or ""))
+        return False
+
+    def _compatibility_optional_applies(
+        self,
+        *,
+        rule: ProductCompatibility,
+        signals: CatalogSignals,
+        selected_config_name: str | None,
+    ) -> bool:
+        relation_type = str(rule.relation_type or "recommended").lower()
+        if relation_type == "requires":
+            return signals.bypass_required or ("旁路" in str(selected_config_name or ""))
+        return self._compatibility_rule_applies(rule=rule, signals=signals, selected_config_name=selected_config_name)
+
+    def _build_compatibility_why_selected(self, *, compatibility_actions: list[dict[str, Any]]) -> list[str]:
+        reasons: list[str] = []
+        for action in compatibility_actions:
+            added = list(action.get("added_series_codes") or [])
+            covered = list(action.get("covered_series_codes") or [])
+            relation_type = str(action.get("relation_type") or "recommended")
+            if added:
+                verb = "要求补齐" if relation_type == "requires" else "建议补齐"
+                reasons.append(
+                    f"产品族兼容规则{verb} {', '.join(added)}，已自动纳入当前方案。"
+                )
+            elif covered:
+                reasons.append(
+                    f"产品族兼容规则已由当前配置覆盖 {', '.join(covered)}。"
+                )
+        return reasons
+
+    def _build_compatibility_risk_flags(self, *, compatibility_actions: list[dict[str, Any]]) -> list[str]:
+        flags: list[str] = []
+        for action in compatibility_actions:
+            missing = list(action.get("missing_series_codes") or [])
+            if not missing:
+                continue
+            relation_type = str(action.get("relation_type") or "recommended")
+            prefix = "缺少必需配套目录项" if relation_type == "requires" else "缺少推荐配套目录项"
+            flags.append(f"{prefix}：{', '.join(missing)}")
+        return flags
+
+    def _group_models_by_series(self, rows: list[ProductModel]) -> dict[str, list[ProductModel]]:
+        grouped: dict[str, list[ProductModel]] = {}
+        for row in rows:
+            grouped.setdefault(str(row.series_code or ""), []).append(row)
+        return grouped
+
+    def _group_interfaces_by_series(self, rows: list[ProductInterface]) -> dict[str, list[ProductInterface]]:
+        grouped: dict[str, list[ProductInterface]] = {}
+        for row in rows:
+            grouped.setdefault(str(row.series_code or ""), []).append(row)
+        return grouped
+
+    def _build_catalog_model_matches(
+        self,
+        *,
+        selected_products: list[dict[str, Any]],
+        catalog_models_by_series: dict[str, list[ProductModel]],
+    ) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        for product in selected_products:
+            series_code = str(product.get("series_code") or "").strip()
+            if not series_code:
+                continue
+            model_rows = catalog_models_by_series.get(series_code) or []
+            if not model_rows:
+                continue
+            matched_model = self._pick_preferred_model(
+                product=product,
+                model_rows=model_rows,
+            )
+            if matched_model is None:
+                continue
+            product["model_number"] = matched_model.model_number
+            if matched_model.source_material_key:
+                product["source_material_key"] = matched_model.source_material_key
+            matches.append(
+                {
+                    "series_code": series_code,
+                    "series_name": str(product.get("name") or series_code),
+                    "role": str(product.get("role") or "设备"),
+                    "family": str(product.get("family") or "").strip() or None,
+                    "model_number": matched_model.model_number,
+                    "rated_voltage": matched_model.rated_voltage,
+                    "rated_power_kw": matched_model.rated_power_kw,
+                    "rated_current": matched_model.rated_current,
+                    "source_material_key": matched_model.source_material_key,
+                    "specs_summary": self._summarize_dict(matched_model.specs, limit=3),
+                }
+            )
+        return matches
+
+    def _pick_preferred_model(
+        self,
+        *,
+        product: dict[str, Any],
+        model_rows: list[ProductModel],
+    ) -> ProductModel | None:
+        if not model_rows:
+            return None
+        if len(model_rows) == 1:
+            return model_rows[0]
+
+        requested_voltage = str(product.get("rated_voltage") or "").strip()
+        requested_power = product.get("rated_power_kw")
+
+        def _score(row: ProductModel) -> tuple[float, float]:
+            score = 0.0
+            if requested_voltage and str(row.rated_voltage or "").strip() == requested_voltage:
+                score += 2.0
+            if isinstance(requested_power, (int, float)) and row.rated_power_kw not in (None, ""):
+                score += max(0.0, 1.0 - abs(float(row.rated_power_kw) - float(requested_power)) / max(float(requested_power), 1.0))
+            return (score, float(row.rated_power_kw or 0.0))
+
+        return max(model_rows, key=_score)
+
+    def _build_catalog_interface_entries(
+        self,
+        *,
+        selected_products: list[dict[str, Any]],
+        series_map: dict[str, ProductSeries],
+        catalog_interfaces_by_series: dict[str, list[ProductInterface]],
+    ) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int]] = set()
+        for product in selected_products:
+            series_code = str(product.get("series_code") or "").strip()
+            if not series_code:
+                continue
+            series = series_map.get(series_code)
+            for row in catalog_interfaces_by_series.get(series_code) or []:
+                signature = (series_code, str(row.interface_type or ""), int(row.sort_order or 0))
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                entries.append(
+                    {
+                        "series_code": series_code,
+                        "series_name": str(product.get("name") or (series.series_name if series else series_code)),
+                        "role": str(product.get("role") or "设备"),
+                        "family": str(product.get("family") or (series.family if series else "")).strip() or None,
+                        "interface_type": row.interface_type,
+                        "protocol": row.protocol,
+                        "signal_spec": row.signal_spec or {},
+                        "signal_summary": self._summarize_dict(row.signal_spec, limit=3),
+                        "notes": row.notes,
+                        "source_material_key": row.source_material_key,
+                        "sort_order": int(row.sort_order or 0),
+                    }
+                )
+        return entries
+
+    def _summarize_dict(self, payload: dict[str, Any] | None, *, limit: int = 3) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        summary: list[str] = []
+        for key, value in list(payload.items())[:limit]:
+            summary.append(f"{key}={self._format_summary_value(value)}")
+        return summary
+
+    def _format_summary_value(self, value: Any) -> str:
+        if isinstance(value, list):
+            return ", ".join(str(item) for item in value[:4])
+        if isinstance(value, dict):
+            return ", ".join(f"{key}:{self._format_summary_value(item)}" for key, item in list(value.items())[:3])
+        return str(value)
 
     def _dedupe_list(self, values: list[str]) -> list[str]:
         seen: set[str] = set()

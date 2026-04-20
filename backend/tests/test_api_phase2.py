@@ -431,6 +431,58 @@ class Phase2ApiTests(unittest.TestCase):
             self.assertTrue(asset_search_payload["results"][0]["review_required"])
             self.assertIn("技术架构", asset_search_payload["results"][0]["reason"])
 
+    def test_document_upload_skips_chunk_indexing_for_parser_placeholder(self) -> None:
+        with self._make_client() as client:
+            project_response = client.post(
+                "/api/v1/projects",
+                json={"name": "占位解析文档项目", "industry": "电气", "description": "Phase 2 parser placeholder guard"},
+            )
+            project_id = project_response.json()["data"]["id"]
+
+            parsed_document = ParsedDocument(
+                markdown="# sample.pdf\n\nPDF 文档在 fallback 模式下无法可靠提取正文，已跳过正文索引。",
+                metadata={
+                    "parser_backend_used": "fallback_placeholder",
+                    "parser_placeholder": True,
+                    "parse_warning": "pdf_text_extraction_requires_docling",
+                    "format": "pdf",
+                },
+                assets=[],
+            )
+
+            with tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False) as handle:
+                handle.write(b"%PDF-1.4 fake")
+                upload_path = Path(handle.name)
+
+            try:
+                with patch(
+                    "app.api.documents.ParserService.parse_document",
+                    new=AsyncMock(return_value=parsed_document),
+                ):
+                    with upload_path.open("rb") as file_handle:
+                        upload_response = client.post(
+                            f"/api/v1/projects/{project_id}/documents/upload",
+                            files={"file": ("sample.pdf", file_handle, "application/pdf")},
+                            data={"doc_type": "historical_proposal", "metadata": '{"industry":"电气"}'},
+                        )
+            finally:
+                upload_path.unlink(missing_ok=True)
+
+            self.assertEqual(upload_response.status_code, 202)
+            document_id = upload_response.json()["data"]["id"]
+
+            document_response = client.get(f"/api/v1/documents/{document_id}")
+            self.assertEqual(document_response.status_code, 200)
+            document_payload = document_response.json()["data"]
+            self.assertEqual(document_payload["id"], document_id)
+            self.assertEqual(document_payload["metadata"]["chunk_count"], 0)
+            self.assertEqual(document_payload["metadata"]["indexed_chunk_count"], 0)
+            self.assertEqual(document_payload["metadata"]["skipped_chunk_count"], 0)
+
+            chunks_response = client.get(f"/api/v1/documents/{document_id}/chunks")
+            self.assertEqual(chunks_response.status_code, 200)
+            self.assertEqual(chunks_response.json()["data"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -47,6 +47,44 @@ class CaseRetrievalTests(unittest.TestCase):
         self.assertEqual(results[0]["sample_id"], "case-a")
         self.assertIn("query_overlap", results[0]["reason"])
 
+    def test_retrieve_cases_uses_secondary_family_signals_for_hybrid_documents(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[
+                {
+                    "sample_id": "case-hybrid",
+                    "file_name": "10KV-高压固态及变频软起动技术方案.docx",
+                    "library_track": "pilot_main",
+                    "profile": "text_digital",
+                    "family_code": "hv_solid_state_starter",
+                    "secondary_family_codes": ["hv_vfd_multilevel"],
+                    "material_type": "proposal_sample",
+                    "product_line": "hv_softstart",
+                    "solution_family": "高压固态软起动",
+                    "tags": ["hv_solid_state", "hv_vfd_candidate"],
+                    "key_equipment": ["高压固态软起柜", "高压变频软起装置"],
+                    "top_level_titles": ["系统方案", "供货范围"],
+                    "flat_outline": [{"heading_path": "系统方案 > 主回路说明"}],
+                },
+                {
+                    "sample_id": "case-b",
+                    "file_name": "机场巡检方案.docx",
+                    "library_track": "pilot_main",
+                    "profile": "text_digital",
+                    "top_level_titles": ["巡检方案", "维保周期"],
+                    "flat_outline": [{"heading_path": "巡检方案 > 设备巡检周期"}],
+                },
+            ],
+            block_entries=[],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_cases(query="高压变频 一拖二 变频软起", top_k=2, library_tracks={"pilot_main"})
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(results[0]["sample_id"], "case-hybrid")
+        self.assertIn("secondary_family_signal_match", results[0]["reason"])
+
     def test_retrieve_blocks_can_be_scoped_to_case_ids(self) -> None:
         outline_path, block_path, temp_dir = self._write_library(
             outline_entries=[],
@@ -96,6 +134,96 @@ class CaseRetrievalTests(unittest.TestCase):
         self.assertEqual(results[0]["sample_id"], "case-a")
         self.assertIn("normalized_section_title_match", results[0]["reason"])
         self.assertIn("equipment_type_match", results[0]["reason"])
+
+    def test_retrieve_blocks_uses_family_signals_for_hybrid_case(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[],
+            block_entries=[
+                {
+                    "sample_id": "case-hybrid",
+                    "file_name": "10KV-高压固态及变频软起动技术方案.docx",
+                    "library_track": "pilot_main",
+                    "family_code": "hv_solid_state_starter",
+                    "secondary_family_codes": ["hv_vfd_multilevel"],
+                    "product_line": "hv_softstart",
+                    "solution_family": "高压固态软起动",
+                    "tags": ["hv_solid_state", "hv_vfd_candidate"],
+                    "key_equipment": ["高压固态软起柜", "高压变频软起装置"],
+                    "heading_path": "2.2 主回路方案说明",
+                    "section_path": "第二章 系统方案 > 2.2 主回路方案说明",
+                    "reuse_level": "high",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "main_circuit_scheme",
+                    "equipment_type": "vfd",
+                    "content_form": "narrative",
+                    "token_count": 120,
+                    "content": "主回路采用晶闸管旁路切换结构，并支持一拖二扩展。",
+                }
+            ],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_blocks(
+                query="高压变频 一拖二 变频软起",
+                top_k=2,
+                sample_ids={"case-hybrid"},
+                section_title="主回路系统方案",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(results[0]["sample_id"], "case-hybrid")
+        self.assertIn("secondary_family_signal_match", results[0]["reason"])
+
+    def test_retrieve_blocks_can_be_scoped_to_document_names_when_sample_ids_differ(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[],
+            block_entries=[
+                {
+                    "sample_id": "case-a-runtime-id",
+                    "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+                    "library_track": "pilot_main",
+                    "heading_path": "LCI 变频软起系统方案",
+                    "reuse_level": "high",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "overall_solution",
+                    "equipment_type": "lci",
+                    "content_form": "narrative",
+                    "token_count": 120,
+                    "content": "LCI 主系统包含主驱动、整流变压器和励磁控制柜。",
+                },
+                {
+                    "sample_id": "case-b",
+                    "file_name": "机场巡检方案.docx",
+                    "library_track": "pilot_main",
+                    "heading_path": "巡检方案",
+                    "reuse_level": "medium",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "service_support",
+                    "equipment_type": "generic",
+                    "content_form": "narrative",
+                    "token_count": 90,
+                    "content": "巡检方案包含月检、季检和年度检修计划。",
+                },
+            ],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_blocks(
+                query="LCI 软起 整流变压器 励磁控制柜",
+                top_k=4,
+                sample_ids={"manifest-material-key"},
+                document_names={"宝山钢铁股份有限公司三鼓风LCI改造方案.docx"},
+                section_title="项目概述",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["file_name"], "宝山钢铁股份有限公司三鼓风LCI改造方案.docx")
 
     def test_build_outline_examples_compacts_top_level_titles(self) -> None:
         examples = build_outline_examples(

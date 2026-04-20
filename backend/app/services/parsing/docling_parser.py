@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from typing import Any
 import zipfile
+import xml.etree.ElementTree as ET
 
 try:
     from app.config import get_settings
@@ -83,6 +84,18 @@ class DoclingParser:
         suffix = path.suffix.lower()
 
         if suffix == ".doc":
+            extracted_text = self._extract_with_textutil(path, min_chars=120)
+            if extracted_text:
+                return ParsedDocument(
+                    markdown=self._normalize_text(extracted_text, path.name),
+                    metadata={
+                        "source_name": path.name,
+                        "parser": "textutil-fallback-parser",
+                        "parser_backend_requested": self.backend_mode,
+                        "parser_backend_used": "fallback_textutil",
+                        "format": suffix.lstrip("."),
+                    },
+                )
             return ParsedDocument(
                 markdown=self._normalize_text(
                     "Legacy DOC binary format is not directly supported in the current pipeline.\n\n"
@@ -139,11 +152,7 @@ class DoclingParser:
                 if self.backend_mode == "docling":
                     raise
 
-        if suffix in {".md", ".txt"}:
-            text = path.read_text(encoding="utf-8")
-        else:
-            raw = path.read_bytes()
-            text = raw.decode("utf-8", errors="ignore")
+        text, fallback_metadata = self._extract_fallback_text(path)
 
         normalized = self._normalize_text(text, path.name)
         return ParsedDocument(
@@ -152,13 +161,201 @@ class DoclingParser:
                 "source_name": path.name,
                 "parser": "fallback-docling-parser",
                 "parser_backend_requested": self.backend_mode,
-                "parser_backend_used": "fallback",
+                "parser_backend_used": str(fallback_metadata.get("parser_backend_used") or "fallback"),
                 "docling_libreoffice_cmd": self.resolved_libreoffice_cmd,
                 "docling_libreoffice_available": bool(self.resolved_libreoffice_cmd),
                 "format": suffix.lstrip("."),
+                **fallback_metadata,
             },
             structure={},
         )
+
+    def _extract_fallback_text(self, path: Path) -> tuple[str, dict[str, Any]]:
+        suffix = path.suffix.lower()
+        if suffix in {".md", ".txt"}:
+            return path.read_text(encoding="utf-8"), {
+                "parser_backend_used": "fallback",
+                "parser_fallback_method": "plain_text",
+            }
+
+        if suffix == ".docx":
+            textutil_text = self._extract_with_textutil(path)
+            if textutil_text:
+                return textutil_text, {
+                    "parser_backend_used": "fallback_textutil",
+                    "parser_fallback_method": "textutil",
+                }
+            docx_xml_text = self._extract_docx_xml_text(path)
+            if docx_xml_text:
+                return docx_xml_text, {
+                    "parser_backend_used": "fallback_docx_xml",
+                    "parser_fallback_method": "docx_xml",
+                }
+            return self._placeholder_text(
+                path.name,
+                warning="docx_text_extraction_unavailable",
+                message="DOCX 文档当前无法提取稳定正文，已跳过正文索引。建议安装 Docling 或提供可转换版本。",
+            )
+
+        if suffix == ".pdf":
+            raw = path.read_bytes()
+            extracted = self._strip_unsafe_chars(raw.decode("utf-8", errors="ignore"))
+            if extracted and not self._looks_like_binary_dump(extracted):
+                return extracted, {
+                    "parser_backend_used": "fallback",
+                    "parser_fallback_method": "utf8_ignore",
+                }
+            return self._placeholder_text(
+                path.name,
+                warning="pdf_text_extraction_requires_docling",
+                message="PDF 文档在 fallback 模式下无法可靠提取正文，已跳过正文索引。建议启用 Docling/OCR 或提供 DOCX 版本。",
+            )
+
+        raw = path.read_bytes()
+        return raw.decode("utf-8", errors="ignore"), {
+            "parser_backend_used": "fallback",
+            "parser_fallback_method": "utf8_ignore",
+        }
+
+    def _placeholder_text(self, filename: str, *, warning: str, message: str) -> tuple[str, dict[str, Any]]:
+        return (
+            f"# {filename}\n\n{message}",
+            {
+                "parser_backend_used": "fallback_placeholder",
+                "parser_fallback_method": "placeholder",
+                "parse_warning": warning,
+                "parser_placeholder": True,
+            },
+        )
+
+    def _extract_with_textutil(self, path: Path, *, min_chars: int = 20) -> str | None:
+        executable = shutil.which("textutil") or "/usr/bin/textutil"
+        if not executable or not Path(executable).exists():
+            return None
+        try:
+            completed = subprocess.run(
+                [executable, "-convert", "txt", "-stdout", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if completed.returncode != 0:
+            return None
+        extracted = self._strip_unsafe_chars(completed.stdout)
+        if len(extracted.strip()) < min_chars or self._looks_like_binary_dump(extracted):
+            return None
+        return extracted
+
+    def _extract_docx_xml_text(self, path: Path) -> str | None:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                xml_names = [
+                    name
+                    for name in archive.namelist()
+                    if name.startswith("word/") and name.endswith(".xml")
+                ]
+                ordered_names = sorted(
+                    xml_names,
+                    key=lambda name: (
+                        0 if name == "word/document.xml" else 1,
+                        0 if "/header" in name else 1,
+                        0 if "/footer" in name else 1,
+                        name,
+                    ),
+                )
+                blocks: list[str] = []
+                for name in ordered_names:
+                    xml_text = archive.read(name).decode("utf-8", errors="ignore")
+                    blocks.extend(self._extract_docx_blocks_from_xml(xml_text))
+        except (OSError, zipfile.BadZipFile, KeyError):
+            return None
+
+        extracted = "\n\n".join(block for block in blocks if block.strip())
+        extracted = self._strip_unsafe_chars(extracted)
+        if not extracted or self._looks_like_binary_dump(extracted):
+            return None
+        return extracted
+
+    def _extract_docx_blocks_from_xml(self, xml_text: str) -> list[str]:
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return []
+
+        namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        blocks: list[str] = []
+        body = root.find("w:body", namespace)
+        if body is None:
+            body = root
+
+        for element in body:
+            tag = element.tag.rsplit("}", 1)[-1]
+            if tag == "tbl":
+                rows = self._extract_docx_table_rows(element, namespace)
+                if rows:
+                    blocks.extend(rows)
+                continue
+            if tag != "p":
+                continue
+            paragraph = self._extract_docx_paragraph_text(element, namespace)
+            if paragraph:
+                blocks.append(paragraph)
+        return blocks
+
+    def _extract_docx_table_rows(self, table: ET.Element, namespace: dict[str, str]) -> list[str]:
+        rows: list[str] = []
+        for row in table.findall("w:tr", namespace):
+            cells: list[str] = []
+            for cell in row.findall("w:tc", namespace):
+                cell_text = self._extract_docx_paragraph_text(cell, namespace)
+                if cell_text:
+                    cells.append(cell_text)
+            if cells:
+                rows.append("| " + " | ".join(cells) + " |")
+        return rows
+
+    def _extract_docx_paragraph_text(self, element: ET.Element, namespace: dict[str, str]) -> str:
+        fragments: list[str] = []
+        for node in element.iter():
+            tag = node.tag.rsplit("}", 1)[-1]
+            if tag == "t" and node.text:
+                fragments.append(node.text)
+            elif tag == "tab":
+                fragments.append("\t")
+            elif tag in {"br", "cr"}:
+                fragments.append("\n")
+        paragraph = "".join(fragments)
+        paragraph = self._strip_unsafe_chars(paragraph)
+        paragraph = " ".join(part for part in paragraph.splitlines() if part.strip())
+        return paragraph.strip()
+
+    def _looks_like_binary_dump(self, text: str) -> bool:
+        sample = text[:4000]
+        if "%PDF-" in sample or "PK\x03\x04" in sample:
+            return True
+        if not sample.strip():
+            return True
+        control_count = sum(1 for char in sample if ord(char) < 32 and char not in "\n\r\t")
+        replacement_count = sample.count("\ufffd")
+        weird_ratio = (control_count + replacement_count) / max(1, len(sample))
+        return weird_ratio > 0.03
+
+    def _strip_unsafe_chars(self, text: str) -> str:
+        normalized_chars: list[str] = []
+        for char in text.replace("\r\n", "\n").replace("\r", "\n"):
+            codepoint = ord(char)
+            if char == "\x0c":
+                normalized_chars.append("\n")
+                continue
+            if char in "\n\t":
+                normalized_chars.append(char)
+                continue
+            if codepoint == 0 or (codepoint < 32) or codepoint == 127:
+                continue
+            normalized_chars.append(char)
+        return "".join(normalized_chars)
 
     def _configure_docling_environment(self) -> None:
         if self.resolved_libreoffice_cmd:
@@ -254,7 +451,7 @@ class DoclingParser:
         return True
 
     def _normalize_text(self, text: str, filename: str) -> str:
-        stripped = text.strip()
+        stripped = self._strip_unsafe_chars(text).strip()
         if not stripped:
             return f"# {filename}\n\n文档内容为空或暂未能解析出可用文本。"
         return stripped if stripped.startswith("#") else f"# {filename}\n\n{stripped}"

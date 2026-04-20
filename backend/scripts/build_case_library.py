@@ -16,6 +16,7 @@ from app.services.parsing.document_sources import (
     build_direct_source_entry,
     is_library_ready_entry,
     iter_document_paths,
+    resolve_library_source_path,
 )
 from app.services.parsing.parser import ParserService
 
@@ -34,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="data/case_library",
+        default="backend/data/case_library",
         help="Directory for generated outline/block library artifacts. Defaults to backend/data/case_library.",
     )
     parser.add_argument(
@@ -106,7 +107,8 @@ async def main() -> None:
     for candidate in candidate_entries:
         entry = candidate["entry"]
         try:
-            parsed = candidate["parsed"] or await parser.parse_document(entry["file_path"])
+            parse_source_path, parse_source_kind = resolve_library_source_path(entry)
+            parsed = candidate["parsed"] or await parser.parse_document(str(parse_source_path))
         except Exception as exc:
             failed_documents.append(f"{entry.get('file_name') or entry.get('file_path')} ({exc})")
             continue
@@ -116,6 +118,8 @@ async def main() -> None:
             "profile": entry.get("profile") or entry.get("detected_profile"),
             "track": library_track,
             "library_track": library_track,
+            "parse_source_path": str(parse_source_path),
+            "parse_source_kind": parse_source_kind,
         }
         outline_entries.append(
             build_outline_library_entry(

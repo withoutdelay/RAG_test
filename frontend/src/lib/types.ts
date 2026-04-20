@@ -116,6 +116,7 @@ export interface SolutionSelectedProduct {
   series_code: string;
   name: string;
   family?: string;
+  model_number?: string;
   topology?: string;
   rated_voltage?: string;
   rated_power_kw?: number | null;
@@ -123,12 +124,47 @@ export interface SolutionSelectedProduct {
   config?: string;
   vendor?: string;
   rationale?: string;
+  source_material_key?: string;
+}
+
+export interface SolutionCatalogModelMatch {
+  series_code: string;
+  series_name?: string;
+  model_number: string;
+  rated_voltage?: string | null;
+  rated_power_kw?: number | null;
+  rated_current?: string | null;
+  source_material_key?: string | null;
+}
+
+export interface SolutionCatalogInterfaceEntry {
+  series_code: string;
+  series_name?: string;
+  interface_type: string;
+  protocol?: string | null;
+  signal_summary?: string[];
+  source_material_key?: string | null;
 }
 
 export interface SolutionInterfacePlan {
   dcs_protocol?: string;
   io_allocation?: Record<string, number>;
   notes?: string;
+  catalog_interface_entries?: SolutionCatalogInterfaceEntry[];
+  catalog_source_material_keys?: string[];
+}
+
+export interface SolutionCompatibilityAction {
+  source_family_code: string;
+  target_family_code: string;
+  relation_type: string;
+  condition?: string | null;
+  applies?: boolean;
+  preferred_series_codes?: string[];
+  optional_series_codes?: string[];
+  covered_series_codes?: string[];
+  added_series_codes?: string[];
+  missing_series_codes?: string[];
 }
 
 export interface SolutionSelectionReason {
@@ -137,6 +173,9 @@ export interface SolutionSelectionReason {
   risk_flags?: string[];
   source_mode?: string;
   catalog_version?: string;
+  catalog_model_matches?: SolutionCatalogModelMatch[];
+  catalog_source_material_keys?: string[];
+  compatibility_actions?: SolutionCompatibilityAction[];
   candidate_scores?: CatalogCandidateScore[];
 }
 
@@ -190,6 +229,7 @@ export interface ProductCatalogSeries {
   is_published: boolean;
   role_type: string;
   family: string;
+  family_code?: string | null;
   series_name: string;
   code: string;
   vendor?: string | null;
@@ -211,10 +251,137 @@ export interface ProductCatalogSeries {
   updated_at?: string | null;
 }
 
+export interface ProductCatalogFamilyAlias {
+  id?: string | null;
+  alias: string;
+  alias_type: string;
+  source?: string | null;
+  sort_order: number;
+}
+
+export interface ProductCatalogCompatibility {
+  id?: string | null;
+  catalog_version: string;
+  is_published: boolean;
+  source_family_code: string;
+  target_family_code: string;
+  relation_type: string;
+  condition?: string | null;
+  description?: string | null;
+  preferred_series_codes: string[];
+  optional_series_codes: string[];
+  sort_order: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ProductCatalogFamily {
+  id?: string | null;
+  catalog_version: string;
+  is_published: boolean;
+  code: string;
+  name: string;
+  display_name?: string | null;
+  description?: string | null;
+  status: string;
+  sort_order: number;
+  parent_family_code?: string | null;
+  aliases: ProductCatalogFamilyAlias[];
+  compatibilities: ProductCatalogCompatibility[];
+  series_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ProductCatalogMaterial {
+  id?: string | null;
+  material_key: string;
+  family_code?: string | null;
+  material_type: string;
+  document_name: string;
+  source_path?: string | null;
+  source_kind: string;
+  availability_status: string;
+  file_format?: string | null;
+  file_size_bytes?: number | null;
+  assigned_track?: string | null;
+  suggested_track?: string | null;
+  priority_tier?: string | null;
+  tags: string[];
+  notes?: string | null;
+  details: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ProductCatalogModel {
+  id?: string | null;
+  catalog_version: string;
+  is_published: boolean;
+  series_id?: string | null;
+  series_code: string;
+  model_number: string;
+  rated_voltage?: string | null;
+  rated_power_kw?: number | null;
+  rated_current?: string | null;
+  specs: Record<string, unknown>;
+  source_material_key?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ProductCatalogInterface {
+  id?: string | null;
+  catalog_version: string;
+  is_published: boolean;
+  series_id?: string | null;
+  series_code: string;
+  interface_type: string;
+  protocol?: string | null;
+  signal_spec: Record<string, unknown>;
+  notes?: string | null;
+  source_material_key?: string | null;
+  sort_order: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface CatalogVersion {
   catalog_version: string;
   is_published: boolean;
   series_count: number;
+}
+
+export interface CatalogMaterialReadinessCheck {
+  check_key: string;
+  label: string;
+  passed: boolean;
+  required_count: number;
+  actual_count: number;
+  matched_family_codes: string[];
+  matched_material_keys: string[];
+  matched_document_names: string[];
+  missing_detail?: string | null;
+}
+
+export interface CatalogMaterialReadinessPhaseAllowance {
+  phase: string;
+  label: string;
+  allowed: boolean;
+  reason: string;
+}
+
+export interface CatalogMaterialReadiness {
+  catalog_version?: string | null;
+  target_family_codes: string[];
+  gate_passed: boolean;
+  available_material_count: number;
+  required_core_manual_family_count: number;
+  checklist: CatalogMaterialReadinessCheck[];
+  missing_items: string[];
+  phase_allowances: CatalogMaterialReadinessPhaseAllowance[];
+  material_type_counts: Record<string, number>;
+  family_material_counts: Record<string, Record<string, number>>;
 }
 
 export interface OutlineNode {
@@ -357,11 +524,29 @@ export interface SectionGenerationDetails {
   selected_citation_ids?: string[];
 }
 
+export interface ReviewResolutionTraceEntry {
+  task_id?: string;
+  task_type?: string;
+  code?: string | null;
+  message?: string | null;
+  section_id?: string | null;
+  section_title?: string | null;
+  level?: string | null;
+  blocking_level?: string | null;
+  status?: string | null;
+  resolution?: unknown;
+  resolved_at?: string | null;
+  suggested_action?: string | null;
+  details?: Record<string, unknown>;
+}
+
 export interface SectionValidatorResult {
   recommended_assets?: RecommendedAsset[];
   generation_mode?: string;
   reuse_pack?: ReusePack;
   generation_details?: SectionGenerationDetails;
+  review_resolution_trace?: ReviewResolutionTraceEntry[];
+  review_resolutions?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -389,11 +574,39 @@ export interface ReviewTask {
   id: string;
   task_type: 'param_conflict' | 'figure_confirm' | 'content_review' | 'final_review';
   blocking_level: 'P0' | 'P1';
-  payload: Record<string, unknown>;
+  payload: ReviewTaskPayload;
   assignee_user_id?: string | null;
   status: 'open' | 'in_progress' | 'resolved' | 'rejected';
   created_at?: string;
   resolved_at?: string | null;
+}
+
+export interface ReviewTaskPayload {
+  code?: string;
+  message?: string;
+  section_id?: string | null;
+  section_title?: string | null;
+  draft_version?: number;
+  outline_id?: string | null;
+  title?: string;
+  param_name?: string;
+  values?: string[];
+  level?: string;
+  suggested_action?: string | null;
+  details?: Record<string, unknown>;
+  signature?: string;
+  resolution?: unknown;
+  [key: string]: unknown;
+}
+
+export interface ValidationIssue {
+  code: string;
+  message: string;
+  level?: string;
+  section_id?: string | null;
+  section_title?: string | null;
+  suggested_action?: string | null;
+  details?: Record<string, unknown>;
 }
 
 export interface ValidationReport {
@@ -404,8 +617,8 @@ export interface ValidationReport {
   requirement_card_id?: string | null;
   evidence_bundle_id?: string | null;
   status: string;
-  errors: Array<{ code: string; message: string }>;
-  warnings: Array<{ code: string; message: string }>;
+  errors: ValidationIssue[];
+  warnings: ValidationIssue[];
   review_tasks_created: string[];
   created_at?: string;
 }

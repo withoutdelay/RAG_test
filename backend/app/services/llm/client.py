@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
@@ -237,15 +238,350 @@ class MockLLMProvider(BaseLLMProvider):
     def _render_section(self, model_type: ModelType, request: LLMRequest) -> str:
         section = request.metadata.get("section") or {}
         title = str(section.get("title") or "未命名章节")
-        description = str(section.get("description") or "")
-        context = str(request.metadata.get("retrieved_context") or "暂无补充资料。")
-        prompt_excerpt = request.user_prompt.splitlines()[0] if request.user_prompt else title
-        return (
-            f"## {title}\n\n"
-            f"{description or '本章节围绕项目目标、范围与实施要点进行说明。'}\n\n"
-            f"本节基于{model_type.value.upper()}模型草拟，重点覆盖：{prompt_excerpt}。\n\n"
-            f"参考摘要：{context[:180]}\n"
+        assembled_draft = str(request.metadata.get("assembled_draft") or "").strip()
+        if assembled_draft:
+            return self._normalize_section_markdown(title=title, content=assembled_draft)
+
+        reuse_pack = request.metadata.get("reuse_pack") if isinstance(request.metadata.get("reuse_pack"), dict) else {}
+        reusable_blocks = reuse_pack.get("reusable_blocks") if isinstance(reuse_pack.get("reusable_blocks"), list) else []
+        global_params = request.metadata.get("global_params") if isinstance(request.metadata.get("global_params"), dict) else {}
+        context = str(request.metadata.get("retrieved_context") or "").strip()
+        generation_mode = str(section.get("generation_mode") or reuse_pack.get("generation_mode") or "baseline").strip().lower()
+
+        sections: list[tuple[str | None, str]] = []
+        if generation_mode == "reuse_first":
+            sections.extend(self._build_mock_reuse_sections(title=title, reusable_blocks=reusable_blocks))
+        if not sections:
+            sections.extend(
+                self._build_mock_structured_sections(
+                    title=title,
+                    section=section,
+                    global_params=global_params,
+                )
+            )
+        if not sections:
+            context_body = self._build_mock_context_summary(context)
+            if context_body:
+                sections.append(("关键信息提炼", context_body))
+
+        if not sections:
+            sections.append((None, "本章节结合当前项目已确认资料编制，详细参数和实施边界以最终确认文件为准。"))
+
+        lines = [f"## {title}", ""]
+        seen_headings: set[str] = set()
+        title_key = self._normalize_heading_key(title)
+        for heading, body in sections:
+            normalized_body = str(body or "").strip()
+            if not normalized_body:
+                continue
+            heading_key = self._normalize_heading_key(heading or "")
+            if heading and heading_key and heading_key not in seen_headings and heading_key != title_key:
+                lines.extend([f"### {heading}", ""])
+                seen_headings.add(heading_key)
+            lines.extend([normalized_body, ""])
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _build_mock_structured_sections(
+        self,
+        *,
+        title: str,
+        section: dict[str, Any],
+        global_params: dict[str, Any],
+    ) -> list[tuple[str | None, str]]:
+        if not global_params:
+            return []
+
+        section_class = str(section.get("section_class") or "").strip().lower()
+        if section_class == "overview" or "概述" in title:
+            return self._build_mock_overview_sections(global_params)
+        if section_class == "requirement" or "需求" in title:
+            return self._build_mock_requirement_sections(global_params)
+        return []
+
+    def _build_mock_overview_sections(self, global_params: dict[str, Any]) -> list[tuple[str | None, str]]:
+        summary = str(global_params.get("solution_summary") or "").strip()
+        selected_products = self._humanize_selected_products(global_params.get("selected_products"))
+        primary_model = str(global_params.get("primary_model_number") or "").strip()
+        model_summary = str(global_params.get("catalog_model_summary") or "").strip()
+        interface_summary = self._humanize_catalog_interface_summary(global_params.get("catalog_interface_summary"))
+        compatibility_summary = self._humanize_compatibility_summary(global_params.get("compatibility_summary"))
+        protocol = str(global_params.get("dcs_protocol") or "").strip()
+
+        overview_paragraphs: list[str] = []
+        if summary:
+            overview_paragraphs.append(summary)
+        if selected_products:
+            overview_paragraphs.append(
+                f"本次方案范围覆盖{self._join_list_as_cn(selected_products[:4])}，用于收口主设备、配套设备与供货边界。"
+            )
+        if primary_model:
+            overview_paragraphs.append(f"目录侧已匹配主设备型号 {primary_model}，可作为后续技术确认与成套收口的参考。")
+
+        boundary_paragraphs: list[str] = []
+        if model_summary:
+            boundary_paragraphs.append(model_summary)
+        if interface_summary:
+            boundary_paragraphs.append(interface_summary)
+        elif protocol:
+            boundary_paragraphs.append(f"控制接口按 {protocol} 进行组织，后续需进一步冻结站点、点表和联锁边界。")
+        if compatibility_summary:
+            boundary_paragraphs.append(compatibility_summary)
+
+        sections: list[tuple[str | None, str]] = []
+        if overview_paragraphs:
+            sections.append(("项目背景与方案范围", "\n\n".join(overview_paragraphs)))
+        if boundary_paragraphs:
+            sections.append(("当前方案边界", "\n\n".join(boundary_paragraphs)))
+        return sections
+
+    def _build_mock_requirement_sections(self, global_params: dict[str, Any]) -> list[tuple[str | None, str]]:
+        summary = str(global_params.get("solution_summary") or "").strip()
+        selected_products = self._humanize_selected_products(global_params.get("selected_products"))
+        matching_signals = self._humanize_matching_signals(global_params.get("matching_signals"))
+        compatibility_summary = self._humanize_compatibility_summary(global_params.get("compatibility_summary"))
+        risk_flags = self._parse_list_like_value(global_params.get("solution_risk_flags"))
+        voltage_level = str(global_params.get("voltage_level") or "").strip()
+        power_rating = str(global_params.get("power_rating") or "").strip()
+        protocol = str(global_params.get("dcs_protocol") or "").strip()
+        interface_summary = self._humanize_catalog_interface_summary(global_params.get("catalog_interface_summary"))
+
+        requirement_items: list[str] = []
+        if summary:
+            requirement_items.append(summary)
+        if selected_products:
+            requirement_items.append(f"当前拟配置设备包括{self._join_list_as_cn(selected_products[:4])}。")
+        if voltage_level or power_rating:
+            scenario = " / ".join(item for item in [voltage_level, power_rating] if item)
+            requirement_items.append(f"主设备容量与电气边界需围绕 {scenario} 场景完成校核。")
+        if interface_summary:
+            requirement_items.append(interface_summary)
+        elif protocol:
+            requirement_items.append(f"控制系统需接入 {protocol}，并明确站点划分、点表边界与联锁条件。")
+
+        boundary_items: list[str] = []
+        if compatibility_summary:
+            boundary_items.append(compatibility_summary)
+        boundary_items.extend(f"需重点体现：{item}" for item in matching_signals[:3])
+        boundary_items.extend(f"待确认事项：{item}" for item in risk_flags[:3])
+
+        sections: list[tuple[str | None, str]] = []
+        if requirement_items:
+            sections.append(("核心需求", self._render_mock_bullets(requirement_items)))
+        if boundary_items:
+            sections.append(("约束与边界", self._render_mock_bullets(boundary_items)))
+        return sections
+
+    def _render_mock_bullets(self, items: list[str]) -> str:
+        normalized_items: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            normalized = re.sub(r"\s+", " ", str(item or "")).strip()
+            if len(normalized) < 12 or normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_items.append(f"- {normalized}")
+        return "\n".join(normalized_items).strip()
+
+    def _parse_list_like_value(self, value: Any) -> list[str]:
+        text = str(value or "").strip()
+        if not text:
+            return []
+        normalized = text.replace("；", ";").replace(" / ", ";").replace("\n", ";")
+        parts = [re.sub(r"\s+", " ", item).strip() for item in normalized.split(";")]
+        return [item for item in parts if item]
+
+    def _join_list_as_cn(self, items: list[str]) -> str:
+        normalized = [str(item).strip() for item in items if str(item).strip()]
+        if not normalized:
+            return ""
+        if len(normalized) == 1:
+            return normalized[0]
+        return "、".join(normalized)
+
+    def _humanize_selected_products(self, value: Any) -> list[str]:
+        items = self._parse_list_like_value(value)
+        humanized: list[str] = []
+        for item in items:
+            normalized = item.replace(" x", " ").strip()
+            if ":" in normalized:
+                role, name = [part.strip() for part in normalized.split(":", 1)]
+                normalized = f"{role}{name}"
+            normalized = re.sub(r"\b(\d+)\b$", r"\1 套", normalized)
+            humanized.append(normalized)
+        return humanized
+
+    def _humanize_matching_signals(self, value: Any) -> list[str]:
+        items = self._parse_list_like_value(value)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            key = item.casefold().replace("project.", "")
+            if key in seen:
+                continue
+            seen.add(key)
+            if "=" in key:
+                field, raw_value = [part.strip() for part in key.split("=", 1)]
+                mapped_value = self._replace_catalog_codes(raw_value)
+                if field == "industry":
+                    deduped.append(f"行业场景需按{mapped_value}工况组织方案。")
+                    continue
+                if field == "product_line":
+                    deduped.append(f"当前方案需与{mapped_value}产品线能力保持一致。")
+                    continue
+            deduped.append(self._replace_catalog_codes(item))
+        return deduped
+
+    def _humanize_catalog_interface_summary(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        normalized = self._replace_catalog_codes(text)
+        parts = [part.strip() for part in normalized.split("/") if part.strip()]
+        protocols = [part for part in parts if re.search(r"profibus|profinet|modbus|iec|ethernet", part, re.IGNORECASE)]
+        has_io_signal = any(part.lower() in {"i/o signal", "io signal"} for part in parts)
+        series_name = next(
+            (
+                part
+                for part in parts
+                if not re.search(r"communication|signal|profibus|profinet|modbus|iec|ethernet", part, re.IGNORECASE)
+            ),
+            "主驱动系统",
         )
+        clauses: list[str] = []
+        if protocols:
+            clauses.append(f"{series_name}通信接口按 {protocols[0]} 规划")
+        if has_io_signal:
+            clauses.append("并预留主驱动与配套设备之间的必要 I/O 信号")
+        if clauses:
+            return "，".join(clauses) + "。"
+        return normalized
+
+    def _humanize_compatibility_summary(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        normalized = self._replace_catalog_codes(text)
+        normalized = normalized.replace("必需配套 -> 配套设备", "当前方案需配置配套设备")
+        normalized = normalized.replace("建议配套 -> ", "建议补充")
+        normalized = normalized.replace("可选配套 -> ", "可选补充")
+        normalized = normalized.replace("冲突关系 -> ", "需避免与")
+        normalized = normalized.replace("已补齐 ", "已补齐")
+        normalized = normalized.replace("已覆盖 ", "已覆盖")
+        normalized = normalized.replace("目录缺失 ", "目录中尚缺")
+        normalized = normalized.replace("可选系列 ", "可选配置包括")
+        normalized = normalized.replace("优先系列 ", "优先配置")
+        normalized = normalized.replace("条件 ", "适用条件为")
+        normalized = re.sub(r"\s*->\s*", "", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
+
+    def _replace_catalog_codes(self, value: str) -> str:
+        code_map = {
+            "lci_sync_drive": "LCI 同步电机变频软起动系统",
+            "support_equipment": "配套设备",
+            "rectifier_transformer": "整流变压器",
+            "excitation_cabinet": "励磁控制柜",
+            "bypass_cabinet": "旁路柜",
+            "io_signal": "I/O Signal",
+            "communication": "Communication",
+        }
+        normalized = str(value or "")
+        for code, label in code_map.items():
+            normalized = re.sub(rf"\b{re.escape(code)}\b", label, normalized, flags=re.IGNORECASE)
+        return normalized
+
+    def _normalize_section_markdown(self, *, title: str, content: str) -> str:
+        normalized = str(content or "").strip()
+        if not normalized:
+            return f"## {title}\n"
+        if normalized.lstrip().startswith("#"):
+            return normalized.rstrip() + "\n"
+        return f"## {title}\n\n{normalized}\n"
+
+    def _build_mock_reuse_sections(
+        self,
+        *,
+        title: str,
+        reusable_blocks: list[dict[str, Any]],
+    ) -> list[tuple[str | None, str]]:
+        sections: list[tuple[str | None, str]] = []
+        seen_bodies: set[str] = set()
+        title_key = self._normalize_heading_key(title)
+        for block in reusable_blocks[:4]:
+            body = self._condense_mock_block_body(str(block.get("content_md") or ""))
+            body_key = re.sub(r"\s+", " ", body).strip().casefold()
+            if not body or not self._looks_readable_source_text(body) or body_key in seen_bodies:
+                continue
+            seen_bodies.add(body_key)
+            heading = str(block.get("source_heading") or "").strip() or None
+            if heading and not self._looks_readable_source_text(heading):
+                heading = None
+            if heading and self._normalize_heading_key(heading) == title_key:
+                heading = None
+            sections.append((heading, body))
+        return sections
+
+    def _condense_mock_block_body(self, content: str) -> str:
+        lines = str(content or "").splitlines()
+        blocks: list[str] = []
+        current: list[str] = []
+        for raw_line in lines:
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if not stripped:
+                if current:
+                    blocks.append("\n".join(current).strip())
+                    current = []
+                continue
+            if stripped.startswith("#"):
+                continue
+            current.append(line)
+        if current:
+            blocks.append("\n".join(current).strip())
+
+        selected: list[str] = []
+        for block in blocks:
+            normalized = re.sub(r"\s+", " ", block).strip()
+            if len(normalized) < 18 or not self._looks_readable_source_text(normalized):
+                continue
+            selected.append(block)
+            if len(selected) >= 3:
+                break
+        return "\n\n".join(selected).strip()
+
+    def _build_mock_context_summary(self, context: str) -> str:
+        items: list[str] = []
+        seen: set[str] = set()
+        for raw_line in str(context or "").splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            item = stripped[2:].strip() if stripped.startswith("- ") else stripped
+            if ":" in item:
+                prefix, suffix = item.split(":", 1)
+                if re.search(r"\.(?:docx?|pdf|pptx?|xlsx?)\b", prefix, re.IGNORECASE):
+                    continue
+                item = suffix.strip()
+            item = re.sub(r"\s+", " ", item).strip()
+            if len(item) < 18 or item in seen or not self._looks_readable_source_text(item):
+                continue
+            seen.add(item)
+            items.append(f"- {item}")
+            if len(items) >= 5:
+                break
+        return "\n".join(items).strip()
+
+    def _looks_readable_source_text(self, value: str) -> bool:
+        normalized = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", str(value or "")).strip()
+        if not normalized:
+            return False
+        sample = normalized[:900]
+        readable_count = len(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]", sample))
+        return readable_count / max(len(sample), 1) >= 0.35
+
+    def _normalize_heading_key(self, value: str) -> str:
+        normalized = re.sub(r"[()（）【】\[\]《》·:：,，/\\\-\s]+", "", str(value or "")).casefold()
+        return normalized.strip()
 
     def _render_holistic(self, request: LLMRequest) -> str:
         sections_markdown = str(request.metadata.get("sections_markdown") or request.user_prompt)

@@ -26,6 +26,7 @@ class ProductSeries(Base):
     is_published: Mapped[bool] = mapped_column(Boolean, server_default=sql_text("false"), nullable=False)
     role_type: Mapped[str] = mapped_column(String(20), server_default=sql_text("'support'"), nullable=False)
     family: Mapped[str] = mapped_column(String(120), nullable=False)
+    family_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     series_name: Mapped[str] = mapped_column(String(200), nullable=False)
     code: Mapped[str] = mapped_column(String(120), nullable=False)
     vendor: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -60,4 +61,16 @@ class ProductSeries(Base):
         back_populates="series",
         cascade="all, delete-orphan",
         order_by="ProductConstraint.constraint_type.asc()",
+    )
+    models = relationship(
+        "ProductModel",
+        back_populates="series",
+        cascade="all, delete-orphan",
+        order_by="ProductModel.model_number.asc()",
+    )
+    interfaces = relationship(
+        "ProductInterface",
+        back_populates="series",
+        cascade="all, delete-orphan",
+        order_by="ProductInterface.sort_order.asc(), ProductInterface.interface_type.asc()",
     )

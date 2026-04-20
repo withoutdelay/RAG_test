@@ -7,6 +7,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.services.parsing.section_catalog import build_heading_aliases, normalize_section_heading
+from app.services.retrieval.query_hints import expand_signal_terms, normalize_string_list
 from app.services.vectorstore.block_taxonomy import (
     content_form_is_table,
     extract_taxonomy_hints,
@@ -196,6 +197,7 @@ class CaseLibraryService:
         query: str,
         top_k: int = 8,
         sample_ids: set[str] | None = None,
+        document_names: set[str] | None = None,
         library_tracks: set[str] | None = None,
         section_title: str | None = None,
         section_ids: set[str] | None = None,
@@ -225,8 +227,13 @@ class CaseLibraryService:
             track = str(entry.get("library_track") or "pilot_main")
             if library_tracks and track not in library_tracks:
                 continue
-            if sample_ids and str(entry.get("sample_id") or "") not in sample_ids:
-                continue
+            sample_id = str(entry.get("sample_id") or "").strip()
+            file_name = str(entry.get("file_name") or "").strip()
+            if sample_ids or document_names:
+                sample_match = bool(sample_ids and sample_id in sample_ids)
+                document_match = bool(document_names and file_name in document_names)
+                if not sample_match and not document_match:
+                    continue
             section_id = str(entry.get("source_section_id") or "").strip()
             section_path = str(entry.get("section_path") or entry.get("heading_path") or "").strip()
             if section_ids and section_id not in section_ids:
@@ -266,6 +273,7 @@ class CaseLibraryService:
         query: str,
         top_k: int = 6,
         sample_ids: set[str] | None = None,
+        document_names: set[str] | None = None,
         library_tracks: set[str] | None = None,
         section_title: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -294,8 +302,12 @@ class CaseLibraryService:
             if library_tracks and track not in library_tracks:
                 continue
             sample_id = str(outline_entry.get("sample_id") or "").strip()
-            if sample_ids and sample_id not in sample_ids:
-                continue
+            file_name = str(outline_entry.get("file_name") or "").strip()
+            if sample_ids or document_names:
+                sample_match = bool(sample_ids and sample_id in sample_ids)
+                document_match = bool(document_names and file_name in document_names)
+                if not sample_match and not document_match:
+                    continue
             raw_sections = outline_entry.get("section_catalog") or outline_entry.get("flat_outline") or []
             sections = _flatten_section_entries(raw_sections)
             for section in sections:
@@ -306,7 +318,16 @@ class CaseLibraryService:
                     title_terms=title_terms,
                     context_terms=context_terms,
                     section_title=section_title or "",
-                    section=section,
+                    section={
+                        **section,
+                        "family_code": outline_entry.get("family_code"),
+                        "secondary_family_codes": outline_entry.get("secondary_family_codes") or [],
+                        "material_type": outline_entry.get("material_type"),
+                        "product_line": outline_entry.get("product_line"),
+                        "solution_family": outline_entry.get("solution_family"),
+                        "tags": outline_entry.get("tags") or [],
+                        "key_equipment": outline_entry.get("key_equipment") or [],
+                    },
                     target_taxonomy=target_taxonomy,
                 )
                 if score <= 0:
@@ -328,6 +349,10 @@ class CaseLibraryService:
                         "section_summary": section.get("section_summary"),
                         "level": section.get("level"),
                         "source_signals": section.get("source_signals") or [],
+                        "family_code": outline_entry.get("family_code"),
+                        "secondary_family_codes": outline_entry.get("secondary_family_codes") or [],
+                        "product_line": outline_entry.get("product_line"),
+                        "solution_family": outline_entry.get("solution_family"),
                         "score": round(score, 4),
                         "reason": "; ".join(reasons),
                     }
@@ -409,11 +434,14 @@ class CaseLibraryService:
     def _build_outline_retrieval_text(self, entry: dict[str, Any]) -> str:
         flat_outline = entry.get("flat_outline") or []
         heading_paths = [str(item.get("heading_path") or "") for item in flat_outline[:24]]
+        primary_signal_terms, secondary_signal_terms = self._collect_family_signal_terms(entry)
         parts = [
             str(entry.get("file_name") or ""),
             str(entry.get("profile") or ""),
             " ".join(str(item) for item in (entry.get("top_level_titles") or [])),
             " ".join(path for path in heading_paths if path),
+            " ".join(primary_signal_terms[:20]),
+            " ".join(secondary_signal_terms[:10]),
         ]
         return "\n".join(part for part in parts if part).strip()
 
@@ -435,6 +463,9 @@ class CaseLibraryService:
         if any(any(term.casefold() in title.casefold() for term in query_terms) for title in top_titles):
             score += 0.18
             reasons.append("top_level_title_match")
+        family_score, family_reasons = self._score_family_alignment(query_terms=query_terms, entry=entry)
+        score += family_score
+        reasons.extend(family_reasons)
         headings = entry.get("heading_count") or 0
         if int(headings) >= 20:
             score += 0.05
@@ -493,6 +524,9 @@ class CaseLibraryService:
         )
         score += title_score
         reasons.extend(title_reasons)
+        family_score, family_reasons = self._score_family_alignment(query_terms=query_terms, entry=entry)
+        score += family_score
+        reasons.extend(family_reasons)
         noise_adjustment, noise_reasons = _section_heading_noise_adjustment(
             section_title=section_title,
             normalized_heading=str(entry.get("normalized_heading") or normalize_section_heading(heading_path)),
@@ -690,6 +724,9 @@ class CaseLibraryService:
         elif detail_terms:
             score -= 0.04
             reasons.append("detail_mismatch_penalty")
+        family_score, family_reasons = self._score_family_alignment(query_terms=query_terms, entry=section)
+        score += family_score
+        reasons.extend(family_reasons)
 
         signals = {str(item) for item in (section.get("source_signals") or []) if item}
         if {"toc", "parser_heading"} <= signals:
@@ -742,6 +779,45 @@ class CaseLibraryService:
             score -= 0.22
             reasons.append("document_title_penalty")
         return score, reasons
+
+    def _score_family_alignment(
+        self,
+        *,
+        query_terms: list[str],
+        entry: dict[str, Any],
+    ) -> tuple[float, list[str]]:
+        primary_signal_terms, secondary_signal_terms = self._collect_family_signal_terms(entry)
+        if not primary_signal_terms and not secondary_signal_terms:
+            return 0.0, []
+
+        score = 0.0
+        reasons: list[str] = []
+        normalized_query_terms = _dedupe_keep_order([term for term in query_terms if term])
+        primary_haystack = "\n".join(primary_signal_terms).casefold()
+        secondary_haystack = "\n".join(secondary_signal_terms).casefold()
+        primary_overlap = [term for term in normalized_query_terms if term.casefold() in primary_haystack]
+        secondary_overlap = [term for term in normalized_query_terms if term.casefold() in secondary_haystack]
+        if primary_overlap:
+            score += min(0.18, 0.06 + len(primary_overlap) * 0.04)
+            reasons.append(f"family_signal_match={','.join(primary_overlap[:6])}")
+        if secondary_overlap:
+            score += min(0.12, 0.04 + len(secondary_overlap) * 0.03)
+            reasons.append(f"secondary_family_signal_match={','.join(secondary_overlap[:6])}")
+        return score, reasons
+
+    def _collect_family_signal_terms(self, entry: dict[str, Any]) -> tuple[list[str], list[str]]:
+        primary_values = _dedupe_keep_order(
+            [
+                str(entry.get("family_code") or "").strip(),
+                str(entry.get("material_type") or "").strip(),
+                str(entry.get("product_line") or "").strip(),
+                str(entry.get("solution_family") or "").strip(),
+                *normalize_string_list(entry.get("tags")),
+                *normalize_string_list(entry.get("key_equipment")),
+            ]
+        )
+        secondary_values = normalize_string_list(entry.get("secondary_family_codes"))
+        return expand_signal_terms(primary_values), expand_signal_terms(secondary_values)
 
     def _score_related_block(
         self,

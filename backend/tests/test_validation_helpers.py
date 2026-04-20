@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from app.services.validation.service import (
+    _append_review_resolution_trace,
     build_review_task_blueprints,
     collect_validation_findings,
     derive_validation_status,
@@ -618,6 +619,12 @@ class ValidationHelperTests(unittest.TestCase):
                         "source_title": "历史方案C",
                         "type": "section",
                     },
+                    {
+                        "evidence_id": "ev_solution_4",
+                        "source_doc_id": "doc_solution_4",
+                        "source_title": "历史方案D",
+                        "type": "section",
+                    },
                 ]
             },
         )
@@ -650,6 +657,15 @@ class ValidationHelperTests(unittest.TestCase):
                         "mandatory": True,
                         "expected_evidence_types": ["table", "parameter"],
                         "parameter_sensitive": True,
+                        "asset_required": False,
+                        "needs_human_review": False,
+                        "children": [],
+                    },
+                    {
+                        "section_id": "4",
+                        "title": "启动及切换配套说明",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section", "parameter"],
                         "asset_required": False,
                         "needs_human_review": False,
                         "children": [],
@@ -706,12 +722,29 @@ class ValidationHelperTests(unittest.TestCase):
                 global_param_snapshot={},
                 validator_result={"reuse_pack": {}},
             ),
+            SimpleNamespace(
+                section_id="4",
+                title="启动及切换配套说明",
+                content_md="本章仅描述一般启动流程和保护原则，没有说明已触发的配套切换单元缺口，也未提示当前方案还存在待补齐的配套边界。",
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_solution_4",
+                        "source_doc_id": "doc_solution_4",
+                        "source_title": "历史方案D",
+                        "type": "section",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={"reuse_pack": {}},
+            ),
         ]
         solution_snapshot = SimpleNamespace(
             selected_products=[
                 {
                     "role": "主驱动",
                     "name": "LCI 同步电机变频软起动系统",
+                    "model_number": "GBT.LCI.SO-A0606-211N465",
                     "rated_voltage": "10kV",
                     "rated_power_kw": 4500,
                     "quantity": 1,
@@ -726,7 +759,61 @@ class ValidationHelperTests(unittest.TestCase):
                     "config": "旁路配置",
                 },
             ],
-            interface_plan={"dcs_protocol": "Profibus-DP", "io_allocation": {"DI": 16, "DO": 8, "AI": 4, "AO": 2}},
+            interface_plan={
+                "dcs_protocol": "Profibus-DP",
+                "io_allocation": {"DI": 16, "DO": 8, "AI": 4, "AO": 2},
+                "catalog_interface_entries": [
+                    {
+                        "series_code": "lci_sync_drive",
+                        "series_name": "LCI 同步电机变频软起动系统",
+                        "interface_type": "communication",
+                        "protocol": "Profibus-DP",
+                        "signal_summary": [
+                            "adapter=fieldbus_adapter",
+                            "coverage=lci, switchgear, oil_station, cooler",
+                        ],
+                        "source_material_key": "vera-46268861",
+                    },
+                    {
+                        "series_code": "lci_sync_drive",
+                        "series_name": "LCI 同步电机变频软起动系统",
+                        "interface_type": "io_signal",
+                        "protocol": None,
+                        "signal_summary": [
+                            "control_sequence=excitation_build_wait_5s, sync_switching",
+                            "supporting_systems=excitation_cabinet, oil_station, cooler",
+                        ],
+                        "source_material_key": "vera-46268861",
+                    },
+                ],
+            },
+            selection_reason={
+                "catalog_model_matches": [
+                    {
+                        "series_code": "lci_sync_drive",
+                        "series_name": "LCI 同步电机变频软起动系统",
+                        "model_number": "GBT.LCI.SO-A0606-211N465",
+                        "rated_voltage": "10kV",
+                        "rated_power_kw": 4208,
+                        "source_material_key": "vera-46268861",
+                    }
+                ],
+                "risk_flags": ["缺少推荐配套目录项：bypass_cabinet"],
+                "compatibility_actions": [
+                    {
+                        "source_family_code": "lci_sync_drive",
+                        "target_family_code": "bypass_unit",
+                        "relation_type": "recommended",
+                        "condition": "旁路或工频切换场景",
+                        "applies": True,
+                        "preferred_series_codes": ["bypass_cabinet"],
+                        "optional_series_codes": [],
+                        "covered_series_codes": [],
+                        "added_series_codes": [],
+                        "missing_series_codes": ["bypass_cabinet"],
+                    }
+                ],
+            },
         )
 
         errors, _, section_results = collect_validation_findings(
@@ -740,9 +827,171 @@ class ValidationHelperTests(unittest.TestCase):
         self.assertIn("VAL011", {item["code"] for item in errors})
         self.assertIn("VAL012", {item["code"] for item in errors})
         self.assertIn("VAL013", {item["code"] for item in errors})
+        self.assertIn("VAL014", {item["code"] for item in errors})
         self.assertIn("VAL011", {item["code"] for item in section_results["1"]["errors"]})
         self.assertIn("VAL012", {item["code"] for item in section_results["2"]["errors"]})
         self.assertIn("VAL013", {item["code"] for item in section_results["3"]["errors"]})
+        self.assertIn("VAL014", {item["code"] for item in section_results["4"]["errors"]})
+        parameter_issue = next(item for item in errors if item["code"] == "VAL011")
+        interface_issue = next(item for item in errors if item["code"] == "VAL012")
+        self.assertIn("model_number", parameter_issue["details"]["missing_fields"])
+        self.assertEqual(parameter_issue["details"]["expected_model_number"], "GBT.LCI.SO-A0606-211N465")
+        self.assertIn("catalog_interface_signals", interface_issue["details"]["missing_items"])
+        self.assertIn("fieldbus_adapter", interface_issue["details"]["expected_catalog_interface_signals"])
+
+    def test_collect_validation_findings_accepts_catalog_model_and_interface_evidence_when_present(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.9200"),
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_solution_model",
+                        "source_doc_id": "doc_solution_model",
+                        "source_title": "历史方案A",
+                        "type": "section",
+                    },
+                    {
+                        "evidence_id": "ev_solution_interface",
+                        "source_doc_id": "doc_solution_interface",
+                        "source_title": "历史方案B",
+                        "type": "section",
+                    },
+                ]
+            },
+        )
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "1",
+                        "title": "主要设备技术参数",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section", "parameter"],
+                        "parameter_sensitive": True,
+                        "asset_required": False,
+                        "needs_human_review": False,
+                        "children": [],
+                    },
+                    {
+                        "section_id": "2",
+                        "title": "DCS 通讯接口方案",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section", "parameter"],
+                        "asset_required": False,
+                        "needs_human_review": False,
+                        "children": [],
+                    },
+                ],
+            }
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="1",
+                title="主要设备技术参数",
+                content_md=(
+                    "本项目主驱动采用 LCI 同步电机变频软起动系统，型号 GBT.LCI.SO-A0606-211N465，"
+                    "额定电压 10kV，额定容量 4500kW，并按同步电机软起动场景配置。"
+                ),
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_solution_model",
+                        "source_doc_id": "doc_solution_model",
+                        "source_title": "历史方案A",
+                        "type": "section",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={"reuse_pack": {}},
+            ),
+            SimpleNamespace(
+                section_id="2",
+                title="DCS 通讯接口方案",
+                content_md=(
+                    "系统与上位 DCS 采用 Profibus-DP 通讯，配置 DI 16、DO 8、AI 4、AO 2。"
+                    "现场总线适配器统一接入开关柜、油站、冷却器和励磁控制柜，并明确同步切换联锁。"
+                ),
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_solution_interface",
+                        "source_doc_id": "doc_solution_interface",
+                        "source_title": "历史方案B",
+                        "type": "section",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={"reuse_pack": {}},
+            ),
+        ]
+        solution_snapshot = SimpleNamespace(
+            selected_products=[
+                {
+                    "role": "主驱动",
+                    "name": "LCI 同步电机变频软起动系统",
+                    "model_number": "GBT.LCI.SO-A0606-211N465",
+                    "rated_voltage": "10kV",
+                    "rated_power_kw": 4500,
+                    "quantity": 1,
+                    "config": "旁路配置",
+                }
+            ],
+            interface_plan={
+                "dcs_protocol": "Profibus-DP",
+                "io_allocation": {"DI": 16, "DO": 8, "AI": 4, "AO": 2},
+                "catalog_interface_entries": [
+                    {
+                        "series_code": "lci_sync_drive",
+                        "series_name": "LCI 同步电机变频软起动系统",
+                        "interface_type": "communication",
+                        "protocol": "Profibus-DP",
+                        "signal_summary": [
+                            "adapter=fieldbus_adapter",
+                            "coverage=lci, switchgear, oil_station, cooler",
+                        ],
+                        "source_material_key": "vera-46268861",
+                    },
+                    {
+                        "series_code": "lci_sync_drive",
+                        "series_name": "LCI 同步电机变频软起动系统",
+                        "interface_type": "io_signal",
+                        "protocol": None,
+                        "signal_summary": [
+                            "control_sequence=excitation_build_wait_5s, sync_switching",
+                            "supporting_systems=excitation_cabinet, oil_station, cooler",
+                        ],
+                        "source_material_key": "vera-46268861",
+                    },
+                ],
+            },
+            selection_reason={
+                "catalog_model_matches": [
+                    {
+                        "series_code": "lci_sync_drive",
+                        "series_name": "LCI 同步电机变频软起动系统",
+                        "model_number": "GBT.LCI.SO-A0606-211N465",
+                        "rated_voltage": "10kV",
+                        "rated_power_kw": 4208,
+                        "source_material_key": "vera-46268861",
+                    }
+                ]
+            },
+        )
+
+        errors, _, section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+            solution_snapshot=solution_snapshot,
+        )
+
+        self.assertNotIn("VAL011", {item["code"] for item in errors})
+        self.assertNotIn("VAL012", {item["code"] for item in errors})
+        self.assertNotIn("VAL011", {item["code"] for item in section_results["1"]["errors"]})
+        self.assertNotIn("VAL012", {item["code"] for item in section_results["2"]["errors"]})
 
     def test_collect_validation_findings_keeps_val104_for_missing_figure_placeholder(self) -> None:
         requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
@@ -901,6 +1150,12 @@ class ValidationHelperTests(unittest.TestCase):
                     "section_title": "总体方案",
                     "message": "章节质量审查未通过",
                 },
+                {
+                    "code": "VAL014",
+                    "section_id": "4",
+                    "section_title": "启动及切换配套说明",
+                    "message": "章节未体现兼容规则缺口",
+                },
             ],
             warnings=[
                 {
@@ -925,7 +1180,11 @@ class ValidationHelperTests(unittest.TestCase):
         self.assertEqual(task_types, {"param_conflict", "figure_confirm", "content_review"})
         blocking_by_code = {item["payload"]["code"]: item["blocking_level"] for item in blueprints}
         self.assertEqual(blocking_by_code["VAL108"], "P0")
+        self.assertEqual(blocking_by_code["VAL014"], "P0")
         self.assertEqual(blocking_by_code["VAL105"], "P1")
+        payload_by_code = {item["payload"]["code"]: item["payload"] for item in blueprints}
+        self.assertEqual(payload_by_code["VAL014"]["details"], {})
+        self.assertEqual(payload_by_code["VAL003"]["details"]["param_name"], "total_power")
 
     def test_build_review_task_blueprints_can_opt_in_final_review(self) -> None:
         outline = SimpleNamespace(id=uuid4(), outline_json={"title": "测试方案"})
@@ -940,6 +1199,40 @@ class ValidationHelperTests(unittest.TestCase):
         )
 
         self.assertEqual([item["task_type"] for item in blueprints], ["final_review"])
+
+    def test_append_review_resolution_trace_records_code_and_resolution_history(self) -> None:
+        task = SimpleNamespace(
+            id=uuid4(),
+            task_type="content_review",
+            blocking_level="P0",
+            payload={
+                "code": "VAL011",
+                "message": "缺少型号信息",
+                "section_id": "4",
+                "section_title": "硬件配置清单",
+                "level": "P0",
+                "suggested_action": "补充型号字段",
+                "details": {"model_number": "SINAMICS GL150"},
+            },
+        )
+
+        updated = _append_review_resolution_trace(
+            {"review_resolution_trace": [{"task_id": "legacy"}]},
+            task=task,
+            resolution={"action": "patched", "note": "已补充型号"},
+            status="resolved",
+            resolved_at="2026-04-20T10:00:00+00:00",
+        )
+
+        trace = updated["review_resolution_trace"]
+        self.assertEqual(len(trace), 2)
+        self.assertEqual(trace[-1]["code"], "VAL011")
+        self.assertEqual(trace[-1]["section_id"], "4")
+        self.assertEqual(trace[-1]["status"], "resolved")
+        self.assertEqual(trace[-1]["details"]["model_number"], "SINAMICS GL150")
+        self.assertEqual(trace[-1]["resolution"]["note"], "已补充型号")
+        self.assertEqual(updated["review_resolutions"]["content_review"]["action"], "patched")
+        self.assertEqual(updated["review_resolutions"]["VAL011"]["note"], "已补充型号")
 
     def test_derive_validation_status_marks_review_and_passed(self) -> None:
         self.assertEqual(

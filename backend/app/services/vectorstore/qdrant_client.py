@@ -31,7 +31,12 @@ class QdrantService:
 
         if cache_key not in _CLIENT_CACHE:
             if location:
-                _CLIENT_CACHE[cache_key] = QdrantClient(location=location)
+                if location in {":memory:", "memory"}:
+                    _CLIENT_CACHE[cache_key] = QdrantClient(location=":memory:")
+                elif "://" in location:
+                    _CLIENT_CACHE[cache_key] = QdrantClient(url=location)
+                else:
+                    _CLIENT_CACHE[cache_key] = QdrantClient(path=location)
             elif host in {":memory:", "memory"}:
                 _CLIENT_CACHE[cache_key] = QdrantClient(location=":memory:")
             else:

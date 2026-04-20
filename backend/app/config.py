@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     secret_key: str = "change-me-to-random-string"
+    frontend_port: int = 3000
 
     database_url: str = "postgresql+asyncpg://copilot:copilot@localhost:5432/copilot_db"
     redis_url: str = "redis://localhost:6379/0"

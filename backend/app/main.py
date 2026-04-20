@@ -21,12 +21,14 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Presale Copilot Backend", version="0.1.0", lifespan=lifespan)
 settings = get_settings()
 if settings.app_env.lower() == "development":
+    allowed_ports = {3000, int(settings.frontend_port or 3000)}
+    allowed_hosts = ("localhost", "127.0.0.1", "host.docker.internal")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-            "http://host.docker.internal:3000",
+            f"http://{host}:{port}"
+            for port in sorted(allowed_ports)
+            for host in allowed_hosts
         ],
         allow_credentials=True,
         allow_methods=["*"],

@@ -44,15 +44,18 @@ from app.services.vectorstore.block_taxonomy import (
 )
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
-DEFAULT_REUSE_LIMIT = 5
+DEFAULT_REUSE_LIMIT = 7
 REUSE_CANDIDATE_MULTIPLIER = 3
-REUSE_MIN_CANDIDATES = 6
+REUSE_MIN_CANDIDATES = 8
 FULL_SECTION_MIN_SCORE = 0.72
 FULL_SECTION_MIN_LEAD = 0.08
-FULL_SECTION_MAX_SOURCE_TOKENS = 1800
+FULL_SECTION_MAX_SOURCE_TOKENS = 2600
 REUSE_TRACE_SECTION_LIMIT = 4
 REUSE_TRACE_BLOCK_LIMIT = 6
 INTER_SECTION_TOPIC_LIMIT = 8
+READABLE_REUSE_CHAR_PATTERN = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]")
+READABLE_REUSE_TOKEN_PATTERN = re.compile(r"[A-Za-z]{2,}|[\u4e00-\u9fff]{2,}|\d+(?:\.\d+)?(?:kV|kW|MW|A|Hz)?", re.IGNORECASE)
+BINARY_EXTRACTION_NOISE_TOKENS = ("word/media/", "ihdr", "idat", "iend", "jfif", "exif")
 REUSE_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./+-]{2,}|[\u4e00-\u9fff]{2,}")
 TECHNICAL_TOKEN_PATTERN = re.compile(r"[A-Za-z]{2,}\d*|\d+(?:\.\d+)+|[\u4e00-\u9fff]{2,}")
 SECTION_TITLE_PREFIX_PATTERN = re.compile(r"^\s*(?:第[\d一二三四五六七八九十百]+[章节篇部]\s*|[\d一二三四五六七八九十百]+(?:\.\d+)*[、.\-]?\s*)")
@@ -120,6 +123,8 @@ SECTION_ASSET_QUERY_HINTS: dict[str, tuple[str, ...]] = {
     "supply_scope": ("供货清单", "配置表", "参数表"),
 }
 EXTRACTIVE_SECTION_CLASSES = {"architecture", "configuration", "implementation", "custom"}
+SNAPSHOT_PRIORITY_SECTION_CLASSES = {"overview", "requirement"}
+SNAPSHOT_PRIORITY_TITLE_HINTS = ("需求分析", "项目概述", "项目背景", "建设目标", "改造目标")
 EXTRACTIVE_SECTION_TYPES = {
     "overall_solution",
     "design_basis",
@@ -223,6 +228,7 @@ SECTION_OUTPUT_NOISE_PATTERNS = (
     re.compile(r"^\s*章节关键词[:：].*$", re.IGNORECASE),
     re.compile(r"^\s*参考摘要[:：].*$", re.IGNORECASE),
     re.compile(r"^\s*匹配原因[:：].*$", re.IGNORECASE),
+    re.compile(r"^\s*案例来源[:：].*$", re.IGNORECASE),
     re.compile(r"^\s*可参考章节[:：].*$", re.IGNORECASE),
     re.compile(r"^\s*可用参考资料[:：].*$", re.IGNORECASE),
     re.compile(r"^\s*(建议参考资产|推荐资产|可用复用包|替换与禁用约束)[:：].*$", re.IGNORECASE),
@@ -232,6 +238,7 @@ SECTION_OUTPUT_NOISE_PATTERNS = (
 )
 INTERNAL_REUSE_SUMMARY_LINE_PATTERNS = (
     re.compile(r"^\s*匹配原因[:：].*$", re.IGNORECASE),
+    re.compile(r"^\s*案例来源[:：].*$", re.IGNORECASE),
     re.compile(r"^\s*可参考章节[:：].*$", re.IGNORECASE),
     re.compile(r"^\s*命中原因[:：].*$", re.IGNORECASE),
     re.compile(r"^\s*query_overlap\s*=.*$", re.IGNORECASE),
@@ -242,6 +249,7 @@ INTERNAL_GUIDANCE_HEADING_PATTERN = re.compile(
     r"^#{2,6}\s*(建议插入图表|建议图表|建议参考资产|推荐资产|可用参考资料|可用复用包|替换与禁用约束|参考摘要|图表建议|插图建议|图表清单)\s*$",
     re.IGNORECASE,
 )
+STORAGE_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 REWRITE_LEAKAGE_TOKENS = (
     "章节标题:",
     "章节目的:",
@@ -336,7 +344,7 @@ def build_section_context(
     section: dict[str, Any],
     evidence_bundle: EvidenceBundle,
     global_params: dict[str, Any] | None = None,
-    limit: int = 3,
+    limit: int = 4,
     preferred_evidence_ids: set[str] | None = None,
     solution_snapshot: Any | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -668,7 +676,7 @@ def tighten_recommended_assets_for_reuse(
     return recommended_assets[:preferred_limit]
 
 
-def sanitize_generated_section_content(*, content_md: str, section_title: str) -> str:
+def sanitize_generated_section_content(*, content_md: str, section_title: str, section_purpose: str = "") -> str:
     lines = str(content_md or "").splitlines()
     cleaned: list[str] = []
     skip_blank_after_internal_heading = False
@@ -688,13 +696,46 @@ def sanitize_generated_section_content(*, content_md: str, section_title: str) -
             continue
         cleaned.append(line)
 
-    text = "\n".join(cleaned).strip()
+    text = STORAGE_CONTROL_CHAR_PATTERN.sub("", "\n".join(cleaned)).strip()
+    text = _strip_leading_section_purpose(text=text, section_purpose=section_purpose)
     text = re.sub(r"\n{3,}", "\n\n", text)
     if not text:
         return f"## {section_title}\n"
     if not text.lstrip().startswith("#"):
         return f"## {section_title}\n\n{text}\n"
     return text.rstrip() + "\n"
+
+
+def _strip_leading_section_purpose(*, text: str, section_purpose: str) -> str:
+    normalized_purpose = str(section_purpose or "").strip()
+    if not normalized_purpose:
+        return text
+    paragraphs = [paragraph for paragraph in str(text or "").split("\n\n") if paragraph.strip()]
+    if not paragraphs:
+        return text
+    body_index = 1 if paragraphs[0].lstrip().startswith("#") else 0
+    if body_index >= len(paragraphs):
+        return text
+
+    def _normalize(value: str) -> str:
+        return re.sub(r"\s+", "", str(value or "")).casefold().strip("。；;:：")
+
+    if _normalize(paragraphs[body_index]) != _normalize(normalized_purpose):
+        return text
+    paragraphs.pop(body_index)
+    return "\n\n".join(paragraphs).strip()
+
+
+def _sanitize_storage_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return STORAGE_CONTROL_CHAR_PATTERN.sub("", value)
+    if isinstance(value, list):
+        return [_sanitize_storage_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_storage_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _sanitize_storage_value(item) for key, item in value.items()}
+    return value
 
 
 def _strip_internal_reuse_summary_lines(content_md: str) -> str:
@@ -705,6 +746,44 @@ def _strip_internal_reuse_summary_lines(content_md: str) -> str:
         if not any(pattern.match(line) for pattern in INTERNAL_REUSE_SUMMARY_LINE_PATTERNS)
     ]
     return "\n".join(cleaned).strip()
+
+
+def _looks_customer_readable_reuse_text(text: str) -> bool:
+    normalized = STORAGE_CONTROL_CHAR_PATTERN.sub("", str(text or "")).strip()
+    if not normalized:
+        return False
+    lowered = normalized.casefold()
+    if any(token in lowered for token in BINARY_EXTRACTION_NOISE_TOKENS):
+        return False
+    sample = normalized[:900]
+    readable_count = len(READABLE_REUSE_CHAR_PATTERN.findall(sample))
+    compact = re.sub(r"\s+", "", sample)
+    if sample.lstrip().startswith("|") or "| ---" in sample:
+        informative_cells = sum(
+            1
+            for cell in re.split(r"[|\n]", sample)
+            if READABLE_REUSE_TOKEN_PATTERN.search(cell)
+        )
+        return informative_cells >= 4 and readable_count >= 6
+    meaningful_tokens = READABLE_REUSE_TOKEN_PATTERN.findall(sample)
+    if not meaningful_tokens:
+        return False
+    avg_token_length = sum(len(token) for token in meaningful_tokens) / len(meaningful_tokens)
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", sample))
+    has_multiword_english = bool(re.search(r"[A-Za-z]{3,}(?:\s+[A-Za-z]{2,}){2,}", sample))
+    enough_structure = cjk_count >= 6 or has_multiword_english or len(meaningful_tokens) >= 4
+    return enough_structure and readable_count / max(len(compact), 1) >= 0.18 and avg_token_length >= 2.4
+
+
+def _looks_customer_readable_heading(text: str) -> bool:
+    normalized = STORAGE_CONTROL_CHAR_PATTERN.sub("", str(text or "")).strip()
+    if not normalized:
+        return False
+    if heading_looks_like_document_title(normalized):
+        return True
+    if re.search(r"[\u4e00-\u9fff]{2,}", normalized):
+        return True
+    return bool(re.search(r"[A-Za-z]{3,}(?:\s+[A-Za-z]{2,})+", normalized))
 
 
 def _text_contains_any_token(text: str, tokens: tuple[str, ...] | set[str]) -> bool:
@@ -928,6 +1007,7 @@ def _build_composition_retrieval_trace(
                 "role": "历史方案复用层",
                 "query": reuse_trace.get("query"),
                 "query_intents": reuse_trace.get("query_intents") or {},
+                "catalog_material_candidates": reuse_trace.get("catalog_material_candidates") or [],
                 "section_candidates": reuse_trace.get("section_candidates") or [],
                 "scoped_sections": reuse_trace.get("scoped_sections") or [],
                 "retrieval_mode": generation_details.get("retrieval_mode"),
@@ -1066,6 +1146,148 @@ def should_use_extractive_reuse(*, section: dict[str, Any], reuse_pack: dict[str
     return bool(block_section_types & EXTRACTIVE_SECTION_TYPES)
 
 
+def _reuse_block_source_type(block: dict[str, Any]) -> str:
+    metadata = block.get("metadata") or {}
+    return str(metadata.get("source_type") or "").strip().lower()
+
+
+def _is_solution_snapshot_block(block: dict[str, Any]) -> bool:
+    return _reuse_block_source_type(block) == "solution_snapshot"
+
+
+def _is_product_material_block(block: dict[str, Any]) -> bool:
+    return _reuse_block_source_type(block) == "product_material"
+
+
+def _should_limit_non_snapshot_reuse_in_customer_body(section: dict[str, Any]) -> bool:
+    section_class = str(section.get("section_class") or "").strip().lower()
+    if section_class in SNAPSHOT_PRIORITY_SECTION_CLASSES:
+        return True
+    if str(section.get("customer_specificity") or "").strip().lower() != "high":
+        return False
+    signal_text = "\n".join(
+        part
+        for part in (
+            str(section.get("title") or "").strip(),
+            str(section.get("purpose") or section.get("description") or "").strip(),
+        )
+        if part
+    )
+    return any(token in signal_text for token in SNAPSHOT_PRIORITY_TITLE_HINTS)
+
+
+def _select_customer_body_reuse_blocks(
+    *,
+    section: dict[str, Any],
+    reusable_blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    blocks = list(reusable_blocks or [])
+    if not blocks or not _should_limit_non_snapshot_reuse_in_customer_body(section):
+        return blocks
+    snapshot_blocks = [block for block in blocks if _is_solution_snapshot_block(block)]
+    product_material_blocks = [block for block in blocks if _is_product_material_block(block)]
+    prioritized_blocks = [*snapshot_blocks[:2], *product_material_blocks[:2]]
+    if prioritized_blocks:
+        return prioritized_blocks[: min(4, len(prioritized_blocks))]
+    return blocks[:1]
+
+
+def _catalog_material_entries(solution_snapshot: Any | None) -> list[dict[str, Any]]:
+    if solution_snapshot is None:
+        return []
+    selection_reason = getattr(solution_snapshot, "selection_reason", None)
+    if not isinstance(selection_reason, dict):
+        return []
+    entries = selection_reason.get("catalog_material_entries")
+    if not isinstance(entries, list):
+        return []
+    return [item for item in entries if isinstance(item, dict)]
+
+
+def _select_catalog_material_entries_for_section(
+    *,
+    section: dict[str, Any],
+    solution_snapshot: Any | None,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    entries = _catalog_material_entries(solution_snapshot)
+    if not entries:
+        return []
+    target_section_type = str(infer_target_taxonomy(section).get("section_type") or "unknown").lower()
+    related_types = {target_section_type, *related_section_types(target_section_type)}
+    section_class = str(section.get("section_class") or "").strip().lower()
+    title_text = str(section.get("title") or "").strip()
+    if section_class == "overview" or any(token in title_text for token in ("概述", "总体", "方案")):
+        related_types.add("overall_solution")
+    if section_class == "requirement" or "需求" in title_text:
+        related_types.add("design_basis")
+
+    def _score(entry: dict[str, Any]) -> tuple[float, str]:
+        preferred_types = {
+            str(item).strip().lower()
+            for item in (entry.get("preferred_section_types") or [])
+            if str(item).strip()
+        }
+        score = 0.0
+        if target_section_type in preferred_types:
+            score += 3.0
+        elif preferred_types & related_types:
+            score += 1.6
+        material_type = str(entry.get("material_type") or "").strip().lower()
+        if material_type == "product_manual":
+            score += 0.6
+        elif material_type in {"standard_bom", "interface_schedule", "selection_rule", "diagram_template"}:
+            score += 0.45
+        elif material_type == "proposal_sample":
+            score += 0.2
+        quality_tier = str(entry.get("quality_tier") or "").strip().lower()
+        if quality_tier == "high":
+            score += 0.25
+        elif quality_tier == "medium":
+            score += 0.12
+        return (score, str(entry.get("document_name") or ""))
+
+    ranked = sorted(entries, key=_score, reverse=True)
+    selected: list[dict[str, Any]] = []
+    seen_documents: set[str] = set()
+    for entry in ranked:
+        document_name = str(entry.get("document_name") or "").strip()
+        if document_name and document_name in seen_documents:
+            continue
+        preferred_types = {
+            str(item).strip().lower()
+            for item in (entry.get("preferred_section_types") or [])
+            if str(item).strip()
+        }
+        if preferred_types and not (target_section_type in preferred_types or preferred_types & related_types):
+            continue
+        if document_name:
+            seen_documents.add(document_name)
+        selected.append(entry)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _annotate_case_match_with_catalog_material(
+    *,
+    item: dict[str, Any],
+    material_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not material_entries:
+        return item
+    sample_id = str(item.get("sample_id") or item.get("source_doc_id") or "").strip()
+    document_name = str(item.get("file_name") or item.get("source_title") or "").strip()
+    for entry in material_entries:
+        material_key = str(entry.get("material_key") or "").strip()
+        entry_document_name = str(entry.get("document_name") or "").strip()
+        if material_key and sample_id and material_key == sample_id:
+            return {**item, "catalog_material": entry}
+        if entry_document_name and document_name and entry_document_name == document_name:
+            return {**item, "catalog_material": entry}
+    return item
+
+
 def build_extractive_reuse_section_content(
     *,
     section: dict[str, Any],
@@ -1081,7 +1303,24 @@ def build_extractive_reuse_section_content(
         section=section,
     )
     candidate_blocks = _order_assembly_blocks(candidate_blocks=candidate_blocks, target_taxonomy=target_taxonomy)
+    snapshot_blocks = {
+        str(block.get("source_section_id") or "").strip(): block
+        for block in candidate_blocks
+        if _is_solution_snapshot_block(block) and str(block.get("source_section_id") or "").strip()
+    }
     target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
+    if _is_snapshot_architecture_overview_section(section=section, candidate_blocks=candidate_blocks):
+        return _build_snapshot_architecture_overview_section_content(
+            title=title,
+            snapshot_blocks=snapshot_blocks,
+            global_params=global_params,
+        )
+    if _is_snapshot_supply_scope_section(section=section, candidate_blocks=candidate_blocks):
+        return _build_snapshot_supply_scope_section_content(
+            title=title,
+            snapshot_blocks=snapshot_blocks,
+            global_params=global_params,
+        )
     if target_section_type in {"bom_or_supply_list", "supply_scope"}:
         return _build_supply_scope_reuse_section_content(
             section=section,
@@ -1143,14 +1382,536 @@ def build_extractive_reuse_section_content(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _is_snapshot_architecture_overview_section(
+    *,
+    section: dict[str, Any],
+    candidate_blocks: list[dict[str, Any]],
+) -> bool:
+    if not candidate_blocks:
+        return False
+    section_class = str(section.get("section_class") or "").strip().lower()
+    title = str(section.get("title") or "").strip()
+    if section_class != "architecture" and not any(token in title for token in ("技术架构", "总体架构", "总体方案")):
+        return False
+    snapshot_section_ids = {
+        str(block.get("source_section_id") or "").strip()
+        for block in candidate_blocks
+        if _is_solution_snapshot_block(block)
+    }
+    return bool(snapshot_section_ids & {"interface_registry", "interface", "models", "products"})
+
+
+def _build_snapshot_architecture_overview_section_content(
+    *,
+    title: str,
+    snapshot_blocks: dict[str, dict[str, Any]],
+    global_params: dict[str, Any],
+) -> str:
+    if not snapshot_blocks:
+        return f"## {title}\n"
+
+    selected_products = _humanize_selected_products_text(str(global_params.get("selected_products") or ""))
+    primary_product = str(global_params.get("primary_product") or "").strip()
+    model_number = str(global_params.get("primary_model_number") or "").strip()
+    dcs_protocol = str(global_params.get("dcs_protocol") or "").strip()
+    compatibility_summary = _normalize_snapshot_sentence(str(global_params.get("compatibility_summary") or ""))
+    constraint_items = [
+        _normalize_snapshot_sentence(item)
+        for item in _split_snapshot_param_list(global_params.get("solution_constraints"))
+        if _normalize_snapshot_sentence(item)
+    ]
+    open_question_items = [
+        _normalize_snapshot_sentence(item)
+        for item in _split_snapshot_param_list(global_params.get("solution_open_questions"))
+        if _normalize_snapshot_sentence(item)
+    ]
+
+    overview_lines: list[str] = []
+    if primary_product:
+        overview_lines.append(
+            f"- {_normalize_snapshot_sentence(f'本方案以{primary_product}作为主驱动核心，围绕主设备、配套设备和控制接口组织技术边界')}"
+        )
+    if model_number:
+        overview_lines.append(
+            f"- {_normalize_snapshot_sentence(f'当前主设备目录基线型号为{model_number}，用于后续技术对表、成套确认和选型校核')}"
+        )
+    if selected_products:
+        overview_lines.append(
+            f"- {_normalize_snapshot_sentence(f'当前成套范围覆盖{selected_products}，作为主回路设备、配套设备与供货边界的收口基础')}"
+        )
+    if dcs_protocol:
+        overview_lines.append(
+            f"- {_normalize_snapshot_sentence(f'控制接口当前按{dcs_protocol}规划，正式站点划分与接口点表需在接口资料到位后锁定')}"
+        )
+
+    boundary_lines: list[str] = []
+    if compatibility_summary:
+        boundary_lines.append(f"- {compatibility_summary}")
+    if "products" in snapshot_blocks and "功率待确认" in str(snapshot_blocks["products"].get("content_md") or ""):
+        boundary_lines.append("- 主设备额定功率与相关配套容量仍待技术确认后锁定。")
+    if "interface_registry" in snapshot_blocks or "interface" in snapshot_blocks:
+        boundary_lines.append("- 当前接口内容依据目录接口定义与 I/O 基线整理，正式接口/点表资料到位后再转入定稿版。")
+    boundary_lines.extend(
+        f"- {_normalize_snapshot_boundary_item(item)}"
+        for item in constraint_items[:2]
+        if _normalize_snapshot_boundary_item(item)
+    )
+    boundary_lines.extend(f"- 待确认事项：{item}" for item in open_question_items[:2])
+
+    lines = [f"## {title}", ""]
+    if overview_lines:
+        lines.extend(["### 架构组织与实施边界", "", *_dedupe_snapshot_lines(overview_lines), ""])
+
+    ordered_sections = [
+        ("interface_registry", "接口边界与信号要点"),
+        ("interface", "接口规模基线"),
+        ("models", "主设备型号与容量基线"),
+        ("products", "设备组成与供货配置"),
+    ]
+    for section_id, heading in ordered_sections:
+        block = snapshot_blocks.get(section_id)
+        if not block:
+            continue
+        content = str(block.get("content_md") or "").strip()
+        if not content:
+            continue
+        lines.extend([f"### {heading}", "", content, ""])
+
+    if boundary_lines:
+        lines.extend(["### 配套关系与成套边界", "", *_dedupe_snapshot_lines(boundary_lines), ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _is_snapshot_supply_scope_section(
+    *,
+    section: dict[str, Any],
+    candidate_blocks: list[dict[str, Any]],
+) -> bool:
+    if not candidate_blocks:
+        return False
+    section_class = str(section.get("section_class") or "").strip().lower()
+    title = str(section.get("title") or "").strip()
+    if section_class != "configuration" and not any(token in title for token in ("清单", "供货", "配置")):
+        return False
+    snapshot_section_ids = {
+        str(block.get("source_section_id") or "").strip()
+        for block in candidate_blocks
+        if _is_solution_snapshot_block(block)
+    }
+    return "products" in snapshot_section_ids
+
+
+def _build_snapshot_supply_scope_section_content(
+    *,
+    title: str,
+    snapshot_blocks: dict[str, dict[str, Any]],
+    global_params: dict[str, Any],
+) -> str:
+    products = str((snapshot_blocks.get("products") or {}).get("content_md") or "").strip()
+    models = str((snapshot_blocks.get("models") or {}).get("content_md") or "").strip()
+    selected_products = _humanize_selected_products_text(str(global_params.get("selected_products") or ""))
+    compatibility_summary = _normalize_snapshot_sentence(str(global_params.get("compatibility_summary") or ""))
+    constraint_items = [
+        _normalize_snapshot_sentence(item)
+        for item in _split_snapshot_param_list(global_params.get("solution_constraints"))
+        if _normalize_snapshot_sentence(item)
+    ]
+    open_question_items = [
+        _normalize_snapshot_sentence(item)
+        for item in _split_snapshot_param_list(global_params.get("solution_open_questions"))
+        if _normalize_snapshot_sentence(item)
+    ]
+
+    lines = [
+        f"## {title}",
+        "",
+        "以下内容用于锁定当前项目的标准供货构成、主设备基线和商务收口边界，现阶段输出仍属于目录级供货清单，不替代最终 BOM。",
+        "",
+    ]
+    if selected_products:
+        lines.extend([_normalize_snapshot_sentence(f"本次标准供货范围覆盖{selected_products}"), ""])
+    if products:
+        lines.extend(["### 主要设备及供货范围", "", "当前标准供货构成如下表所示。", "", products, ""])
+    if models:
+        lines.extend(["### 主设备型号与配置说明", "", models, ""])
+
+    note_lines: list[str] = []
+    if compatibility_summary:
+        note_lines.append(f"- {compatibility_summary}")
+    if products and "功率待确认" in products:
+        note_lines.append("- 主设备额定功率和对应成套容量需在技术确认后锁定。")
+    if products and "标准配置" in products:
+        note_lines.append("- 当前供货按标准配置组织，详细附件、备件与随机资料需结合最终供货清单进一步确认。")
+    if note_lines:
+        lines.extend(["### 配置说明与待确认边界", "", *_dedupe_snapshot_lines(note_lines), ""])
+
+    pending_lines: list[str] = []
+    pending_lines.extend(
+        f"- {_normalize_snapshot_boundary_item(item)}"
+        for item in constraint_items[:2]
+        if _normalize_snapshot_boundary_item(item)
+    )
+    pending_lines.extend(f"- 待确认事项：{item}" for item in open_question_items[:2])
+    if products:
+        pending_lines.append("- 最终 BOM 明细、详细附件和随机资料边界需在标准 BOM 到位后锁定。")
+    if pending_lines:
+        lines.extend(["### 商务收口与待确认事项", "", *_dedupe_snapshot_lines(pending_lines), ""])
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _should_use_snapshot_primary_section(
+    *,
+    section: dict[str, Any],
+    customer_body_blocks: list[dict[str, Any]],
+) -> bool:
+    if not customer_body_blocks:
+        return False
+    snapshot_blocks = [block for block in customer_body_blocks if _is_solution_snapshot_block(block)]
+    if not snapshot_blocks:
+        return False
+    section_class = str(section.get("section_class") or "").strip().lower()
+    snapshot_ids = {
+        str(block.get("source_section_id") or "").strip()
+        for block in snapshot_blocks
+        if str(block.get("source_section_id") or "").strip()
+    }
+    if section_class in {"overview", "requirement"}:
+        return True
+    if section_class == "architecture":
+        return bool(snapshot_ids & {"interface_registry", "interface", "models", "products"})
+    if section_class == "configuration":
+        return "products" in snapshot_ids
+    if section_class == "implementation":
+        return "implementation" in snapshot_ids
+    if section_class == "service":
+        return "service" in snapshot_ids
+    return False
+
+
+def _build_snapshot_primary_section_content(
+    *,
+    section: dict[str, Any],
+    global_params: dict[str, Any],
+    customer_body_blocks: list[dict[str, Any]],
+) -> str:
+    section_class = str(section.get("section_class") or "").strip().lower()
+    snapshot_blocks = {
+        str(block.get("source_section_id") or "").strip(): block
+        for block in customer_body_blocks
+        if _is_solution_snapshot_block(block) and str(block.get("source_section_id") or "").strip()
+    }
+    title = str(section.get("title") or "未命名章节").strip() or "未命名章节"
+    if section_class == "overview":
+        return _build_snapshot_overview_section_content(
+            title=title,
+            global_params=global_params,
+            snapshot_blocks=snapshot_blocks,
+        )
+    if section_class == "requirement":
+        return _build_snapshot_requirement_section_content(
+            title=title,
+            global_params=global_params,
+            snapshot_blocks=snapshot_blocks,
+        )
+    if section_class == "architecture":
+        return _build_snapshot_architecture_overview_section_content(
+            title=title,
+            snapshot_blocks=snapshot_blocks,
+            global_params=global_params,
+        )
+    if section_class == "configuration":
+        return _build_snapshot_supply_scope_section_content(
+            title=title,
+            snapshot_blocks=snapshot_blocks,
+            global_params=global_params,
+        )
+    if section_class == "implementation":
+        return _build_snapshot_implementation_section_content(
+            title=title,
+            snapshot_blocks=snapshot_blocks,
+        )
+    if section_class == "service":
+        return _build_snapshot_service_section_content(
+            title=title,
+            snapshot_blocks=snapshot_blocks,
+        )
+    return f"## {title}\n"
+
+
+def _build_snapshot_overview_section_content(
+    *,
+    title: str,
+    global_params: dict[str, Any],
+    snapshot_blocks: dict[str, dict[str, Any]],
+) -> str:
+    summary = _normalize_snapshot_sentence(str((snapshot_blocks.get("summary") or {}).get("content_md") or global_params.get("solution_summary") or ""))
+    project_name = str(global_params.get("project_name") or "").strip()
+    industry = str(global_params.get("industry") or "").strip()
+    objective = _normalize_business_objective(global_params.get("business_objective"))
+    selected_products = _humanize_selected_products_text(str(global_params.get("selected_products") or ""))
+    model_number = str(global_params.get("primary_model_number") or "").strip()
+    interface_summaries = [
+        _normalize_snapshot_sentence(item)
+        for item in _split_snapshot_param_list(global_params.get("catalog_interface_summary"))
+        if _normalize_snapshot_sentence(item)
+    ]
+    compatibility_summary = _normalize_snapshot_sentence(str(global_params.get("compatibility_summary") or ""))
+    open_questions = _split_snapshot_param_list(global_params.get("solution_open_questions"))
+
+    lines = [f"## {title}", "", "### 项目背景与建设目标", ""]
+    if project_name and objective:
+        industry_prefix = f"面向{industry}行业场景，" if industry else ""
+        objective_text = objective.removeprefix(project_name).strip()
+        if objective_text.startswith("面向"):
+            lines.append(f"该项目{objective_text}")
+        else:
+            lines.append(f"该项目{industry_prefix}{objective_text}")
+        lines.append("")
+    if summary:
+        lines.extend([summary, ""])
+
+    lines.extend(["### 建设范围与系统组成", ""])
+    if selected_products:
+        lines.append(f"本次方案范围覆盖{selected_products}，用于收口主设备、配套设备与供货边界。")
+        lines.append("")
+    products_table = str((snapshot_blocks.get("products") or {}).get("content_md") or "").strip()
+    if products_table:
+        lines.append(products_table)
+        lines.append("")
+    if model_number:
+        lines.append(f"当前目录匹配的主设备型号为 {model_number}，可作为后续成套确认与技术对表的参考基线。")
+        lines.append("")
+
+    boundary_lines: list[str] = []
+    boundary_lines.extend(f"- {item}" for item in interface_summaries[:2])
+    if compatibility_summary:
+        boundary_lines.append(f"- {compatibility_summary}")
+    for item in open_questions[:2]:
+        boundary_lines.append(f"- 当前仍需确认：{_normalize_snapshot_sentence(item)}")
+    if boundary_lines:
+        lines.extend(["### 当前方案边界", "", *boundary_lines, ""])
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _build_snapshot_requirement_section_content(
+    *,
+    title: str,
+    global_params: dict[str, Any],
+    snapshot_blocks: dict[str, dict[str, Any]],
+) -> str:
+    demand_block = str((snapshot_blocks.get("demand") or {}).get("content_md") or "").strip()
+    objective = _normalize_business_objective(global_params.get("business_objective"))
+    compatibility_summary = _normalize_snapshot_sentence(str(global_params.get("compatibility_summary") or ""))
+    open_questions = _split_snapshot_param_list(global_params.get("solution_open_questions"))
+    risk_flags = _split_snapshot_param_list(global_params.get("solution_risk_flags"))
+
+    core_lines: list[str] = []
+    boundary_lines: list[str] = []
+    pending_lines: list[str] = []
+    if objective:
+        core_lines.append(f"- 本次方案目标为{objective}")
+    for raw_line in demand_block.splitlines():
+        raw_text = str(raw_line).strip()
+        if not raw_text.startswith("-"):
+            continue
+        normalized_payload = _normalize_snapshot_sentence(raw_text.removeprefix("-").strip())
+        if not normalized_payload:
+            continue
+        normalized = f"- {normalized_payload}"
+        if "待进一步确认" in normalized:
+            pending_lines.append(normalized)
+            continue
+        if any(token in normalized for token in ("约束条件", "必须满足", "重点确认")):
+            boundary_lines.append(normalized)
+            continue
+        core_lines.append(normalized)
+    if compatibility_summary:
+        boundary_lines.append(f"- {compatibility_summary}")
+    existing_pending_payloads = {_snapshot_line_payload(line) for line in pending_lines}
+    for item in risk_flags[:2]:
+        normalized_item = _normalize_snapshot_sentence(item)
+        if _snapshot_line_payload(normalized_item) in existing_pending_payloads:
+            continue
+        pending_lines.append(f"- 需重点确认：{normalized_item}")
+        existing_pending_payloads.add(_snapshot_line_payload(normalized_item))
+    for item in open_questions[:3]:
+        normalized_item = _normalize_snapshot_sentence(item)
+        if _snapshot_line_payload(normalized_item) in existing_pending_payloads:
+            continue
+        pending_lines.append(f"- 待确认事项：{normalized_item}")
+        existing_pending_payloads.add(_snapshot_line_payload(normalized_item))
+
+    lines = [f"## {title}", ""]
+    if core_lines:
+        lines.extend(["### 核心业务与技术需求", "", *_dedupe_snapshot_lines(core_lines), ""])
+    if boundary_lines:
+        lines.extend(["### 约束与边界条件", "", *_dedupe_snapshot_lines(boundary_lines), ""])
+    if pending_lines:
+        lines.extend(["### 当前待确认事项", "", *_dedupe_snapshot_lines(pending_lines), ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _build_snapshot_implementation_section_content(
+    *,
+    title: str,
+    snapshot_blocks: dict[str, dict[str, Any]],
+) -> str:
+    implementation_block = str((snapshot_blocks.get("implementation") or {}).get("content_md") or "").strip()
+    stage_lines: list[str] = []
+    condition_lines: list[str] = []
+    for raw_line in implementation_block.splitlines():
+        raw_text = str(raw_line).strip()
+        if not raw_text.startswith("-"):
+            continue
+        normalized_payload = _normalize_snapshot_sentence(raw_text.removeprefix("-").strip())
+        if not normalized_payload:
+            continue
+        normalized = f"- {normalized_payload}"
+        if any(token in normalized for token in ("阶段一", "阶段二", "阶段三", "阶段四", "阶段五")):
+            stage_lines.append(normalized)
+        else:
+            condition_lines.append(normalized)
+
+    lines = [f"## {title}", ""]
+    if stage_lines:
+        lines.extend(["### 阶段推进安排", "", *stage_lines, ""])
+    if condition_lines:
+        lines.extend(["### 调试前置条件与排定边界", "", *condition_lines, ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _build_snapshot_service_section_content(
+    *,
+    title: str,
+    snapshot_blocks: dict[str, dict[str, Any]],
+) -> str:
+    service_block = str((snapshot_blocks.get("service") or {}).get("content_md") or "").strip()
+    scope_lines: list[str] = []
+    training_lines: list[str] = []
+    boundary_lines: list[str] = []
+    for raw_line in service_block.splitlines():
+        raw_text = str(raw_line).strip()
+        if not raw_text.startswith("-"):
+            continue
+        normalized_payload = _normalize_snapshot_sentence(raw_text.removeprefix("-").strip())
+        if not normalized_payload:
+            continue
+        normalized = f"- {normalized_payload}"
+        if any(token in normalized for token in ("培训", "资料交付", "故障诊断", "操作维护", "资料归档")):
+            training_lines.append(normalized)
+            continue
+        if any(token in normalized for token in ("质保", "备件", "响应边界", "接口诊断", "联调配合", "异常定位")):
+            boundary_lines.append(normalized)
+            continue
+        scope_lines.append(normalized)
+
+    lines = [f"## {title}", ""]
+    if scope_lines:
+        lines.extend(["### 服务范围与现场支持", "", *scope_lines, ""])
+    if training_lines:
+        lines.extend(["### 培训与资料交付", "", *training_lines, ""])
+    if boundary_lines:
+        lines.extend(["### 响应与协同边界", "", *boundary_lines, ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _split_snapshot_param_list(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    return [item.strip() for item in re.split(r"\s+/\s+", text) if item.strip()]
+
+
+def _normalize_snapshot_boundary_item(text: str) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+    replacements = {
+        "约束项：": "约束条件：",
+        "阻断项：": "必须满足：",
+        "风险项：": "重点确认：",
+    }
+    for source, target in replacements.items():
+        if normalized.startswith(source):
+            return _normalize_snapshot_sentence(f"{target}{normalized.removeprefix(source).strip()}")
+    return _normalize_snapshot_sentence(normalized)
+
+
+def _normalize_snapshot_sentence(text: str) -> str:
+    normalized = _normalize_technical_spacing(" ".join(str(text or "").split()).strip())
+    if not normalized:
+        return ""
+    normalized = re.sub(r"\s*([，。；：！？])\s*", r"\1", normalized)
+    normalized = re.sub(r"([（(])\s+", r"\1", normalized)
+    normalized = re.sub(r"\s+([）)])", r"\1", normalized)
+    normalized = re.sub(r"([“‘])\s+", r"\1", normalized)
+    normalized = re.sub(r"\s+([”’])", r"\1", normalized)
+    return normalized if normalized.endswith(("。", "！", "？")) else f"{normalized}。"
+
+
+def _humanize_selected_products_text(value: str) -> str:
+    items = [item.strip() for item in str(value or "").replace("；", ";").split(";") if item.strip()]
+    humanized: list[str] = []
+    for item in items:
+        normalized = re.sub(r"\s*x(\d+)\b", r" \1 套", item).strip()
+        if ":" in normalized:
+            role, name = [part.strip() for part in normalized.split(":", 1)]
+            count_match = re.search(r"(\d+\s*套)$", name)
+            count_text = count_match.group(1) if count_match else ""
+            name_text = re.sub(r"\s*\d+\s*套$", "", name).strip()
+            if role == name_text or role in name_text or name_text in role:
+                normalized = name_text
+            elif role == "主驱动":
+                normalized = f"{role}系统（{name_text}）"
+            else:
+                normalized = f"{role}{name_text}"
+            if count_text:
+                normalized = f"{normalized} {count_text}"
+        humanized.append(normalized)
+    return "、".join(humanized)
+
+
+def _dedupe_snapshot_lines(lines: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        normalized = str(line).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _normalize_business_objective(value: Any) -> str:
+    normalized = " ".join(str(value or "").split()).strip()
+    if not normalized:
+        return ""
+    for marker in ("本次供货范围", "供货范围建议包含", "并提供完整的"):
+        if marker in normalized:
+            normalized = normalized.split(marker, 1)[0].strip()
+    if len(normalized) > 160:
+        sentence_match = re.search(r"[。！？]", normalized)
+        if sentence_match:
+            normalized = normalized[: sentence_match.end()].strip()
+        else:
+            normalized = normalized[:160].rstrip("，、； ")
+    return _normalize_snapshot_sentence(normalized)
+
+
+def _snapshot_line_payload(value: str) -> str:
+    normalized = str(value or "").strip().removeprefix("-").strip()
+    normalized = re.sub(r"^(需重点确认|待确认事项|当前仍需确认)[:：]\s*", "", normalized)
+    return normalized
+
+
 def build_llm_write_fallback_section_content(*, section: dict[str, Any], global_params: dict[str, Any]) -> str:
     title = str(section.get("title") or "未命名章节").strip() or "未命名章节"
-    purpose = str(section.get("purpose") or section.get("description") or "").strip()
     project_name = str(global_params.get("project_name") or "").strip()
     keywords = [str(item).strip() for item in (section.get("keywords") or []) if str(item).strip()]
     lines = [f"## {title}", ""]
-    if purpose:
-        lines.extend([purpose, ""])
     if project_name:
         lines.extend([f"本章节需结合 `{project_name}` 的真实需求、现场条件和最终设备资料进一步补全。", ""])
     if keywords:
@@ -1170,7 +1931,11 @@ def build_llm_write_fallback_section_content(*, section: dict[str, Any], global_
 
 def polish_extractive_reuse_section_content(*, section: dict[str, Any], content_md: str) -> str:
     section_title = str(section.get("title") or "未命名章节")
-    polished = sanitize_generated_section_content(content_md=content_md, section_title=section_title)
+    polished = sanitize_generated_section_content(
+        content_md=content_md,
+        section_title=section_title,
+        section_purpose=str(section.get("purpose") or section.get("description") or ""),
+    )
     target_section_type = str(infer_target_taxonomy(section).get("section_type") or "unknown").lower()
     opening_sentence = EXTRACTIVE_SECTION_OPENINGS.get(target_section_type)
     if opening_sentence and opening_sentence not in polished:
@@ -1719,11 +2484,17 @@ def _filter_reuse_blocks_for_assembly(
         metadata = block.get("metadata") or {}
         section_type = str(metadata.get("section_type") or "unknown").lower()
         content_form = str(metadata.get("content_form") or "narrative").lower()
-        heading_text = " > ".join(str(item).strip() for item in (block.get("heading_path") or []) if str(item).strip())
+        normalized_heading_path = [str(item).strip() for item in (block.get("heading_path") or []) if str(item).strip()]
+        heading_text = " > ".join(normalized_heading_path)
         original_content_text = str(block.get("content_md") or "")
         content_text = _strip_internal_reuse_summary_lines(original_content_text)
         if original_content_text.strip() and not content_text:
             continue
+        if content_text and not _looks_customer_readable_reuse_text(content_text):
+            continue
+        if heading_text and not _looks_customer_readable_heading(heading_text):
+            normalized_heading_path = []
+            heading_text = ""
         if score < max(0.38, top_score * 0.5):
             continue
         if _heading_should_be_excluded_from_customer_reuse(heading_text):
@@ -1863,11 +2634,25 @@ def _filter_reuse_blocks_for_assembly(
         ):
             continue
         normalized_block = dict(block)
+        normalized_block["heading_path"] = normalized_heading_path
+        if not normalized_heading_path:
+            normalized_block["source_heading"] = ""
         normalized_block["content_md"] = content_text
         filtered.append(normalized_block)
     if not filtered and (target_section_type in {"protection_interlock", "control_logic"} or scenario_guard_skipped):
         return []
-    filtered = filtered or reusable_blocks[:2]
+    if not filtered:
+        fallback_blocks: list[dict[str, Any]] = []
+        for block in reusable_blocks[:2]:
+            content_text = _strip_internal_reuse_summary_lines(str(block.get("content_md") or ""))
+            if not str(content_text or "").strip() or not _looks_customer_readable_reuse_text(content_text):
+                continue
+            normalized_block = dict(block)
+            normalized_block["content_md"] = content_text
+            fallback_blocks.append(normalized_block)
+        if not fallback_blocks:
+            return []
+        filtered = fallback_blocks
     return _augment_with_support_blocks(
         filtered=filtered,
         reusable_blocks=reusable_blocks,
@@ -2085,11 +2870,17 @@ def _augment_with_support_blocks(
         content_form = str(metadata.get("content_form") or "narrative").lower()
         if content_form in {"formula", "page_furniture", "certificate"}:
             continue
-        heading_text = " > ".join(str(item).strip() for item in (block.get("heading_path") or []) if str(item).strip())
+        normalized_heading_path = [str(item).strip() for item in (block.get("heading_path") or []) if str(item).strip()]
+        heading_text = " > ".join(normalized_heading_path)
         original_content_text = str(block.get("content_md") or "")
         content_text = _strip_internal_reuse_summary_lines(original_content_text)
         if original_content_text.strip() and not content_text:
             continue
+        if content_text and not _looks_customer_readable_reuse_text(content_text):
+            continue
+        if heading_text and not _looks_customer_readable_heading(heading_text):
+            normalized_heading_path = []
+            heading_text = ""
         if _heading_should_be_excluded_from_customer_reuse(heading_text):
             continue
         if heading_looks_like_document_title(heading_text):
@@ -2239,6 +3030,9 @@ def _augment_with_support_blocks(
         if support_score < 0.45:
             continue
         normalized_block = dict(block)
+        normalized_block["heading_path"] = normalized_heading_path
+        if not normalized_heading_path:
+            normalized_block["source_heading"] = ""
         normalized_block["content_md"] = content_text
         support_candidates.append((support_score, normalized_block))
 
@@ -2795,6 +3589,7 @@ def build_reusable_blocks(
     section: dict[str, Any],
     evidence_bundle: EvidenceBundle,
     global_params: dict[str, Any],
+    solution_snapshot: Any | None = None,
     case_library_matches: list[dict[str, Any]] | None = None,
     limit: int = DEFAULT_REUSE_LIMIT,
 ) -> list[dict[str, Any]]:
@@ -2802,6 +3597,7 @@ def build_reusable_blocks(
         section=section,
         evidence_bundle=evidence_bundle,
         global_params=global_params,
+        solution_snapshot=solution_snapshot,
         limit=limit,
     )
     blocks.extend(
@@ -2828,10 +3624,15 @@ def _build_evidence_reusable_blocks(
     section: dict[str, Any],
     evidence_bundle: EvidenceBundle,
     global_params: dict[str, Any],
+    solution_snapshot: Any | None = None,
     limit: int,
 ) -> list[dict[str, Any]]:
     target_taxonomy = infer_target_taxonomy(section)
     target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
+    catalog_material_entries = _select_catalog_material_entries_for_section(
+        section=section,
+        solution_snapshot=solution_snapshot,
+    )
     selected = _select_evidence_items(
         section=section,
         evidence_bundle=evidence_bundle,
@@ -2847,7 +3648,21 @@ def _build_evidence_reusable_blocks(
         heading_path = item.get("heading_path") or []
         heading_text = " > ".join(str(segment).strip() for segment in heading_path if str(segment).strip())
         block_type = str(item.get("source_chunk_type") or item.get("type") or "section").lower()
+        annotated_item = _annotate_case_match_with_catalog_material(item=item, material_entries=catalog_material_entries)
+        catalog_material = (
+            annotated_item.get("catalog_material")
+            if isinstance(annotated_item.get("catalog_material"), dict)
+            else None
+        )
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        if catalog_material:
+            metadata = {
+                **metadata,
+                "source_type": "product_material",
+                "catalog_material_type": catalog_material.get("material_type"),
+                "catalog_material_key": catalog_material.get("material_key"),
+                "catalog_material_family_code": catalog_material.get("family_code"),
+            }
         candidate_section_type = str(metadata.get("section_type") or item.get("section_type") or "unknown").lower()
         if _should_skip_reuse_scenario_noise(
             section=section,
@@ -2866,6 +3681,9 @@ def _build_evidence_reusable_blocks(
             query_terms=query_terms,
             target_taxonomy=target_taxonomy,
         )
+        if catalog_material:
+            selection_score += 0.18
+            selection_reasons = [*selection_reasons, "catalog_material_anchor"]
         blocks.append(
             {
                 "block_id": str(item.get("evidence_id") or item.get("source_chunk_id") or ""),
@@ -2911,17 +3729,26 @@ def _build_case_library_reusable_blocks(
     blocks: list[dict[str, Any]] = []
     for item in case_library_matches[: max(limit * REUSE_CANDIDATE_MULTIPLIER, REUSE_MIN_CANDIDATES)]:
         raw_content = _strip_internal_reuse_summary_lines(str(item.get("content") or ""))
-        if not raw_content:
+        if not raw_content or not _looks_customer_readable_reuse_text(raw_content):
             continue
         heading_path = _normalize_case_heading_path(item.get("heading_path"))
         heading_text = " > ".join(str(segment).strip() for segment in heading_path if str(segment).strip())
+        if heading_text and not _looks_customer_readable_heading(heading_text):
+            heading_path = []
+            heading_text = ""
+        catalog_material = item.get("catalog_material") if isinstance(item.get("catalog_material"), dict) else None
         metadata = {
             "front_matter": bool(item.get("front_matter")),
             "needs_asset_lookup": bool(item.get("needs_asset_lookup")),
             "section_type": item.get("section_type") or "unknown",
             "equipment_type": item.get("equipment_type") or "generic",
             "content_form": item.get("content_form") or "narrative",
+            "source_type": "product_material" if catalog_material else "case_library",
         }
+        if catalog_material:
+            metadata["catalog_material_type"] = catalog_material.get("material_type")
+            metadata["catalog_material_key"] = catalog_material.get("material_key")
+            metadata["catalog_material_family_code"] = catalog_material.get("family_code")
         if _should_skip_reuse_scenario_noise(
             section=section,
             global_params=global_params,
@@ -2948,6 +3775,9 @@ def _build_case_library_reusable_blocks(
             query_terms=query_terms,
             target_taxonomy=target_taxonomy,
         )
+        if catalog_material:
+            selection_score += 0.18
+            selection_reasons = [*selection_reasons, "catalog_material_anchor"]
         blocks.append(
             {
                 "block_id": f"case:{item.get('sample_id')}:{item.get('chunk_index')}",
@@ -3819,11 +4649,13 @@ class SectionDraftService:
                 section=section,
                 evidence_bundle=evidence_bundle,
                 global_params=global_params,
+                solution_snapshot=solution_snapshot,
             )
             reusable_blocks = build_reusable_blocks(
                 section=section,
                 evidence_bundle=evidence_bundle,
                 global_params=global_params,
+                solution_snapshot=solution_snapshot,
                 case_library_matches=case_library_result.get("matches") or [],
             )
             reusable_blocks = [
@@ -3896,17 +4728,17 @@ class SectionDraftService:
                 section_id=str(section.get("section_id")),
                 title=str(section.get("title") or "未命名章节"),
                 content_md=content_md,
-                citation_refs=citations,
+                citation_refs=_sanitize_storage_value(citations),
                 assumptions=[],
-                global_param_snapshot=global_params if isinstance(global_params, dict) else {},
+                global_param_snapshot=_sanitize_storage_value(global_params if isinstance(global_params, dict) else {}),
                 status=draft_status,
-                validator_result={
+                validator_result=_sanitize_storage_value({
                     "recommended_assets": recommended_assets,
                     "generation_mode": generation_mode,
                     "reuse_pack": reuse_pack,
                     "generation_details": generation_details,
                     "quality_gate": quality_gate_result,
-                },
+                }),
             )
             session.add(draft)
             generated_drafts.append(draft)
@@ -4039,11 +4871,13 @@ class SectionDraftService:
             section=section,
             evidence_bundle=evidence_bundle,
             global_params=global_params,
+            solution_snapshot=solution_snapshot,
         )
         reusable_blocks = build_reusable_blocks(
             section=section,
             evidence_bundle=evidence_bundle,
             global_params=global_params,
+            solution_snapshot=solution_snapshot,
             case_library_matches=case_library_result.get("matches") or [],
         )
         reusable_blocks = [
@@ -4112,10 +4946,15 @@ class SectionDraftService:
             )
         draft.title = str(section.get("title") or draft.title)
         draft.content_md = content_md
-        draft.citation_refs = citations
-        draft.global_param_snapshot = global_params
+        draft.citation_refs = _sanitize_storage_value(citations)
+        draft.global_param_snapshot = _sanitize_storage_value(global_params)
         draft.status = draft_status
-        draft.validator_result = {
+        current_result = draft.validator_result if isinstance(draft.validator_result, dict) else {}
+        persistent_trace = {}
+        if "review_resolution_trace" in current_result:
+            persistent_trace["review_resolution_trace"] = current_result["review_resolution_trace"]
+        draft.validator_result = _sanitize_storage_value({
+            **persistent_trace,
             "recommended_assets": recommended_assets,
             "generation_mode": generation_mode,
             "reuse_pack": reuse_pack,
@@ -4124,7 +4963,7 @@ class SectionDraftService:
                 **generation_details,
                 "selected_citation_ids": sorted(normalized_preferred_citation_ids),
             },
-        }
+        })
         project.status = await self._compute_project_draft_status(
             session=session,
             project_id=project_id,
@@ -4183,7 +5022,11 @@ class SectionDraftService:
             draft.assumptions = assumptions
         draft.status = "edited"
         current_result = draft.validator_result if isinstance(draft.validator_result, dict) else {}
+        persistent_trace = {}
+        if "review_resolution_trace" in current_result:
+            persistent_trace["review_resolution_trace"] = current_result["review_resolution_trace"]
         draft.validator_result = {
+            **persistent_trace,
             "recommended_assets": current_result.get("recommended_assets", []),
             "generation_mode": current_result.get("generation_mode", "baseline"),
             "reuse_pack": current_result.get("reuse_pack", {}),
@@ -4264,6 +5107,7 @@ class SectionDraftService:
         section: dict[str, Any],
         evidence_bundle: EvidenceBundle,
         global_params: dict[str, Any],
+        solution_snapshot: Any | None = None,
     ) -> dict[str, Any]:
         content = evidence_bundle.content if isinstance(evidence_bundle.content, dict) else {}
         case_candidates = content.get("case_candidates") or []
@@ -4277,7 +5121,28 @@ class SectionDraftService:
             for item in case_candidates
             if str(item.get("library_track") or "").strip()
         }
-        if not sample_ids:
+        catalog_material_entries = _select_catalog_material_entries_for_section(
+            section=section,
+            solution_snapshot=solution_snapshot,
+        )
+        material_sample_ids = {
+            str(item.get("material_key") or "").strip()
+            for item in catalog_material_entries
+            if str(item.get("material_key") or "").strip()
+        }
+        document_names = {
+            str(item.get("document_name") or "").strip()
+            for item in catalog_material_entries
+            if str(item.get("document_name") or "").strip()
+        }
+        material_tracks = {
+            str(item.get("assigned_track") or "").strip()
+            for item in catalog_material_entries
+            if str(item.get("assigned_track") or "").strip()
+        }
+        sample_ids.update(material_sample_ids)
+        library_tracks.update(material_tracks)
+        if not sample_ids and not document_names:
             return {"matches": [], "trace": {"query": "", "query_intents": {}, "section_candidates": [], "scoped_sections": []}}
         query = build_section_reuse_query(section=section, global_params=global_params)
         query_intents = build_section_reuse_query_intents(section=section, global_params=global_params)
@@ -4285,7 +5150,8 @@ class SectionDraftService:
             query=query,
             section_title=str(section.get("title") or ""),
             top_k=4,
-            sample_ids=sample_ids,
+            sample_ids=sample_ids or None,
+            document_names=document_names or None,
             library_tracks=library_tracks or None,
         )
         scoped_sections = _select_section_scope_candidates(section_candidates, limit=4)
@@ -4303,7 +5169,8 @@ class SectionDraftService:
             query=query,
             section_title=str(section.get("title") or ""),
             top_k=max(DEFAULT_REUSE_LIMIT * REUSE_CANDIDATE_MULTIPLIER, REUSE_MIN_CANDIDATES),
-            sample_ids=sample_ids,
+            sample_ids=sample_ids or None,
+            document_names=document_names or None,
             library_tracks=library_tracks or None,
             section_ids=section_ids or None,
             section_path_prefixes=section_path_prefixes or None,
@@ -4313,19 +5180,37 @@ class SectionDraftService:
                 query=query,
                 section_title=str(section.get("title") or ""),
                 top_k=max(DEFAULT_REUSE_LIMIT * REUSE_CANDIDATE_MULTIPLIER, REUSE_MIN_CANDIDATES),
-                sample_ids=sample_ids,
+                sample_ids=sample_ids or None,
+                document_names=document_names or None,
                 library_tracks=library_tracks or None,
             )
+        annotated_base_matches = [
+            _annotate_case_match_with_catalog_material(item=item, material_entries=catalog_material_entries)
+            for item in base_matches
+        ]
         neighbor_matches = self.case_library.expand_related_blocks(
-            seed_blocks=base_matches[: max(DEFAULT_REUSE_LIMIT, 3)],
+            seed_blocks=annotated_base_matches[: max(DEFAULT_REUSE_LIMIT, 3)],
             section_title=str(section.get("title") or ""),
             top_k=4,
         )
+        annotated_neighbor_matches = [
+            _annotate_case_match_with_catalog_material(item=item, material_entries=catalog_material_entries)
+            for item in neighbor_matches
+        ]
         return {
-            "matches": [*base_matches, *neighbor_matches],
+            "matches": [*annotated_base_matches, *annotated_neighbor_matches],
             "trace": {
                 "query": query,
                 "query_intents": query_intents,
+                "catalog_material_candidates": [
+                    {
+                        "material_key": item.get("material_key"),
+                        "document_name": item.get("document_name"),
+                        "material_type": item.get("material_type"),
+                        "family_code": item.get("family_code"),
+                    }
+                    for item in catalog_material_entries[:REUSE_TRACE_SECTION_LIMIT]
+                ],
                 "section_candidates": [
                     _serialize_section_candidate(item)
                     for item in section_candidates[:REUSE_TRACE_SECTION_LIMIT]
@@ -4430,6 +5315,14 @@ class SectionDraftService:
             effective_citations = build_reuse_citations(assembly_blocks)
             effective_reuse_pack = dict(reuse_pack)
             effective_reuse_pack["reusable_blocks"] = assembly_blocks
+        customer_body_blocks = _select_customer_body_reuse_blocks(
+            section=section,
+            reusable_blocks=list(effective_reuse_pack.get("reusable_blocks") or []),
+        )
+        if customer_body_blocks != list(effective_reuse_pack.get("reusable_blocks") or []):
+            effective_reuse_pack = dict(effective_reuse_pack)
+            effective_reuse_pack["reusable_blocks"] = customer_body_blocks
+        section_title = str(section.get("title") or "未命名章节")
 
         if generation_mode == "manual_only":
             return (
@@ -4446,10 +5339,40 @@ class SectionDraftService:
                 },
             )
 
-        section_title = str(section.get("title") or "未命名章节")
+        if _should_use_snapshot_primary_section(section=section, customer_body_blocks=customer_body_blocks):
+            content_md = _build_snapshot_primary_section_content(
+                section=section,
+                global_params=global_params,
+                customer_body_blocks=customer_body_blocks,
+            )
+            content_md = sanitize_generated_section_content(
+                content_md=content_md,
+                section_title=section_title,
+                section_purpose=str(section.get("purpose") or section.get("description") or ""),
+            )
+            content_md = _normalize_invalid_asset_placeholders(
+                content_md=content_md,
+                recommended_assets=recommended_assets,
+            )
+            content_md = ensure_required_asset_placeholders(content_md=content_md, reuse_pack=reuse_pack)
+            return (
+                content_md,
+                "generated",
+                build_reuse_citations(customer_body_blocks),
+                {
+                    "effective_path": "snapshot_primary",
+                    "retrieval_mode": retrieval_mode,
+                    "selected_sections": selected_sections,
+                    "selected_blocks": selected_blocks,
+                    "token_budget": token_budget,
+                    "customer_body_block_count": len(customer_body_blocks),
+                    "preceding_context_chars": len(normalized_preceding_context),
+                },
+            )
+
         if should_use_extractive_reuse(section=section, reuse_pack=effective_reuse_pack):
             assembly_reuse_pack = dict(effective_reuse_pack)
-            assembly_reuse_pack["reusable_blocks"] = assembly_blocks
+            assembly_reuse_pack["reusable_blocks"] = customer_body_blocks
             assembled_content = build_extractive_reuse_section_content(
                 section=section,
                 reuse_pack=assembly_reuse_pack,
@@ -4466,7 +5389,7 @@ class SectionDraftService:
             refinement_error: str | None = None
             try:
                 llm_reuse_pack = dict(assembly_reuse_pack)
-                llm_reuse_pack["reusable_blocks"] = assembly_blocks[:3]
+                llm_reuse_pack["reusable_blocks"] = customer_body_blocks[:3]
                 response = await self.executor.write_section(
                     task_id=f"{task_id}-finalize",
                     section=section_outline_to_executor_payload(section),
@@ -4482,6 +5405,7 @@ class SectionDraftService:
                 finalized_content = sanitize_generated_section_content(
                     content_md=finalized_content,
                     section_title=section_title,
+                    section_purpose=str(section.get("purpose") or section.get("description") or ""),
                 )
                 finalized_content = _normalize_invalid_asset_placeholders(
                     content_md=finalized_content,
@@ -4521,7 +5445,8 @@ class SectionDraftService:
                     "refinement_status": refinement_status,
                     "refinement_fallback_reason": refinement_fallback_reason,
                     "refinement_error": refinement_error,
-                    "assembled_block_count": len(assembly_blocks),
+                    "assembled_block_count": len(customer_body_blocks),
+                    "customer_body_block_count": len(customer_body_blocks),
                     "preceding_context_chars": len(normalized_preceding_context),
                 },
             )
@@ -4547,6 +5472,7 @@ class SectionDraftService:
         content_md = sanitize_generated_section_content(
             content_md=raw_content,
             section_title=section_title,
+            section_purpose=str(section.get("purpose") or section.get("description") or ""),
         )
         content_md = _normalize_invalid_asset_placeholders(
             content_md=content_md,
@@ -4557,16 +5483,17 @@ class SectionDraftService:
             content_md,
             draft_status,
             effective_citations,
-            {
-                "effective_path": "llm_write" if write_error is None else "llm_write_fallback",
-                "retrieval_mode": retrieval_mode,
-                "selected_sections": selected_sections,
-                "selected_blocks": selected_blocks,
-                "token_budget": token_budget,
-                "write_error": write_error,
-                "preceding_context_chars": len(normalized_preceding_context),
-            },
-        )
+                {
+                    "effective_path": "llm_write" if write_error is None else "llm_write_fallback",
+                    "retrieval_mode": retrieval_mode,
+                    "selected_sections": selected_sections,
+                    "selected_blocks": selected_blocks,
+                    "token_budget": token_budget,
+                    "customer_body_block_count": len(customer_body_blocks),
+                    "write_error": write_error,
+                    "preceding_context_chars": len(normalized_preceding_context),
+                },
+            )
 
     async def _resolve_outline(
         self,

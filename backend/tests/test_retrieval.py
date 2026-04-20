@@ -22,6 +22,7 @@ from app.services.retrieval.service import (
     build_case_fallback_evidence_items,
     build_evidence_items,
     build_evidence_search_plan,
+    build_requirement_query,
     filter_evidence_results,
 )
 from app.services.vectorstore.chunker import Chunker
@@ -220,6 +221,35 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         self.assertEqual(plan[1][0], "global_fallback_relaxed_industry")
         self.assertIsNone(plan[1][2].industry)
 
+    def test_build_requirement_query_expands_lci_product_line_hints(self) -> None:
+        query = build_requirement_query(
+            {
+                "product_line": "lci",
+                "industry": "冶金",
+                "business_objective": "鼓风机同步电机软起动改造",
+                "project_name": "某钢厂鼓风机项目",
+            }
+        )
+
+        self.assertIn("LCI", query)
+        self.assertIn("SFC", query)
+        self.assertIn("同步电机", query)
+        self.assertIn("整流变压器", query)
+
+    def test_build_requirement_query_expands_hv_softstart_product_line_hints(self) -> None:
+        query = build_requirement_query(
+            {
+                "product_line": "hv_softstart",
+                "industry": "压缩机",
+                "business_objective": "高压电机软起动改造",
+                "project_name": "某压缩机站项目",
+            }
+        )
+
+        self.assertIn("高压固态", query)
+        self.assertIn("晶闸管", query)
+        self.assertIn("旁路", query)
+
     def test_build_case_fallback_evidence_items_creates_case_summary_entries(self) -> None:
         items = build_case_fallback_evidence_items(
             [
@@ -239,7 +269,28 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         self.assertEqual(items[0]["type"], "case_summary")
         self.assertEqual(items[0]["source_chunk_type"], "CASE_SUMMARY")
         self.assertEqual(items[0]["metadata"]["fallback_source"], "case_library")
-        self.assertIn("供货范围", items[0]["raw_content"])
+        self.assertIn("匹配原因：query_overlap=LCI,同步电机", items[0]["raw_content"])
+        self.assertIn("案例来源：历史方案A.docx", items[0]["raw_content"])
+        self.assertEqual(items[0]["heading_path"], ["历史方案A.docx"])
+
+    def test_build_case_fallback_evidence_items_strips_nul_characters(self) -> None:
+        items = build_case_fallback_evidence_items(
+            [
+                {
+                    "sample_id": "sample-a",
+                    "file_name": "历史方案A\u0000.docx",
+                    "score": 0.52,
+                    "reason": "query_overlap=LCI\u0000,同步电机",
+                    "top_level_titles": ["1 工厂设计环境", "2 供货范围\u0000", "3 系统方案"],
+                    "retrieval_text": "含有\u0000空字符的摘要",
+                    "profile": "mixed_engineering_doc",
+                    "library_track": "pilot_main",
+                }
+            ]
+        )
+
+        self.assertNotIn("\u0000", items[0]["source_title"])
+        self.assertNotIn("\u0000", items[0]["raw_content"])
 
     def test_compute_quality_score_uses_discounted_case_fallback_formula(self) -> None:
         service = EvidenceBundleService()

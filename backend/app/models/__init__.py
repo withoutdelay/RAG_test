@@ -8,6 +8,12 @@ from app.models.job import Job
 from app.models.knowledge_chunk import KnowledgeChunk
 from app.models.parsed_block import ParsedBlock
 from app.models.product_constraint import ProductConstraint
+from app.models.product_compatibility import ProductCompatibility
+from app.models.product_family import ProductFamily
+from app.models.product_family_alias import ProductFamilyAlias
+from app.models.product_interface import ProductInterface
+from app.models.product_material import ProductMaterial
+from app.models.product_model import ProductModel
 from app.models.product_series import ProductSeries
 from app.models.product_standard_config import ProductStandardConfig
 from app.models.project import Project
@@ -33,6 +39,12 @@ __all__ = [
     "MaskingAuditLog",
     "ParsedBlock",
     "ProductConstraint",
+    "ProductCompatibility",
+    "ProductFamily",
+    "ProductFamilyAlias",
+    "ProductInterface",
+    "ProductMaterial",
+    "ProductModel",
     "ProductSeries",
     "ProductStandardConfig",
     "Project",

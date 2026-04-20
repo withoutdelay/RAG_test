@@ -29,7 +29,24 @@ class CaseLibraryTests(unittest.TestCase):
 
     def test_build_outline_library_entry_collects_top_level_titles(self) -> None:
         entry = build_outline_library_entry(
-            sample_entry={"sample_id": "s1", "file_name": "demo.docx", "file_format": "docx", "library_track": "pilot_main", "profile": "text_digital"},
+            sample_entry={
+                "sample_id": "s1",
+                "file_name": "demo.docx",
+                "file_format": "docx",
+                "library_track": "pilot_main",
+                "profile": "text_digital",
+                "parse_source_path": "/tmp/demo.txt",
+                "parse_source_kind": "extracted_text",
+                "family_code": "hv_solid_state_starter",
+                "material_type": "proposal_sample",
+                "product_line": "hv_softstart",
+                "solution_family": "高压固态软起动",
+                "tags": ["hv_solid_state", "pilot_main"],
+                "key_equipment": ["高压固态软起柜"],
+                "details": {
+                    "secondary_family_codes": ["hv_vfd_multilevel"],
+                },
+            },
             markdown="# 总标题\n\n## 1 项目概述\n\n## 2 技术方案\n",
         )
 
@@ -37,6 +54,12 @@ class CaseLibraryTests(unittest.TestCase):
         self.assertEqual(entry["heading_count"], 2)
         self.assertEqual(entry["document_title"], "总标题")
         self.assertEqual(entry["top_level_titles"], ["1 项目概述", "2 技术方案"])
+        self.assertEqual(entry["parse_source_kind"], "extracted_text")
+        self.assertEqual(entry["family_code"], "hv_solid_state_starter")
+        self.assertEqual(entry["secondary_family_codes"], ["hv_vfd_multilevel"])
+        self.assertEqual(entry["product_line"], "hv_softstart")
+        self.assertEqual(entry["tags"], ["hv_solid_state", "pilot_main"])
+        self.assertEqual(entry["key_equipment"], ["高压固态软起柜"])
 
     def test_build_outline_library_entry_enriches_section_spans_and_summary(self) -> None:
         entry = build_outline_library_entry(
@@ -77,6 +100,41 @@ class CaseLibraryTests(unittest.TestCase):
         self.assertIsNone(subsection.get("content_span"))
         self.assertIsNone(subsection.get("section_summary"))
         self.assertIn("文档标题", subsection["section_retrieval_text"])
+
+    def test_build_reusable_block_entries_propagates_family_signals(self) -> None:
+        blocks = build_reusable_block_entries(
+            sample_entry={
+                "sample_id": "s1",
+                "file_name": "demo.docx",
+                "file_format": "docx",
+                "library_track": "pilot_main",
+                "profile": "text_digital",
+                "family_code": "hv_solid_state_starter",
+                "material_type": "proposal_sample",
+                "product_line": "hv_softstart",
+                "solution_family": "高压固态软起动",
+                "tags": ["hv_solid_state", "pilot_main"],
+                "key_equipment": ["高压固态软起柜"],
+                "details": {"secondary_family_codes": ["hv_vfd_multilevel"]},
+            },
+            markdown="\n".join(
+                [
+                    "# 文档标题",
+                    "",
+                    "## 2 技术方案",
+                    "",
+                    "高压固态软起动主回路采用晶闸管旁路切换方案，支持一拖二变频软起扩展，并预留高压变频软起装置接口。",
+                    "系统具备主回路隔离、旁路切换、联锁保护和柜间控制协同能力，可作为混合方案的主回路参考。",
+                ]
+            ),
+        )
+
+        self.assertTrue(blocks)
+        self.assertEqual(blocks[0]["family_code"], "hv_solid_state_starter")
+        self.assertEqual(blocks[0]["secondary_family_codes"], ["hv_vfd_multilevel"])
+        self.assertEqual(blocks[0]["product_line"], "hv_softstart")
+        self.assertEqual(blocks[0]["tags"], ["hv_solid_state", "pilot_main"])
+        self.assertEqual(blocks[0]["key_equipment"], ["高压固态软起柜"])
 
     def test_build_section_catalog_merges_toc_and_body_headings(self) -> None:
         markdown = "\n".join(

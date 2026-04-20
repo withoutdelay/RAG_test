@@ -75,3 +75,19 @@ def is_library_ready_entry(entry: dict[str, Any]) -> bool:
     if not recommendation:
         return True
     return recommendation in LIBRARY_READY_RECOMMENDATIONS
+
+
+def resolve_library_source_path(entry: dict[str, Any]) -> tuple[Path, str]:
+    details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
+    preferred_candidates = (
+        (details.get("extracted_text_path"), "extracted_text"),
+        (details.get("converted_asset_path"), "converted_asset"),
+        (entry.get("file_path"), "original_file"),
+    )
+    for raw_path, source_kind in preferred_candidates:
+        if not raw_path:
+            continue
+        path = Path(str(raw_path)).expanduser()
+        if path.exists():
+            return path.resolve(), source_kind
+    raise FileNotFoundError(str(entry.get("file_path") or "missing source path"))

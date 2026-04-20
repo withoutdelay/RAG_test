@@ -74,15 +74,19 @@ async def _parse_and_index_document(
         finally:
             materialized.cleanup()
 
-    chunk_payloads = chunker.split(
-        parsed_document.markdown,
-        base_metadata={
-            **base_metadata,
-            "doc_type": document.doc_type,
-            "document_name": document.filename,
-            "project_id": str(document.project_id) if document.project_id else None,
-        },
-    )
+    parser_placeholder = bool((parsed_document.metadata or {}).get("parser_placeholder"))
+    if parser_placeholder:
+        chunk_payloads = []
+    else:
+        chunk_payloads = chunker.split(
+            parsed_document.markdown,
+            base_metadata={
+                **base_metadata,
+                "doc_type": document.doc_type,
+                "document_name": document.filename,
+                "project_id": str(document.project_id) if document.project_id else None,
+            },
+        )
 
     indexed_chunk_count = 0
     skipped_chunk_count = 0
