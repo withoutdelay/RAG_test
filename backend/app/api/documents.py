@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,10 +24,23 @@ from app.models.project import Project
 from app.models.raw_document import RawDocument
 from app.schemas.artifacts import JobAcceptedData
 from app.schemas.common import APIResponse
-from app.schemas.document import ChunkRead, DocumentRead, DocumentUploadAccepted, FigureAssetRead
+from app.schemas.document import (
+    ChunkRead,
+    DocumentRead,
+    DocumentUploadAccepted,
+    FigureAssetRead,
+    HistoryLibraryRefreshStatusRead,
+)
 from app.schemas.retrieval import AssetSearchRequest, AssetSearchResponse
+from app.services.knowledge import (
+    delete_uploaded_document_library_cache,
+    read_case_library_refresh_status,
+    request_case_library_refresh,
+    write_uploaded_document_library_cache,
+)
 from app.services.parsing.docling_parser import ParsedDocument
 from app.services.parsing.parser import ParserService
+from app.services.parsing.section_catalog import flatten_section_catalog, normalize_section_heading
 from app.services.parsing.table_profile import build_table_profile
 from app.services.retrieval import AssetRetrievalService
 from app.services.vectorstore.chunker import Chunker
@@ -41,8 +54,191 @@ from app.utils.object_storage import MaterializedObject, get_object_storage
 router = APIRouter()
 
 
+def _should_refresh_history_library(*, doc_type: str) -> bool:
+    return str(doc_type or "").strip().lower() == "historical_proposal"
+
+
+def _resolve_document_parse_outcome(*, doc_type: str, parsed_metadata: dict[str, object] | None) -> dict[str, object]:
+    metadata = dict(parsed_metadata or {})
+    if not _should_refresh_history_library(doc_type=doc_type):
+        return {
+            "parse_status": "done",
+            "history_library_eligible": True,
+            "parse_gate_reason": None,
+        }
+
+    parse_gate_status = str(metadata.get("parse_gate_status") or "ready").strip().lower()
+    parse_gate_reason = str(metadata.get("parse_gate_reason") or "").strip() or None
+    if parse_gate_status == "insufficient":
+        return {
+            "parse_status": "parse_insufficient",
+            "history_library_eligible": False,
+            "parse_gate_reason": parse_gate_reason,
+        }
+    return {
+        "parse_status": "done",
+        "history_library_eligible": True,
+        "parse_gate_reason": parse_gate_reason,
+    }
+
+
 def get_asset_retrieval_service() -> AssetRetrievalService:
     return AssetRetrievalService()
+
+
+def _resolve_section_anchor_from_catalog(
+    *,
+    section_catalog: list[dict[str, object]],
+    heading_path: str | None,
+) -> dict[str, str | None]:
+    raw_heading = str(heading_path or "").strip()
+    if not raw_heading or not section_catalog:
+        return {
+            "source_section_id": None,
+            "section_path": None,
+            "source_heading": None,
+        }
+
+    raw_leaf = raw_heading.split(">")[-1].strip()
+    normalized_heading = normalize_section_heading(raw_heading)
+    normalized_leaf = normalize_section_heading(raw_leaf)
+    best_section: dict[str, object] | None = None
+    best_key = (0, 0, 0)
+
+    for section in flatten_section_catalog(section_catalog):
+        section_path = str(section.get("section_path") or "").strip()
+        source_heading = str(section.get("source_heading") or section.get("title") or "").strip()
+        normalized_section_heading = str(section.get("normalized_heading") or normalize_section_heading(source_heading)).strip()
+        normalized_section_path = str(section.get("normalized_section_path") or "").strip()
+        aliases = {
+            normalize_section_heading(str(item))
+            for item in (section.get("heading_aliases") or [])
+            if str(item).strip()
+        }
+        score = 0
+        if raw_heading and raw_heading == section_path:
+            score = max(score, 8)
+        if raw_heading and raw_heading in {source_heading, str(section.get("title") or "").strip()}:
+            score = max(score, 7)
+        if raw_leaf and raw_leaf in {source_heading, str(section.get("title") or "").strip()}:
+            score = max(score, 6)
+        if normalized_heading and normalized_heading in {normalized_section_heading, normalized_section_path}:
+            score = max(score, 5)
+        if normalized_leaf and normalized_leaf in {normalized_section_heading, *aliases}:
+            score = max(score, 5)
+        if section_path and raw_heading and section_path.endswith(raw_heading):
+            score = max(score, 4)
+        if section_path and raw_leaf and section_path.endswith(raw_leaf):
+            score = max(score, 4)
+        normalized_path_segments = [normalize_section_heading(part) for part in section_path.split(">") if part.strip()]
+        if normalized_leaf and normalized_leaf in normalized_path_segments:
+            score = max(score, 4)
+        if score <= 0:
+            continue
+        key = (score, int(section.get("level") or 0), len(section_path))
+        if key > best_key:
+            best_key = key
+            best_section = section
+
+    if best_section is None:
+        return {
+            "source_section_id": None,
+            "section_path": None,
+            "source_heading": None,
+        }
+    return {
+        "source_section_id": str(best_section.get("section_id") or "").strip() or None,
+        "section_path": str(best_section.get("section_path") or "").strip() or None,
+        "source_heading": str(best_section.get("source_heading") or best_section.get("title") or "").strip() or None,
+    }
+
+
+def _build_chunk_contextual_text(
+    *,
+    document_name: str,
+    base_metadata: dict,
+    chunk_index: int,
+    chunk_content: str,
+    chunk_type: str,
+    heading_path: str | None,
+    section_anchor: dict[str, str | None],
+    chunk_metadata: dict,
+) -> dict[str, str]:
+    document_label = str(document_name or "").strip()
+    industry = str(base_metadata.get("industry") or "").strip()
+    year = str(base_metadata.get("year") or "").strip()
+    section_path = str(section_anchor.get("section_path") or heading_path or "").strip()
+    source_heading = str(section_anchor.get("source_heading") or heading_path or "").strip()
+    section_type = str(chunk_metadata.get("section_type") or "").strip()
+    equipment_type = str(chunk_metadata.get("equipment_type") or "").strip()
+    content_form = str(chunk_metadata.get("content_form") or "").strip()
+    content = str(chunk_content or "").strip()
+    chunk_label = f"第{max(int(chunk_index), 0) + 1}段"
+
+    contextual_parts = [
+        document_label,
+        industry,
+        year,
+        section_path,
+        source_heading,
+        chunk_label,
+        section_type,
+        equipment_type,
+        content_form,
+        content,
+    ]
+    block_parts = [
+        document_label,
+        section_path,
+        source_heading,
+        chunk_label,
+        content_form,
+        content,
+    ]
+    semantic_parts = [
+        document_label,
+        section_path,
+        source_heading,
+        chunk_label,
+        section_type,
+        equipment_type,
+        chunk_type,
+        content,
+    ]
+    return {
+        "contextual_text": "\n".join(part for part in contextual_parts if part).strip(),
+        "contextualized_block_text": "\n".join(part for part in block_parts if part).strip(),
+        "semantic_retrieval_text": "\n".join(part for part in semantic_parts if part).strip(),
+        "semantic_retrieval_version": "layer2_contextual_hybrid_v1",
+    }
+
+
+async def _purge_document_raw_artifacts(
+    *,
+    session: AsyncSession,
+    document: Document,
+    storage: object,
+) -> None:
+    raw_document_id = (document.meta or {}).get("raw_document_id")
+    if not raw_document_id:
+        return
+    try:
+        raw_document = await session.get(RawDocument, UUID(str(raw_document_id)))
+    except (TypeError, ValueError):
+        raw_document = None
+    if raw_document is None:
+        return
+
+    figure_assets = (
+        await session.scalars(select(FigureAsset).where(FigureAsset.raw_document_id == raw_document.id))
+    ).all()
+    for asset in figure_assets:
+        if (asset.meta or {}).get("storage_fallback"):
+            continue
+        _safe_delete_storage_path(storage=storage, storage_path=asset.asset_uri)
+    await session.execute(delete(FigureAsset).where(FigureAsset.raw_document_id == raw_document.id))
+    await session.delete(raw_document)
+    await session.flush()
 
 
 async def _parse_and_index_document(
@@ -53,10 +249,6 @@ async def _parse_and_index_document(
     parsed_document: ParsedDocument | None = None,
 ) -> None:
     settings = get_settings()
-    parser = ParserService()
-    chunker = Chunker()
-    embedder = Embedder()
-    ingestion_filter = SafeIngestionFilter() if settings.safe_ingestion_enabled else None
     qdrant = QdrantService()
     storage = get_object_storage()
 
@@ -68,11 +260,36 @@ async def _parse_and_index_document(
     await session.flush()
 
     if parsed_document is None:
+        parser = ParserService()
         materialized: MaterializedObject = storage.materialize(document.storage_path)
         try:
             parsed_document = await parser.parse_document(str(materialized.path))
         finally:
             materialized.cleanup()
+
+    parse_outcome = _resolve_document_parse_outcome(
+        doc_type=document.doc_type,
+        parsed_metadata=parsed_document.metadata,
+    )
+    if not bool(parse_outcome.get("history_library_eligible", True)):
+        await _purge_document_raw_artifacts(session=session, document=document, storage=storage)
+        delete_uploaded_document_library_cache(document_id=str(document.id))
+        document.parse_status = str(parse_outcome.get("parse_status") or "parse_insufficient")
+        document.meta = {
+            **base_metadata,
+            **parsed_document.metadata,
+            "raw_document_id": None,
+            "figure_asset_count": 0,
+            "chunk_count": 0,
+            "indexed_chunk_count": 0,
+            "skipped_chunk_count": 0,
+            **_build_table_asset_counter_fields({}),
+        }
+        return
+
+    chunker = Chunker()
+    embedder = Embedder()
+    ingestion_filter = SafeIngestionFilter() if settings.safe_ingestion_enabled else None
 
     chunk_payloads = chunker.split(
         parsed_document.markdown,
@@ -83,12 +300,21 @@ async def _parse_and_index_document(
             "project_id": str(document.project_id) if document.project_id else None,
         },
     )
+    section_catalog = (
+        list((parsed_document.structure or {}).get("section_catalog") or [])
+        if isinstance(parsed_document.structure, dict)
+        else []
+    )
 
     indexed_chunk_count = 0
     skipped_chunk_count = 0
     preserved_table_chunks: list[Chunk] = []
 
     for payload in chunk_payloads:
+        section_anchor = _resolve_section_anchor_from_catalog(
+            section_catalog=section_catalog,
+            heading_path=payload.heading_path,
+        )
         decision = ingestion_filter.decide(payload) if ingestion_filter is not None else None
         indexable = True if decision is None else decision.indexable
         indexing_reasons = [] if decision is None else list(decision.reasons)
@@ -101,7 +327,20 @@ async def _parse_and_index_document(
             "indexing_reasons": indexing_reasons,
             "review_required": review_required,
             "preserve_for_assets": preserve_for_assets,
+            **section_anchor,
         }
+        chunk_meta.update(
+            _build_chunk_contextual_text(
+                document_name=document.filename,
+                base_metadata=base_metadata,
+                chunk_index=payload.chunk_index,
+                chunk_content=payload.content,
+                chunk_type=payload.chunk_type,
+                heading_path=payload.heading_path,
+                section_anchor=section_anchor,
+                chunk_metadata=chunk_meta,
+            )
+        )
         chunk = Chunk(
             document_id=document.id,
             chunk_index=payload.chunk_index,
@@ -116,7 +355,7 @@ async def _parse_and_index_document(
         await session.flush()
 
         if indexable and point_id is not None:
-            vector = await embedder.embed_text(payload.content)
+            vector = await embedder.embed_text(chunk_meta.get("semantic_retrieval_text") or payload.content)
             qdrant.upsert_chunk(
                 point_id=point_id,
                 vector=vector,
@@ -128,7 +367,12 @@ async def _parse_and_index_document(
                     "chunk_index": payload.chunk_index,
                     "chunk_type": payload.chunk_type,
                     "heading_path": payload.heading_path,
+                    **section_anchor,
                     "content": payload.content,
+                    "contextual_text": chunk_meta.get("contextual_text"),
+                    "contextualized_block_text": chunk_meta.get("contextualized_block_text"),
+                    "semantic_retrieval_text": chunk_meta.get("semantic_retrieval_text"),
+                    "semantic_retrieval_version": chunk_meta.get("semantic_retrieval_version"),
                     "industry": base_metadata.get("industry"),
                     "year": base_metadata.get("year"),
                     "amount_range": base_metadata.get("amount_range"),
@@ -159,7 +403,7 @@ async def _parse_and_index_document(
         raw_document=raw_document,
     )
 
-    document.parse_status = "done"
+    document.parse_status = str(parse_outcome.get("parse_status") or "done")
     document.meta = {
         **base_metadata,
         **parsed_document.metadata,
@@ -170,7 +414,7 @@ async def _parse_and_index_document(
         "skipped_chunk_count": skipped_chunk_count,
         **_build_table_asset_counter_fields(table_asset_counts),
     }
-    raw_document.parse_status = "done"
+    raw_document.parse_status = str(parse_outcome.get("parse_status") or "done")
     raw_document.meta = {
         **(raw_document.meta or {}),
         **parsed_document.metadata,
@@ -181,6 +425,27 @@ async def _parse_and_index_document(
         "skipped_chunk_count": skipped_chunk_count,
         **_build_table_asset_counter_fields(table_asset_counts),
     }
+    try:
+        write_uploaded_document_library_cache(
+            document=document,
+            parsed_document=parsed_document,
+        )
+    except Exception:
+        pass
+
+
+def _build_document_upload_message(*, doc_type: str, parse_status: str, reparsed: bool = False) -> str:
+    if _should_refresh_history_library(doc_type=doc_type):
+        if parse_status == "parse_insufficient":
+            if reparsed:
+                return "文档已重新解析，但当前解析质量不足，已跳过历史方案库 / AI Wiki / 视觉索引入库；后台刷新会同步移除旧的历史库结果"
+            return "文档已保存，但当前解析质量不足，已跳过历史方案库 / AI Wiki / 视觉索引入库"
+        return (
+            "文档已重新解析并入库，历史方案库、AI Wiki 与视觉索引正在后台刷新"
+            if reparsed
+            else "文档已接收并完成解析入库，历史方案库、AI Wiki 与视觉索引正在后台刷新"
+        )
+    return "文档已重新解析并入库" if reparsed else "文档已接收并完成解析入库"
 
 
 async def _upsert_raw_document(
@@ -232,6 +497,11 @@ async def _replace_figure_assets(
     storage: object,
     preserved_table_chunks: list[Chunk],
 ) -> int:
+    section_catalog = (
+        list((parsed_document.structure or {}).get("section_catalog") or [])
+        if isinstance(parsed_document.structure, dict)
+        else []
+    )
     existing_assets = (
         await session.scalars(select(FigureAsset).where(FigureAsset.raw_document_id == raw_document.id))
     ).all()
@@ -246,6 +516,10 @@ async def _replace_figure_assets(
     saved_count = 0
     saved_table_assets: list[FigureAsset] = []
     for index, asset in enumerate(parsed_document.assets):
+        section_anchor = _resolve_section_anchor_from_catalog(
+            section_catalog=section_catalog,
+            heading_path=asset.heading_path,
+        )
         asset_uri = raw_document.file_uri
         if asset.image_bytes:
             asset_uri = storage.save_bytes(
@@ -270,6 +544,7 @@ async def _replace_figure_assets(
                 "source_ref": asset.source_ref,
                 "legacy_document_id": str(document.id),
                 "storage_fallback": asset.image_bytes is None,
+                **section_anchor,
             },
         )
         session.add(saved_asset)
@@ -363,6 +638,9 @@ def _build_preserved_table_meta(
         "legacy_document_id": str(document.id),
         "raw_document_id": str(raw_document.id),
         "heading_path": chunk.heading_path,
+        "source_section_id": chunk_meta.get("source_section_id"),
+        "section_path": chunk_meta.get("section_path"),
+        "source_heading": chunk_meta.get("source_heading"),
         "source_chunk_index": chunk.chunk_index,
         "source_chunk_type": chunk.chunk_type,
         "source_chunk_id": str(chunk.id),
@@ -453,6 +731,7 @@ def _safe_delete_storage_path(*, storage: object, storage_path: str | None) -> N
 )
 async def upload_document(
     project_id: UUID,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     doc_type: str = Form(...),
     metadata: str | None = Form(default=None),
@@ -505,6 +784,9 @@ async def upload_document(
     finally:
         temp_path.unlink(missing_ok=True)
 
+    if _should_refresh_history_library(doc_type=doc_type):
+        background_tasks.add_task(request_case_library_refresh)
+
     return APIResponse(
         code=202,
         message="success",
@@ -512,7 +794,10 @@ async def upload_document(
             id=document.id,
             filename=document.filename,
             parse_status=document.parse_status,
-            message="文档已接收并完成解析入库",
+            message=_build_document_upload_message(
+                doc_type=doc_type,
+                parse_status=document.parse_status,
+            ),
         ),
     )
 
@@ -532,6 +817,15 @@ async def list_project_documents(
     )
 
 
+@router.get("/documents/history-library/status", response_model=APIResponse[HistoryLibraryRefreshStatusRead])
+async def get_history_library_refresh_status() -> APIResponse[HistoryLibraryRefreshStatusRead]:
+    return APIResponse(
+        code=200,
+        message="success",
+        data=HistoryLibraryRefreshStatusRead.model_validate(read_case_library_refresh_status()),
+    )
+
+
 @router.get("/documents/{document_id}", response_model=APIResponse[DocumentRead])
 async def get_document(
     document_id: UUID,
@@ -546,6 +840,7 @@ async def get_document(
 @router.post("/documents/{document_id}/reparse", response_model=APIResponse[DocumentUploadAccepted])
 async def reparse_document(
     document_id: UUID,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[DocumentUploadAccepted]:
     document = await session.get(Document, document_id)
@@ -562,6 +857,9 @@ async def reparse_document(
         await session.commit()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Document reparse failed: {exc}") from exc
 
+    if _should_refresh_history_library(doc_type=document.doc_type):
+        background_tasks.add_task(request_case_library_refresh)
+
     return APIResponse(
         code=200,
         message="success",
@@ -569,7 +867,11 @@ async def reparse_document(
             id=document.id,
             filename=document.filename,
             parse_status=document.parse_status,
-            message="文档已重新解析并入库",
+            message=_build_document_upload_message(
+                doc_type=document.doc_type,
+                parse_status=document.parse_status,
+                reparsed=True,
+            ),
         ),
     )
 
@@ -577,6 +879,7 @@ async def reparse_document(
 @router.delete("/documents/{document_id}", response_model=APIResponse[dict[str, str]])
 async def delete_document(
     document_id: UUID,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[dict[str, str]]:
     document = await session.get(Document, document_id)
@@ -602,8 +905,11 @@ async def delete_document(
                 _safe_delete_storage_path(storage=storage, storage_path=asset.asset_uri)
             await session.delete(raw_document)
     _safe_delete_storage_path(storage=storage, storage_path=document.storage_path)
+    delete_uploaded_document_library_cache(document_id=str(document.id))
     await session.delete(document)
     await session.commit()
+    if _should_refresh_history_library(doc_type=document.doc_type):
+        background_tasks.add_task(request_case_library_refresh)
     return APIResponse(code=200, message="success", data={"status": "deleted"})
 
 

@@ -30,6 +30,31 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(parsed.metadata["ingestion_recommendation"], "main_vector_ready")
         self.assertEqual(parsed.metadata["high_risk_content_flags"], [])
 
+    def test_parser_service_can_skip_asset_enrichment_for_refresh_backfill(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
+            handle.write("# 示例文档\n\n## 控制接口\n\n系统提供 DCS / PLC 控制接口，并包含 AI/AO、DI/DO 和联锁反馈。\n")
+            path = Path(handle.name)
+
+        class FailingReviewService:
+            async def review_assets(self, assets):
+                raise AssertionError("review_assets should not be called")
+
+        class FailingSummaryService:
+            async def summarize_assets(self, assets):
+                raise AssertionError("summarize_assets should not be called")
+
+        try:
+            parser = ParserService()
+            parser.asset_review_service = FailingReviewService()
+            parser.asset_summary_service = FailingSummaryService()
+            parsed = asyncio.run(parser.parse_document(str(path), include_asset_enrichment=False))
+        finally:
+            path.unlink(missing_ok=True)
+
+        self.assertIn("# 示例文档", parsed.markdown)
+        self.assertEqual(parsed.metadata["asset_llm_reviewed_count"], 0)
+        self.assertEqual(parsed.metadata["asset_llm_summarized_count"], 0)
+
     def test_docling_parser_respects_fallback_backend(self) -> None:
         with patch.dict(os.environ, {"PARSER_BACKEND": "fallback"}, clear=False):
             get_settings.cache_clear()
@@ -116,6 +141,34 @@ class ParsingTests(unittest.TestCase):
         )
 
         self.assertEqual(role, "page_furniture")
+
+    def test_docling_parser_structure_hints_include_section_catalog(self) -> None:
+        parser = DoclingParser()
+
+        class FakeHeading:
+            def __init__(self, text: str, page_no: int, *, source_ref: str = "") -> None:
+                self.text = text
+                self.prov = [SimpleNamespace(page_no=page_no, bbox=None)]
+                self.self_ref = source_ref
+
+        items = [
+            (FakeHeading("第三章 系统及方案介绍 9", 9, source_ref="h1"), 1),
+            (FakeHeading("二、系统方案", 14, source_ref="h2"), 2),
+            (FakeHeading("2.1 高压变频器选型", 14, source_ref="h3"), 3),
+        ]
+
+        with patch("app.services.parsing.docling_parser.DOC_LING_HEADING_TYPES", (FakeHeading,)):
+            structure = parser._extract_structure_hints(
+                items,
+                markdown="# 文档标题\n\n正文被解析成普通段落，没有稳定 markdown heading。",
+            )
+
+        self.assertEqual(len(structure["heading_hints"]), 3)
+        self.assertEqual(structure["document_title"], "文档标题")
+        self.assertEqual(structure["section_catalog"][0]["title"], "第三章 系统及方案介绍")
+        self.assertEqual(structure["section_catalog"][0]["children"][0]["title"], "二、系统方案")
+        self.assertEqual(structure["section_catalog"][0]["children"][0]["children"][0]["title"], "2.1 高压变频器选型")
+        self.assertIn("parser_heading", structure["section_catalog"][0]["source_signals"])
 
 
 if __name__ == "__main__":

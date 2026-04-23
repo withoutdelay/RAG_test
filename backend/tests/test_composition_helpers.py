@@ -17,16 +17,19 @@ from app.services.composition.section_service import (
     _build_composition_retrieval_trace,
     _build_evidence_retrieval_trace,
     _build_generation_summary,
+    _build_selected_block_trace,
     _compute_next_section_draft_version,
     _build_preceding_context,
     _build_preceding_context_from_existing_drafts,
     _should_skip_optional_asset_search,
+    _use_deterministic_reuse_builder,
     _new_inter_section_state,
     _record_inter_section_context,
     SectionDraftService,
     _filter_reuse_blocks_for_assembly,
     _normalize_invalid_asset_placeholders,
     _build_asset_search_context,
+    _build_reuse_query_terms,
     _normalize_technical_spacing,
     _select_section_scope_candidates,
     build_extractive_reuse_section_content,
@@ -1299,6 +1302,165 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("equipment_type_match", blocks[0]["selection_reasons"])
         self.assertGreater(blocks[0]["selection_score"], blocks[1]["selection_score"])
 
+    def test_build_reusable_blocks_applies_knowledge_wiki_product_and_module_priors(self) -> None:
+        blocks = build_reusable_blocks(
+            section={
+                "title": "主回路系统方案",
+                "purpose": "说明高压变频器主回路结构、功率单元配置和旁路切换逻辑。",
+                "keywords": ["高压变频器", "主回路", "功率单元"],
+                "expected_evidence_types": ["section"],
+            },
+            evidence_bundle=SimpleNamespace(content={"results": []}),
+            global_params={"product_line": "hv_vfd", "project_name": "测试项目"},
+            case_library_matches=[
+                {
+                    "sample_id": "sample-generic",
+                    "file_name": "历史方案概述章节",
+                    "chunk_index": 3,
+                    "chunk_type": "PLAIN",
+                    "heading_path": "2 系统概述",
+                    "content": "本节概述系统组成、供货范围和实施安排，适用于多个项目。",
+                    "score": 0.8,
+                    "front_matter": False,
+                    "needs_asset_lookup": False,
+                    "section_type": "overall_solution",
+                    "equipment_type": "generic",
+                    "content_form": "narrative",
+                },
+                {
+                    "sample_id": "sample-vfd-main-circuit",
+                    "file_name": "高压变频器系统方案",
+                    "chunk_index": 7,
+                    "chunk_type": "PLAIN",
+                    "heading_path": "4 主回路结构与切换逻辑",
+                    "content": "高压变频器主回路采用移相整流变压器配合功率单元串联结构，并设置旁路切换回路。",
+                    "score": 0.73,
+                    "front_matter": False,
+                    "needs_asset_lookup": False,
+                    "section_type": "main_circuit_scheme",
+                    "equipment_type": "vfd",
+                    "content_form": "narrative",
+                },
+            ],
+            extra_query_terms=["高压变频器方案族", "高压变频器", "功率单元"],
+            knowledge_retrieval_bundle={
+                "query_expansion_terms": ["高压变频器方案族", "高压变频器", "功率单元"],
+                "product_cards": [
+                    {
+                        "title": "高压变频器方案族",
+                        "aliases": ["高压变频器"],
+                        "top_equipment_types": [
+                            {"equipment_type": "vfd", "label": "高压变频器", "count": 5}
+                        ],
+                        "top_section_types": [
+                            {
+                                "section_type": "main_circuit_scheme",
+                                "label": "主回路方案",
+                                "count": 3,
+                            }
+                        ],
+                        "representative_titles": ["高压变频器系统方案"],
+                        "representative_headings": ["主回路结构与切换逻辑"],
+                    }
+                ],
+                "module_cards": [
+                    {
+                        "title": "功率单元",
+                        "aliases": ["功率模块"],
+                        "top_headings": ["功率单元配置"],
+                    }
+                ],
+            },
+            limit=2,
+        )
+
+        self.assertEqual(blocks[0]["source_title"], "高压变频器系统方案")
+        self.assertIn("knowledge_wiki_product_match", blocks[0]["selection_reasons"])
+        self.assertIn("knowledge_wiki_module_match", blocks[0]["selection_reasons"])
+        self.assertIn("knowledge_wiki_product_section_prior", blocks[0]["selection_reasons"])
+        self.assertIn("knowledge_wiki_product_equipment_prior", blocks[0]["selection_reasons"])
+        self.assertEqual(blocks[0]["selection_score_breakdown"]["knowledge_wiki_prior_total"], 0.13)
+        self.assertEqual(blocks[0]["selection_score_breakdown"]["knowledge_wiki_module_match"], 0.04)
+        self.assertGreater(blocks[0]["selection_score"], blocks[1]["selection_score"])
+
+    def test_build_reusable_blocks_gates_knowledge_wiki_priors_by_query_structure(self) -> None:
+        blocks = build_reusable_blocks(
+            section={
+                "title": "供货范围",
+                "purpose": "说明 LCI 软起装置、本地控制柜和随机资料的供货边界。",
+                "keywords": ["供货范围", "LCI", "控制柜"],
+                "expected_evidence_types": ["section"],
+            },
+            evidence_bundle=SimpleNamespace(content={"results": []}),
+            global_params={"product_line": "lci", "project_name": "测试项目"},
+            case_library_matches=[
+                {
+                    "sample_id": "sample-lci-scope",
+                    "file_name": "LCI 供货范围章节",
+                    "chunk_index": 2,
+                    "chunk_type": "PLAIN",
+                    "heading_path": "2 供货范围",
+                    "content": "本供货范围包括 LCI 软起装置、本地控制柜、随机资料和备品备件。",
+                    "score": 0.78,
+                    "front_matter": False,
+                    "needs_asset_lookup": False,
+                    "section_type": "supply_scope",
+                    "equipment_type": "lci",
+                    "content_form": "narrative",
+                },
+                {
+                    "sample_id": "sample-main-circuit",
+                    "file_name": "LCI 主回路方案",
+                    "chunk_index": 7,
+                    "chunk_type": "PLAIN",
+                    "heading_path": "4 主回路结构与切换逻辑",
+                    "content": "LCI 软起系统采用晶闸管主回路结构，并配置功率单元与旁路切换逻辑。",
+                    "score": 0.8,
+                    "front_matter": False,
+                    "needs_asset_lookup": False,
+                    "section_type": "main_circuit_scheme",
+                    "equipment_type": "vfd",
+                    "content_form": "narrative",
+                },
+            ],
+            extra_query_terms=["LCI 变频软起方案族", "LCI", "控制柜", "功率单元"],
+            knowledge_retrieval_bundle={
+                "query_expansion_terms": ["LCI 变频软起方案族", "LCI", "控制柜", "功率单元"],
+                "product_cards": [
+                    {
+                        "title": "LCI 变频软起方案族",
+                        "aliases": ["LCI", "LCI 软起"],
+                        "top_equipment_types": [
+                            {"equipment_type": "lci", "label": "LCI 变频软起系统", "count": 4}
+                        ],
+                        "top_section_types": [
+                            {
+                                "section_type": "supply_scope",
+                                "label": "供货范围",
+                                "count": 3,
+                            }
+                        ],
+                        "representative_titles": ["LCI 供货范围章节"],
+                        "representative_headings": ["供货范围"],
+                    }
+                ],
+                "module_cards": [
+                    {
+                        "title": "控制柜",
+                        "aliases": ["控制单元"],
+                        "top_headings": ["供货范围"],
+                    }
+                ],
+            },
+            limit=2,
+        )
+
+        self.assertEqual(blocks[0]["source_title"], "LCI 供货范围章节")
+        wrong_candidate = next(item for item in blocks if item["source_title"] == "LCI 主回路方案")
+        self.assertEqual(wrong_candidate["selection_score_breakdown"]["knowledge_wiki_prior_total"], 0.0)
+        self.assertNotIn("knowledge_wiki_product_match", wrong_candidate["selection_reasons"])
+        self.assertNotIn("knowledge_wiki_module_match", wrong_candidate["selection_reasons"])
+
     def test_build_reusable_blocks_penalizes_formula_like_interface_block_when_narrative_exists(self) -> None:
         bundle = SimpleNamespace(content={"results": []})
 
@@ -1958,6 +2120,241 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("hv_vfd", intents["context_text"])
         self.assertIn("钢铁", intents["context_terms"])
 
+    def test_build_reuse_query_terms_expands_domain_synonyms(self) -> None:
+        intents = build_section_reuse_query_intents(
+            section={
+                "title": "VFD整体方案",
+                "purpose": "说明可编程逻辑控制器与分布式控制系统之间的通讯接口。",
+                "keywords": ["频率转换器", "可编程逻辑控制器", "分布式控制系统"],
+                "expected_evidence_types": ["section"],
+                "section_class": "architecture",
+            },
+            global_params={"project_name": "测试项目", "product_line": "hv_vfd"},
+        )
+
+        self.assertIn("变频器", intents["title_terms"])
+        self.assertIn("总体方案", intents["title_terms"])
+        self.assertIn("plc", intents["detail_terms"])
+        self.assertIn("dcs", intents["detail_terms"])
+        self.assertIn("通信", intents["detail_terms"])
+
+        query_terms = _build_reuse_query_terms(
+            section={
+                "title": "VFD整体方案",
+                "purpose": "说明可编程逻辑控制器与分布式控制系统之间的通讯接口。",
+                "keywords": ["频率转换器", "可编程逻辑控制器", "分布式控制系统"],
+                "expected_evidence_types": ["section"],
+                "section_class": "architecture",
+            },
+            global_params={"project_name": "测试项目", "product_line": "hv_vfd"},
+        )
+
+        self.assertIn("变频器", query_terms)
+        self.assertIn("plc", query_terms)
+        self.assertIn("dcs", query_terms)
+
+    def test_build_reuse_query_terms_accepts_ai_wiki_extra_terms(self) -> None:
+        query_terms = _build_reuse_query_terms(
+            section={
+                "title": "主回路系统方案",
+                "purpose": "说明主回路结构与旁路切换。",
+                "keywords": ["主回路"],
+            },
+            global_params={"project_name": "测试项目"},
+            extra_terms=["VFD", "变频柜"],
+        )
+
+        self.assertIn("vfd", query_terms)
+        self.assertIn("变频器", query_terms)
+        self.assertIn("变频柜", query_terms)
+
+    def test_retrieve_case_library_matches_records_knowledge_wiki_terms_in_trace(self) -> None:
+        class _FakeKnowledgeWiki:
+            def collect_query_expansion_terms(self, *, section, global_params):
+                return ["变频器", "VFD", "变频柜"]
+
+            def build_section_context(self, *, section, global_params):
+                return ""
+
+        class _FakeCaseLibrary:
+            def retrieve_sections(self, **kwargs):
+                self.last_section_query = kwargs["query"]
+                return [
+                    {
+                        "sample_id": "sample-001",
+                        "file_name": "历史方案A.docx",
+                        "section_id": "2.1",
+                        "section_path": "第二章 > 2.1 主回路方案",
+                        "heading_path": "第二章 > 2.1 主回路方案",
+                        "source_heading": "2.1 主回路方案",
+                        "score": 0.91,
+                        "reason": "query_intent_heading_overlap",
+                        "level": 2,
+                    }
+                ]
+
+            def retrieve_blocks(self, **kwargs):
+                self.last_block_query = kwargs["query"]
+                return []
+
+            def expand_related_blocks(self, **kwargs):
+                return []
+
+        service = SectionDraftService(
+            case_library=_FakeCaseLibrary(),
+            knowledge_wiki=_FakeKnowledgeWiki(),
+        )
+
+        result = service._retrieve_case_library_matches(
+            section={"title": "VFD 主回路方案", "purpose": "说明变频器主回路结构。", "keywords": ["VFD"]},
+            evidence_bundle=SimpleNamespace(
+                content={"case_candidates": [{"sample_id": "sample-001", "library_track": "pilot_main"}]}
+            ),
+            global_params={"project_name": "测试项目"},
+        )
+
+        self.assertIn("knowledge_wiki_terms", result["trace"])
+        self.assertEqual(result["trace"]["knowledge_wiki_terms"], ["变频器", "VFD", "变频柜"])
+        self.assertIn("变频器", result["trace"]["query"])
+        self.assertIn("VFD", result["trace"]["query"])
+
+    def test_retrieve_case_library_matches_records_knowledge_wiki_cards_in_trace(self) -> None:
+        class _FakeKnowledgeWiki:
+            def collect_retrieval_prior_bundle(self, *, section, global_params):
+                return {
+                    "query_expansion_terms": ["高压变频器", "功率单元"],
+                    "product_cards": [{"title": "高压变频器方案族"}],
+                    "module_cards": [{"title": "功率单元"}],
+                }
+
+            def build_section_context(self, *, section, global_params):
+                return ""
+
+        class _FakeCaseLibrary:
+            def retrieve_sections(self, **kwargs):
+                self.last_section_query = kwargs["query"]
+                return []
+
+            def retrieve_blocks(self, **kwargs):
+                self.last_block_query = kwargs["query"]
+                return []
+
+            def expand_related_blocks(self, **kwargs):
+                return []
+
+        case_library = _FakeCaseLibrary()
+        service = SectionDraftService(
+            case_library=case_library,
+            knowledge_wiki=_FakeKnowledgeWiki(),
+        )
+
+        result = service._retrieve_case_library_matches(
+            section={"title": "主回路系统方案", "purpose": "说明高压变频器主回路结构。", "keywords": ["功率单元"]},
+            evidence_bundle=SimpleNamespace(content={"case_candidates": [{"sample_id": "sample-001"}]}),
+            global_params={"project_name": "测试项目"},
+        )
+
+        self.assertEqual(result["trace"]["knowledge_wiki_terms"], ["高压变频器", "功率单元"])
+        self.assertEqual(result["trace"]["knowledge_wiki_product_cards"], ["高压变频器方案族"])
+        self.assertEqual(result["trace"]["knowledge_wiki_module_cards"], ["功率单元"])
+        self.assertIn("高压变频器", case_library.last_section_query)
+        self.assertIn("功率单元", case_library.last_section_query)
+
+    def test_retrieve_case_library_matches_preserves_structured_section_trace(self) -> None:
+        class _FakeKnowledgeWiki:
+            def collect_retrieval_prior_bundle(self, *, section, global_params):
+                return {"query_expansion_terms": [], "product_cards": [], "module_cards": []}
+
+            def build_section_context(self, *, section, global_params):
+                return ""
+
+        class _FakeCaseLibrary:
+            def retrieve_sections(self, **kwargs):
+                return [
+                    {
+                        "sample_id": "sample-001",
+                        "file_name": "历史方案A.docx",
+                        "section_id": "4.1",
+                        "section_path": "第四章 技术架构 > 4.1 总体架构",
+                        "source_heading": "4.1 总体架构",
+                        "level": 2,
+                        "score": 0.86,
+                        "reason": "normalized_section_title_match; hybrid_rrf_boost=0.080",
+                        "reason_trace": [
+                            "normalized_section_title_match",
+                            "hybrid_rrf_boost=0.080",
+                            "hybrid_rrf_sources=sparse,semantic",
+                        ],
+                        "score_breakdown": {
+                            "base": 0.78,
+                            "sparse": 0.64,
+                            "semantic": 0.91,
+                            "hybrid_rrf": 0.08,
+                            "rerank": 0.0,
+                            "hybrid_rerank": 0.0,
+                            "final": 0.86,
+                        },
+                    }
+                ]
+
+            def retrieve_blocks(self, **kwargs):
+                return []
+
+            def expand_related_blocks(self, **kwargs):
+                return []
+
+        service = SectionDraftService(
+            case_library=_FakeCaseLibrary(),
+            knowledge_wiki=_FakeKnowledgeWiki(),
+        )
+
+        result = service._retrieve_case_library_matches(
+            section={"title": "技术架构", "purpose": "说明总体架构。"},
+            evidence_bundle=SimpleNamespace(content={"case_candidates": [{"sample_id": "sample-001"}]}),
+            global_params={"project_name": "测试项目"},
+        )
+
+        candidate = result["trace"]["section_candidates"][0]
+        self.assertEqual(candidate["section_id"], "4.1")
+        self.assertEqual(candidate["reason_trace"][1], "hybrid_rrf_boost=0.080")
+        self.assertEqual(candidate["score_breakdown"]["semantic"], 0.91)
+        self.assertEqual(candidate["score_breakdown"]["final"], 0.86)
+
+    def test_build_reusable_blocks_preserves_case_library_retrieval_breakdown(self) -> None:
+        blocks = build_reusable_blocks(
+            section={"title": "技术架构", "generation_mode": "reuse_first"},
+            evidence_bundle=SimpleNamespace(content={"results": []}),
+            global_params={"project_name": "测试项目"},
+            case_library_matches=[
+                {
+                    "sample_id": "sample-001",
+                    "chunk_index": 7,
+                    "file_name": "历史方案A.docx",
+                    "source_section_id": "4.1",
+                    "section_path": "第四章 技术架构 > 4.1 总体架构",
+                    "heading_path": ["第四章 技术架构", "4.1 总体架构"],
+                    "content": "系统采用站控层、网络层和装置层分层设计。",
+                    "chunk_type": "section",
+                    "score": 0.86,
+                    "reason": "normalized_section_title_match; hybrid_rrf_boost=0.080",
+                    "reason_trace": ["normalized_section_title_match", "hybrid_rrf_boost=0.080"],
+                    "score_breakdown": {
+                        "base": 0.78,
+                        "sparse": 0.64,
+                        "semantic": 0.91,
+                        "hybrid_rrf": 0.08,
+                        "final": 0.86,
+                    },
+                    "section_type": "architecture",
+                    "equipment_type": "vfd",
+                    "content_form": "narrative",
+                }
+            ],
+        )
+
+        self.assertEqual(blocks[0]["retrieval_reason_trace"][1], "hybrid_rrf_boost=0.080")
+        self.assertEqual(blocks[0]["retrieval_score_breakdown"]["semantic"], 0.91)
+
     def test_build_reuse_pack_keeps_retrieval_trace(self) -> None:
         reuse_pack = build_reuse_pack(
             section={"title": "技术架构", "generation_mode": "reuse_first"},
@@ -1979,6 +2376,34 @@ class CompositionHelperTests(unittest.TestCase):
 
         self.assertEqual(reuse_pack["retrieval_trace"]["query"], "技术架构 站控层 网络层")
         self.assertEqual(reuse_pack["retrieval_trace"]["scoped_sections"][0]["section_id"], "4.1")
+
+    def test_build_selected_block_trace_preserves_retrieval_breakdown(self) -> None:
+        trace = _build_selected_block_trace(
+            [
+                {
+                    "block_id": "case:sample-001:7",
+                    "source_title": "历史方案A.docx",
+                    "source_section_id": "4.1",
+                    "section_path": "第四章 技术架构 > 4.1 总体架构",
+                    "heading_path": ["第四章 技术架构", "4.1 总体架构"],
+                    "selection_score": 0.93,
+                    "selection_reasons": ["normalized_section_title_match"],
+                    "retrieval_reason": "semantic_match=0.880; hybrid_rrf_boost=0.080",
+                    "retrieval_reason_trace": ["semantic_match=0.880", "hybrid_rrf_boost=0.080"],
+                    "retrieval_score_breakdown": {
+                        "base": 0.78,
+                        "semantic": 0.88,
+                        "hybrid_rrf": 0.08,
+                        "final": 0.86,
+                    },
+                    "selection_score_breakdown": {"final_score": 0.93},
+                }
+            ]
+        )
+
+        self.assertEqual(trace[0]["retrieval_reason_trace"][0], "semantic_match=0.880")
+        self.assertEqual(trace[0]["retrieval_score_breakdown"]["semantic"], 0.88)
+        self.assertEqual(trace[0]["selection_score_breakdown"]["final_score"], 0.93)
 
     def test_build_reuse_pack_treats_table_assets_as_reference_for_supply_scope(self) -> None:
         reuse_pack = build_reuse_pack(
@@ -2019,6 +2444,11 @@ class CompositionHelperTests(unittest.TestCase):
             query="主回路 单线图",
             asset_types=["figure"],
             skipped_optional_search=False,
+            search_trace={
+                "visual_branch_enabled": True,
+                "visual_backend": "clip",
+                "visual_collection_available": True,
+            },
             recommended_assets=[
                 {
                     "asset_id": "asset-001",
@@ -2028,6 +2458,8 @@ class CompositionHelperTests(unittest.TestCase):
                     "document_name": "历史方案A.pdf",
                     "heading_path": "2.2 主回路方案",
                     "score": 0.88,
+                    "reason_trace": ["branch=textual+visual", "final=0.880"],
+                    "score_breakdown": {"branch": "textual+visual", "final": 0.88},
                 }
             ],
         )
@@ -2039,6 +2471,9 @@ class CompositionHelperTests(unittest.TestCase):
             retrieval_trace={
                 "query": "主回路系统方案 单线图",
                 "query_intents": {"title_text": "主回路系统方案"},
+                "knowledge_wiki_terms": ["高压变频器", "功率单元"],
+                "knowledge_wiki_product_cards": ["高压变频器方案族"],
+                "knowledge_wiki_module_cards": ["功率单元"],
                 "section_candidates": [{"section_id": "2.2", "score": 0.86}],
                 "scoped_sections": [{"section_id": "2.2", "score": 0.86}],
             },
@@ -2051,7 +2486,27 @@ class CompositionHelperTests(unittest.TestCase):
             generation_details={
                 "retrieval_mode": "section_pack",
                 "selected_sections": [{"section_id": "2.2", "score": 0.86}],
-                "selected_blocks": [{"source_title": "历史方案A", "selection_score": 0.93}],
+                "selected_blocks": [
+                    {
+                        "source_title": "历史方案A",
+                        "selection_score": 0.93,
+                        "selection_score_breakdown": {
+                            "knowledge_wiki_prior_total": 0.07,
+                            "knowledge_wiki_product_match": 0.03,
+                            "knowledge_wiki_module_match": 0.04,
+                            "final_score": 0.93,
+                        },
+                    }
+                ],
+                "knowledge_wiki_prior_summary": {
+                    "selected_block_count": 1,
+                    "prior_hit_block_count": 1,
+                    "prior_hit_ratio": 1.0,
+                    "total_prior_boost": 0.07,
+                    "max_prior_boost": 0.07,
+                    "reason_hits": {"knowledge_wiki_module_match": 1, "knowledge_wiki_product_match": 1},
+                },
+                "selection_reason": {"mode": "section_pack", "reasons": ["section_pack_due_to_low_section_lead"]},
                 "token_budget": {"within_budget": True},
             },
         )
@@ -2061,8 +2516,15 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(trace["layers"]["reuse"]["role"], "历史方案复用层")
         self.assertEqual(trace["layers"]["assets"]["role"], "图表/公式层")
         self.assertEqual(trace["layers"]["evidence"]["selected_items"][0]["evidence_id"], "ev_001")
+        self.assertEqual(trace["layers"]["reuse"]["knowledge_wiki_terms"], ["高压变频器", "功率单元"])
+        self.assertEqual(trace["layers"]["reuse"]["knowledge_wiki_product_cards"], ["高压变频器方案族"])
+        self.assertEqual(trace["layers"]["reuse"]["knowledge_wiki_prior_summary"]["total_prior_boost"], 0.07)
         self.assertEqual(trace["layers"]["reuse"]["selected_sections"][0]["section_id"], "2.2")
+        self.assertEqual(trace["layers"]["reuse"]["selection_reason"]["mode"], "section_pack")
         self.assertEqual(trace["layers"]["assets"]["selected_assets"][0]["asset_id"], "asset-001")
+        self.assertTrue(trace["layers"]["assets"]["search_trace"]["visual_branch_enabled"])
+        self.assertEqual(trace["layers"]["assets"]["selected_assets"][0]["reason_trace"][0], "branch=textual+visual")
+        self.assertEqual(trace["layers"]["assets"]["selected_assets"][0]["score_breakdown"]["final"], 0.88)
 
     def test_ensure_required_asset_placeholders_appends_missing_placeholders(self) -> None:
         content = ensure_required_asset_placeholders(
@@ -2265,6 +2727,156 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("移相整流变压器", content)
         self.assertIn("旁路切换时", content)
 
+    def test_build_extractive_reuse_section_content_trims_bilingual_main_circuit_noise(self) -> None:
+        content = build_extractive_reuse_section_content(
+            section={
+                "title": "高炉鼓风机 LCI 软起动主回路方案",
+                "purpose": "说明主回路拓扑、切换路径和工频运行状态。",
+                "keywords": ["主回路", "ICB", "RCB", "切换"],
+                "section_class": "architecture",
+                "expected_evidence_types": ["section"],
+            },
+            reuse_pack={
+                "reusable_blocks": [
+                    {
+                        "heading_path": ["临沂钢铁鼓风机 LCI 技术协议"],
+                        "metadata": {"section_type": "starter_spec", "content_form": "formula"},
+                        "selection_score": 0.96,
+                        "content_md": (
+                            "启动和同步过程描述 Description of Start and Sychronization\n"
+                            "Start-up and synchronization of the synchronous motor is controlled by the SFC.\n"
+                            "同步电机的启动和同步由变频器(SFC)控制。\n"
+                            "After having received all necessary feedback signals the SFC closes the incoming breaker ICB and OCB to the converter transformer.\n"
+                            "在收到所有必要的反馈信号后，SFC闭合进线侧与变频变压器相连的断路器(ICB、OCB)。\n"
+                            "到达95%转速后，同步装置开始运行。\n"
+                            "达到同步条件后，运行断路器 RCB 合闸，LCI 退出主回路，电机转入工频运行。\n"
+                            "LCI变频启动特性 LCI Start-up Characteristic\n"
+                            "负载数据 Load data\n"
+                            "总启动时间 147s，纯加速时间 112s。\n"
+                            "变频器技术数据 Component Technical Data\n"
+                            "变频器系统示意图 Converter System Overview\n"
+                        ),
+                    }
+                ]
+            },
+            global_params={"project_name": "测试项目", "product_line": "lci"},
+        )
+
+        self.assertIn("SFC闭合进线侧与变频变压器相连的断路器(ICB、OCB)", content)
+        self.assertIn("运行断路器 RCB 合闸", content)
+        self.assertIn("电机转入工频运行", content)
+        self.assertNotIn("Description of Start and Sychronization", content)
+        self.assertNotIn("Load data", content)
+        self.assertNotIn("总启动时间 147s", content)
+        self.assertNotIn("Component Technical Data", content)
+
+    def test_build_extractive_reuse_section_content_structures_site_conditions_section(self) -> None:
+        content = build_extractive_reuse_section_content(
+            section={
+                "title": "工厂设计环境与边界条件",
+                "purpose": "明确装置适用的自然环境、安装环境、运输储存条件和现场边界。",
+                "keywords": ["环境温度", "安装条件", "运输储存"],
+                "section_class": "configuration",
+                "generation_mode": "reuse_first",
+            },
+            reuse_pack={
+                "reusable_blocks": [
+                    {
+                        "heading_path": ["1 工厂设计环境 Plant design data"],
+                        "metadata": {"section_type": "site_conditions", "content_form": "interface_table"},
+                        "selection_score": 1.0,
+                        "content_md": (
+                            "| Location 安装位置 | |\n"
+                            "| --- | --- |\n"
+                            "| Altitude 海拔 | <1000m |\n"
+                            "| Ambient temperature 环境温度 | Max. 40°C, Min. -10°C |\n"
+                            "| Installation Location 安装位置 | Indoor 户内 |\n"
+                            "| Hazardous Area 危险区域 | N.A 不适用 |\n"
+                        ),
+                    }
+                ]
+            },
+            global_params={"project_name": "测试项目", "product_line": "lci"},
+        )
+
+        self.assertIn("## 工厂设计环境与边界条件", content)
+        self.assertIn("### 环境与安装边界", content)
+        self.assertIn("| 安装场所 |", content)
+        self.assertIn("小于 1000 m", content)
+        self.assertIn("最高 40°C，最低 -10°C", content)
+        self.assertIn("### 公用工程与配套条件", content)
+        self.assertIn("### 运输与储存要求", content)
+
+    def test_build_extractive_reuse_section_content_structures_power_condition_section(self) -> None:
+        content = build_extractive_reuse_section_content(
+            section={
+                "title": "供电系统条件与负载参数",
+                "purpose": "梳理电网条件、母线电压等级和负载启动约束。",
+                "keywords": ["供电系统", "负载参数", "短路容量"],
+                "section_class": "configuration",
+                "generation_mode": "reuse_first",
+                "parameter_sensitive": True,
+            },
+            reuse_pack={
+                "reusable_blocks": [
+                    {
+                        "heading_path": ["1 工厂设计环境 Plant design data"],
+                        "metadata": {"section_type": "site_conditions", "content_form": "interface_table"},
+                        "selection_score": 0.86,
+                        "content_md": (
+                            "| System rated voltage 系统额定电压 | 10500V ± 7% |\n"
+                            "| --- | --- |\n"
+                            "| System rated frequency 系统额定频率 | 50Hz ± 2% |\n"
+                            "| Short-circuit power 短路容量 | Max. 472 MVA |\n"
+                        ),
+                    }
+                ]
+            },
+            global_params={"project_name": "测试项目", "product_line": "lci", "voltage_level": "10kV", "business_objective": "为高炉鼓风机 10kV 同步电机配置 LCI/SFC 变频软起动系统。"},
+        )
+
+        self.assertIn("## 供电系统条件与负载参数", content)
+        self.assertIn("### 项目已确认的设计输入", content)
+        self.assertIn("| 系统电压等级 | 10kV | 项目需求 / 全局参数 |", content)
+        self.assertIn("| 系统频率 | 50Hz | 项目需求 / 对标资料 |", content)
+        self.assertIn("### 对标资料提取的供电与系统参考边界", content)
+        self.assertIn("### 需在联络阶段锁定的项目参数", content)
+        self.assertIn("短路容量", content)
+
+    def test_use_deterministic_reuse_builder_for_site_and_power_sections(self) -> None:
+        site_section = {
+            "title": "工厂设计环境与边界条件",
+            "purpose": "明确装置适用的自然环境、安装环境和现场边界。",
+        }
+        power_section = {
+            "title": "供电系统条件与负载参数",
+            "purpose": "梳理电网条件、负载启动约束和关键参数。",
+            "parameter_sensitive": True,
+        }
+        generic_section = {
+            "title": "控制保护与系统可靠性设计",
+            "purpose": "说明系统联锁、保护配置和可靠性设计。",
+        }
+
+        self.assertTrue(
+            _use_deterministic_reuse_builder(
+                section=site_section,
+                target_taxonomy=infer_target_taxonomy(site_section),
+            )
+        )
+        self.assertTrue(
+            _use_deterministic_reuse_builder(
+                section=power_section,
+                target_taxonomy=infer_target_taxonomy(power_section),
+            )
+        )
+        self.assertFalse(
+            _use_deterministic_reuse_builder(
+                section=generic_section,
+                target_taxonomy=infer_target_taxonomy(generic_section),
+            )
+        )
+
     def test_polish_extractive_reuse_section_content_adds_opening_and_table_lead(self) -> None:
         polished = polish_extractive_reuse_section_content(
             section={
@@ -2363,6 +2975,66 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(len(strategy["prompt_blocks"]), 2)
         self.assertEqual(strategy["selected_sections"][0]["section_id"], "4.1")
         self.assertTrue(strategy["token_budget"]["within_budget"])
+        self.assertEqual(strategy["selection_reason"]["mode"], "full_section")
+        self.assertIn("selected_full_section", strategy["selection_reason"]["reasons"])
+
+    def test_resolve_reuse_generation_strategy_records_section_pack_reason_when_lead_is_small(self) -> None:
+        strategy = resolve_reuse_generation_strategy(
+            section={
+                "title": "技术架构",
+                "generation_mode": "reuse_first",
+            },
+            reuse_pack={
+                "retrieval_trace": {
+                    "section_candidates": [
+                        {
+                            "sample_id": "sample-arch",
+                            "file_name": "历史方案A.docx",
+                            "section_id": "4.1",
+                            "section_path": "第四章 技术架构 > 4.1 总体架构",
+                            "score": 0.86,
+                            "reason": "normalized_section_title_match",
+                        },
+                        {
+                            "sample_id": "sample-arch-b",
+                            "file_name": "历史方案B.docx",
+                            "section_id": "5.1",
+                            "section_path": "第五章 技术架构 > 5.1 架构说明",
+                            "score": 0.82,
+                            "reason": "normalized_section_title_match",
+                        },
+                    ],
+                    "scoped_sections": [
+                        {
+                            "sample_id": "sample-arch",
+                            "file_name": "历史方案A.docx",
+                            "section_id": "4.1",
+                            "section_path": "第四章 技术架构 > 4.1 总体架构",
+                            "score": 0.86,
+                            "reason": "normalized_section_title_match",
+                        }
+                    ],
+                }
+            },
+            reusable_blocks=[
+                {
+                    "block_id": "case:sample-arch:7",
+                    "sample_id": "sample-arch",
+                    "source_title": "历史方案A.docx",
+                    "source_section_id": "4.1",
+                    "section_path": "第四章 技术架构 > 4.1 总体架构",
+                    "heading_path": ["第四章 技术架构", "4.1 总体架构"],
+                    "content_md": "系统采用站控层、网络层和装置层分层设计，支持 IEC 61850。",
+                    "selection_score": 0.91,
+                    "reusability_score": 0.84,
+                }
+            ],
+            recommended_assets=[],
+        )
+
+        self.assertEqual(strategy["retrieval_mode"], "section_pack")
+        self.assertEqual(strategy["selection_reason"]["mode"], "section_pack")
+        self.assertIn("section_pack_due_to_low_section_lead", strategy["selection_reason"]["reasons"])
 
     def test_build_extractive_reuse_section_content_simplifies_supply_scope_output(self) -> None:
         content = build_extractive_reuse_section_content(
@@ -2417,11 +3089,14 @@ class CompositionHelperTests(unittest.TestCase):
         )
 
         self.assertIn("## 供货范围与系统组成", content)
-        self.assertIn("### 主要设备及供货范围", content)
-        self.assertIn("备注：ABB 仅提供供货范围表内的设备", content)
-        self.assertIn("| 序号 | 设备名称 | 供货型号 | 数量 |", content)
+        self.assertIn("### 主设备供货清单", content)
+        self.assertIn("备注：本次供货仅提供供货范围表内的设备", content)
+        self.assertIn("| 序号 | 设备名称 | 主要内容 | 数量 | 单位 | 说明 |", content)
+        self.assertIn("| 1 | LCI 软起动装置 |", content)
         self.assertNotIn("Remark: ABB only provide", content)
         self.assertNotIn("| Index | Component | Type | Qty |", content)
+        self.assertNotIn("LCI.SO A1212-211N465", content)
+        self.assertNotIn("本次供货 本次供货", content)
         self.assertIn("[[ASSET:TABLE:asset-001]]", content)
 
     def test_build_extractive_reuse_section_content_completes_lci_supply_boundary_items(self) -> None:
@@ -2456,9 +3131,9 @@ class CompositionHelperTests(unittest.TestCase):
             global_params={"project_name": "测试项目", "product_line": "hv_vfd"},
         )
 
-        self.assertIn("| 2 | 输入变压器 | 待技术确认 | 待确认 | 1 | 台 |", content)
-        self.assertIn("| 3 | 输出变压器 | 待技术确认 | 待确认 | 1 | 台 |", content)
-        self.assertIn("| 4 | 励磁控制盘 | 待技术确认 | 待确认 | 1 | 套 |", content)
+        self.assertIn("| 2 | 输入变压器 | 与 LCI 启动回路配套 | 1 | 台 | 额定参数以最终确认资料为准 |", content)
+        self.assertIn("| 3 | 输出变压器 | 与电机侧启动回路配套 | 1 | 台 | 与主回路方案同步定型 |", content)
+        self.assertIn("| 4 | 励磁控制盘 | 待技术确认 | 1 | 套 | 待技术确认 |", content)
         self.assertNotIn("[[ASSET:TABLE:asset-001]]", content)
 
     def test_build_asset_search_context_anchors_on_top_reuse_blocks(self) -> None:
@@ -2502,6 +3177,8 @@ class CompositionHelperTests(unittest.TestCase):
                     "refinement_error": "openai 503",
                     "quality_gate_status": "review_required",
                     "draft_status": "review_required",
+                    "knowledge_wiki_prior_hit_block_count": 2,
+                    "knowledge_wiki_prior_total_boost": 0.13,
                 },
                 {
                     "section_id": "4",
@@ -2510,6 +3187,8 @@ class CompositionHelperTests(unittest.TestCase):
                     "refinement_error": "",
                     "quality_gate_status": "passed",
                     "draft_status": "generated",
+                    "knowledge_wiki_prior_hit_block_count": 0,
+                    "knowledge_wiki_prior_total_boost": 0.0,
                 },
             ]
         )
@@ -2521,6 +3200,9 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(summary["quality_gate_statuses"]["review_required"], 1)
         self.assertEqual(summary["refinement_error_count"], 1)
         self.assertEqual(summary["fallback_rate"], 0.5)
+        self.assertEqual(summary["knowledge_wiki_prior_sections"], 1)
+        self.assertEqual(summary["knowledge_wiki_prior_block_count"], 2)
+        self.assertEqual(summary["knowledge_wiki_prior_total_boost"], 0.13)
 
     def test_select_preferred_reuse_content_falls_back_when_rewrite_too_thin(self) -> None:
         assembled = (
@@ -2598,6 +3280,10 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("不得虚构未确认参数", instruction)
 
     def test_generate_section_content_forces_llm_finalize_after_extractive_assembly(self) -> None:
+        class _FakeKnowledgeWiki:
+            def build_section_context(self, *, section, global_params):
+                return "AI Wiki 编译知识（术语、结构、口径约束）\n\n术语别名：\n- 变频器：VFD / 变频柜"
+
         class _FakeExecutor:
             def __init__(self) -> None:
                 self.write_calls: list[dict] = []
@@ -2627,7 +3313,7 @@ class CompositionHelperTests(unittest.TestCase):
                 return SimpleNamespace(content=assembled_draft)
 
         executor = _FakeExecutor()
-        service = SectionDraftService(executor=executor)
+        service = SectionDraftService(executor=executor, knowledge_wiki=_FakeKnowledgeWiki())
 
         async def _run():
             return await service._generate_section_content(
@@ -2692,10 +3378,16 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(executor.write_calls[0]["task_id"], "task-001-finalize")
         self.assertIn("## 主回路系统方案", executor.write_calls[0]["assembled_draft"])
         self.assertIn("已覆盖主题：项目概述与改造目标", executor.write_calls[0]["preceding_context"])
+        self.assertIn("AI Wiki 编译知识", executor.write_calls[0]["preceding_context"])
         self.assertGreater(generation_details["preceding_context_chars"], 0)
+        self.assertGreater(generation_details["knowledge_wiki_context_chars"], 0)
         self.assertIn("[[ASSET:FIGURE:asset-001]]", content_md)
 
     def test_generate_section_content_passes_preceding_context_to_llm_write(self) -> None:
+        class _FakeKnowledgeWiki:
+            def build_section_context(self, *, section, global_params):
+                return "AI Wiki 编译知识（术语、结构、口径约束）\n\n禁用表述：\n- 避免“我公司”，改用“本方案 / 本系统 / 本装置”"
+
         class _FakeExecutor:
             def __init__(self) -> None:
                 self.write_calls: list[dict] = []
@@ -2724,7 +3416,7 @@ class CompositionHelperTests(unittest.TestCase):
                 return SimpleNamespace(content="## 7 控制系统及联锁保护方案\n\n正文。")
 
         executor = _FakeExecutor()
-        service = SectionDraftService(executor=executor)
+        service = SectionDraftService(executor=executor, knowledge_wiki=_FakeKnowledgeWiki())
 
         async def _run():
             return await service._generate_section_content(
@@ -2750,8 +3442,10 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(draft_status, "generated")
         self.assertEqual(executor.write_calls[0]["task_id"], "task-002")
         self.assertIn("已覆盖主题：项目概述与改造目标", executor.write_calls[0]["preceding_context"])
+        self.assertIn("AI Wiki 编译知识", executor.write_calls[0]["preceding_context"])
         self.assertEqual(generation_details["effective_path"], "llm_write")
         self.assertGreater(generation_details["preceding_context_chars"], 0)
+        self.assertGreater(generation_details["knowledge_wiki_context_chars"], 0)
 
     def test_generate_section_content_uses_llm_write_when_reuse_blocks_are_filtered_out(self) -> None:
         class _FakeExecutor:
@@ -2952,6 +3646,44 @@ class CompositionHelperTests(unittest.TestCase):
 
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0]["metadata"]["content_form"], "parameter_table")
+
+    def test_filter_reuse_blocks_for_assembly_skips_main_circuit_doc_title_noise(self) -> None:
+        filtered = _filter_reuse_blocks_for_assembly(
+            reusable_blocks=[
+                {
+                    "heading_path": ["山东临沂钢铁投资集团特钢公司高炉鼓风机电机及变频软起动系统技术协议"],
+                    "metadata": {"section_type": "unknown", "content_form": "narrative"},
+                    "selection_score": 1.0,
+                    "content_md": (
+                        "Fieldbus adapter Profibus-DP（暂定）\n"
+                        "I/O Rating (for digital inputs) 24VDC\n"
+                        "Cable Length between Motor and LCI 300米\n"
+                        "变频器遵循的标准和证书 Converter Standard and Certification\n"
+                        "Routine Test 例行测试\n"
+                    ),
+                },
+                {
+                    "heading_path": ["山东临沂钢铁投资集团特钢公司高炉鼓风机电机及变频软起动系统技术协议"],
+                    "metadata": {"section_type": "unknown", "content_form": "narrative"},
+                    "selection_score": 0.98,
+                    "content_md": (
+                        "启动和同步过程描述 Description of Start and Sychronization\n"
+                        "同步电机的启动和同步由变频器(SFC)控制。\n"
+                        "在收到所有必要反馈信号后，SFC闭合进线侧与变频变压器相连的断路器(ICB)，"
+                        "并按照预设加速转矩曲线将电机升速至约95%额定转速。\n"
+                        "达到同步条件后，同步装置发出切换指令，LCI退出主回路，电机转入工频运行。\n"
+                    ),
+                },
+            ],
+            target_taxonomy={
+                "section_type": "main_circuit_scheme",
+                "equipment_type": "lci",
+                "support_content_forms": {"narrative", "parameter_table"},
+            },
+        )
+
+        self.assertEqual(len(filtered), 1)
+        self.assertIn("启动和同步过程描述", filtered[0]["content_md"])
 
     def test_filter_reuse_blocks_for_assembly_prefers_parameter_blocks_for_parameter_summary(self) -> None:
         filtered = _filter_reuse_blocks_for_assembly(

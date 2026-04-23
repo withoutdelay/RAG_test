@@ -14,8 +14,13 @@ from app.models.document import Document
 from app.models.figure_asset import FigureAsset
 from app.models.project import Project
 from app.models.raw_document import RawDocument
-from app.schemas.retrieval import AssetSearchResponse, AssetSearchResult
+from app.schemas.retrieval import AssetSearchResponse, AssetSearchResult, AssetSearchTrace
 from app.services.v2_errors import ArtifactNotFoundError
+from app.services.retrieval.visual_backend import (
+    normalize_visual_channel,
+    search_visual_embedding_index,
+    VisualEmbedder,
+)
 from app.services.vectorstore.block_taxonomy import (
     classify_block_taxonomy,
     heading_family_similarity,
@@ -99,11 +104,13 @@ class AssetCard:
     metadata: dict[str, Any]
     semantic_summary_text: str | None = None
     semantic_summary_confidence: float = 0.0
+    visual_retrieval_text: str = ""
 
 
 class AssetRetrievalService:
-    def __init__(self, *, embedder: Embedder | None = None) -> None:
+    def __init__(self, *, embedder: Embedder | None = None, visual_embedder: VisualEmbedder | None = None) -> None:
         self.embedder = embedder or Embedder()
+        self.visual_embedder = visual_embedder or VisualEmbedder(text_embedder=self.embedder)
 
     async def search_project_assets(
         self,
@@ -135,10 +142,50 @@ class AssetRetrievalService:
         query_vector = await self.embedder.embed_text(query)
         section_title = str((section_context or {}).get("section_title") or (section_context or {}).get("title") or "")
         expected_types = [str(item) for item in ((section_context or {}).get("expected_evidence_types") or [])]
+        requested_asset_types = [str(item) for item in (asset_types or []) if str(item).strip()]
         taxonomy_context = dict(section_context or {})
         if not taxonomy_context.get("title") and taxonomy_context.get("section_title"):
             taxonomy_context["title"] = taxonomy_context.get("section_title")
         target_taxonomy = infer_target_taxonomy(taxonomy_context)
+        visual_branch_enabled = _should_enable_visual_branch(
+            expected_types=expected_types,
+            requested_asset_types=requested_asset_types,
+        )
+        visual_query_vectors: dict[str, list[float]] = {}
+        visual_index_scores: dict[str, float] = {}
+        visual_index_channels: dict[str, str] = {}
+        visual_collection_hits: dict[str, int] = {"image": 0, "text_proxy": 0}
+        visual_collection_available = False
+        direct_visual_fallback = False
+        if visual_branch_enabled:
+            visual_query = _build_visual_query_text(
+                query=query,
+                section_title=section_title,
+                expected_types=expected_types,
+                target_taxonomy=target_taxonomy,
+            )
+            visual_query_vectors = await self.visual_embedder.build_query_vectors(visual_query)
+            visual_candidate_limit = max(top_k * 12, min(len(cards), 64))
+            for channel, vector in visual_query_vectors.items():
+                normalized_channel = normalize_visual_channel(channel)
+                hits = search_visual_embedding_index(
+                    query_vector=vector,
+                    channel=normalized_channel,
+                    top_k=visual_candidate_limit,
+                )
+                visual_collection_hits[normalized_channel] = len(hits)
+                if not hits:
+                    continue
+                visual_collection_available = True
+                for hit in hits:
+                    asset_id = str(hit.payload.get("asset_id") or hit.id).strip()
+                    if not asset_id:
+                        continue
+                    score = max(0.0, float(hit.score))
+                    if score > visual_index_scores.get(asset_id, -1.0):
+                        visual_index_scores[asset_id] = score
+                        visual_index_channels[asset_id] = normalized_channel
+            direct_visual_fallback = not visual_collection_available
         anchor_document_names = {
             str(item)
             for item in ((section_context or {}).get("anchor_document_names") or [])
@@ -150,54 +197,107 @@ class AssetRetrievalService:
             if str(item).strip()
         ]
 
-        scored_cards: list[tuple[float, AssetCard]] = []
+        scored_cards: list[tuple[float, AssetCard, dict[str, float | str], list[str]]] = []
+        result_source_breakdown: dict[str, int] = {}
+        result_branch_breakdown: dict[str, int] = {}
         for card in cards:
             retrieval_vector = await self.embedder.embed_text(card.retrieval_text)
-            semantic_score = max(0.0, _cosine_similarity(query_vector, retrieval_vector))
-            metadata_boost = _keyword_overlap_boost(query, card.retrieval_text)
-            section_boost = _keyword_overlap_boost(section_title, f"{card.heading_path or ''} {card.title or ''} {card.caption or ''}")
-            summary_boost = _asset_summary_boost(query=query, section_title=section_title, card=card)
-            type_boost = _expected_type_boost(card.asset_type, expected_types)
-            taxonomy_boost = _asset_taxonomy_boost(card=card, target_taxonomy=target_taxonomy)
-            anchor_boost = _asset_anchor_boost(
-                card=card,
+            visual_branch_for_card = bool(visual_branch_enabled and card.asset_type == "figure")
+            direct_visual_score = 0.0
+            visual_collection_score = 0.0
+            visual_source = "disabled"
+            visual_collection_channel = ""
+            if visual_branch_for_card:
+                visual_collection_score = max(0.0, float(visual_index_scores.get(str(card.asset_id), 0.0)))
+                visual_collection_channel = str(visual_index_channels.get(str(card.asset_id), "")).strip()
+                should_embed_direct = direct_visual_fallback or bool(visual_collection_score > 0.0)
+                if should_embed_direct:
+                    visual_retrieval_vector, direct_source = await self.visual_embedder.embed_asset(
+                        asset_uri=card.asset_uri,
+                        fallback_text=card.visual_retrieval_text or card.retrieval_text,
+                        asset_id=str(card.asset_id),
+                    )
+                    visual_query_vector = (
+                        visual_query_vectors.get(_resolve_visual_query_key(direct_source))
+                        or visual_query_vectors.get("text_proxy")
+                        or next(iter(visual_query_vectors.values()), [])
+                    )
+                    direct_visual_score = max(0.0, _cosine_similarity(visual_query_vector, visual_retrieval_vector))
+                    visual_source = direct_source
+                elif visual_collection_score > 0 and visual_collection_channel:
+                    visual_source = f"{visual_collection_channel}_index"
+            final_score, score_breakdown = _compose_asset_score(
+                query=query,
+                section_title=section_title,
+                expected_types=expected_types,
+                target_taxonomy=target_taxonomy,
                 anchor_document_names=anchor_document_names,
                 anchor_headings=anchor_headings,
+                card=card,
+                textual_semantic_score=max(0.0, _cosine_similarity(query_vector, retrieval_vector)),
+                visual_semantic_score=direct_visual_score,
+                visual_collection_score=visual_collection_score,
+                visual_collection_channel=visual_collection_channel,
+                visual_enabled=visual_branch_for_card,
+                visual_backend=self.visual_embedder.backend_name if visual_branch_for_card else "disabled",
+                visual_source=visual_source,
             )
-            noise_penalty = _asset_noise_penalty(card=card, target_section_type=str(target_taxonomy.get("section_type") or "unknown"))
-            risk_penalty = {"high": 0.08, "medium": 0.03}.get(card.risk_level, 0.0)
-            final_score = (
-                semantic_score
-                + metadata_boost
-                + section_boost
-                + summary_boost
-                + type_boost
-                + taxonomy_boost
-                + anchor_boost
-                - risk_penalty
-                - noise_penalty
+            reason_trace = _build_reason_trace(
+                score_breakdown=score_breakdown,
+                visual_branch_enabled=visual_branch_for_card,
             )
-            scored_cards.append((final_score, card))
+            scored_cards.append((final_score, card, score_breakdown, reason_trace))
+            branch_name = str(score_breakdown.get("branch") or "unknown").strip() or "unknown"
+            result_branch_breakdown[branch_name] = int(result_branch_breakdown.get(branch_name, 0)) + 1
+            result_source_breakdown[visual_source] = int(result_source_breakdown.get(visual_source, 0)) + 1
 
         scored_cards.sort(key=lambda item: item[0], reverse=True)
         preferred_cards = [
-            (score, card)
-            for score, card in scored_cards
+            (score, card, breakdown, reason_trace)
+            for score, card, breakdown, reason_trace in scored_cards
             if not _asset_quality_flags(card=card)["low_information"]
         ]
         if len(preferred_cards) >= top_k:
             result_pool = preferred_cards
         else:
-            preferred_ids = {card.asset_id for _score, card in preferred_cards}
+            preferred_ids = {card.asset_id for _score, card, _breakdown, _reason_trace in preferred_cards}
             result_pool = [
                 *preferred_cards,
-                *[(score, card) for score, card in scored_cards if card.asset_id not in preferred_ids],
+                *[
+                    (score, card, breakdown, reason_trace)
+                    for score, card, breakdown, reason_trace in scored_cards
+                    if card.asset_id not in preferred_ids
+                ],
             ]
         results = [
-            _to_result(card=card, score=score, section_title=section_title)
-            for score, card in result_pool[:top_k]
+            _to_result(
+                card=card,
+                score=score,
+                section_title=section_title,
+                score_breakdown=breakdown,
+                reason_trace=reason_trace,
+            )
+            for score, card, breakdown, reason_trace in result_pool[:top_k]
         ]
-        return AssetSearchResponse(results=results, total=len(results))
+        return AssetSearchResponse(
+            results=results,
+            total=len(results),
+            search_trace=AssetSearchTrace(
+                visual_branch_enabled=visual_branch_enabled,
+                visual_backend=self.visual_embedder.backend_name if visual_branch_enabled else "disabled",
+                candidate_count=len(cards),
+                returned_count=len(results),
+                requested_asset_types=requested_asset_types,
+                expected_evidence_types=expected_types,
+                visual_collection_available=visual_collection_available,
+                visual_candidate_count=len(visual_index_scores),
+                image_collection_hits=int(visual_collection_hits.get("image", 0)),
+                text_proxy_collection_hits=int(visual_collection_hits.get("text_proxy", 0)),
+                direct_visual_fallback=direct_visual_fallback,
+                result_source_breakdown=result_source_breakdown,
+                result_branch_breakdown=result_branch_breakdown,
+            ),
+        )
 
     async def _load_asset_cards(
         self,
@@ -315,6 +415,15 @@ def _build_asset_card(
         page_no=asset.page_no,
         semantic_summary=semantic_summary,
     )
+    visual_retrieval_text = _build_visual_retrieval_text(
+        asset_type=asset_type,
+        visual_role=visual_role,
+        title=title,
+        display_title=display_title,
+        caption=caption,
+        heading_path=heading_path,
+        metadata=metadata,
+    )
     preview_text = _build_preview_text(
         title=title,
         caption=caption,
@@ -380,11 +489,19 @@ def _build_asset_card(
         content_form=str(taxonomy.get("content_form") or ("figure" if asset_type == "figure" else "parameter_table")),
         semantic_summary_text=semantic_summary_text,
         semantic_summary_confidence=semantic_summary_confidence,
+        visual_retrieval_text=visual_retrieval_text,
         metadata=metadata,
     )
 
 
-def _to_result(*, card: AssetCard, score: float, section_title: str) -> AssetSearchResult:
+def _to_result(
+    *,
+    card: AssetCard,
+    score: float,
+    section_title: str,
+    score_breakdown: dict[str, float | str] | None = None,
+    reason_trace: list[str] | None = None,
+) -> AssetSearchResult:
     metadata = dict(card.metadata or {})
     metadata.setdefault("section_type", card.section_type)
     metadata.setdefault("equipment_type", card.equipment_type)
@@ -392,6 +509,16 @@ def _to_result(*, card: AssetCard, score: float, section_title: str) -> AssetSea
     metadata.setdefault("raw_title", card.title)
     metadata.setdefault("display_title", card.display_title or card.title)
     metadata["retrieval_quality"] = _asset_quality_flags(card=card)
+    if score_breakdown:
+        metadata["retrieval_score_breakdown"] = score_breakdown
+        if score_breakdown.get("visual_backend"):
+            metadata["visual_backend"] = str(score_breakdown.get("visual_backend"))
+        if score_breakdown.get("visual_source"):
+            metadata["visual_source"] = str(score_breakdown.get("visual_source"))
+    if reason_trace:
+        metadata["retrieval_reason_trace"] = list(reason_trace)
+    if card.visual_retrieval_text:
+        metadata.setdefault("visual_retrieval_text_preview", card.visual_retrieval_text[:260])
     return AssetSearchResult(
         asset_card_id=card.asset_card_id,
         asset_id=card.asset_id,
@@ -413,7 +540,9 @@ def _to_result(*, card: AssetCard, score: float, section_title: str) -> AssetSea
         asset_uri=card.asset_uri,
         preview_text=card.preview_text,
         reason=_build_reason(card=card, section_title=section_title),
+        reason_trace=list(reason_trace or []),
         score=round(score, 4),
+        score_breakdown=dict(score_breakdown or {}),
         metadata=metadata,
     )
 
@@ -454,6 +583,171 @@ def _build_retrieval_text(
     if indexing_reasons:
         parts.append("risk_reasons:" + " ".join(str(item) for item in indexing_reasons))
     return "\n".join(part for part in parts if part)
+
+
+def _should_enable_visual_branch(*, expected_types: list[str], requested_asset_types: list[str]) -> bool:
+    normalized_expected_types = {str(item).strip().lower() for item in expected_types if str(item).strip()}
+    normalized_requested_asset_types = {str(item).strip().lower() for item in requested_asset_types if str(item).strip()}
+    if normalized_requested_asset_types.intersection({"figure", "diagram"}):
+        return True
+    return bool(normalized_expected_types.intersection({"figure", "diagram"}))
+
+
+def _build_visual_retrieval_text(
+    *,
+    asset_type: str,
+    visual_role: str | None,
+    title: str | None,
+    display_title: str | None,
+    caption: str | None,
+    heading_path: str | None,
+    metadata: dict[str, Any],
+) -> str:
+    semantic_summary = _normalize_semantic_summary(metadata.get("semantic_summary"))
+    parts = [
+        f"asset_type:{asset_type}",
+        f"visual_role:{visual_role}" if visual_role else "",
+        f"display_title:{display_title}" if display_title else "",
+        f"title:{title}" if title else "",
+        f"caption:{caption}" if caption else "",
+        f"heading:{heading_path}" if heading_path else "",
+    ]
+    if semantic_summary:
+        for key in ("title_hint", "diagram_type", "summary", "problem_solved", "principle_summary", "review_notes"):
+            value = _normalize_text(semantic_summary.get(key))
+            if value:
+                parts.append(f"{key}:{value}")
+        for key in ("key_components", "signals_or_loops", "applicable_sections", "retrieval_keywords"):
+            values = semantic_summary.get(key) or []
+            if isinstance(values, list):
+                normalized = [str(item).strip() for item in values if str(item).strip()]
+                if normalized:
+                    parts.append(f"{key}:" + " ".join(normalized))
+    if metadata.get("source_ref"):
+        parts.append(f"source_ref:{_normalize_text(metadata.get('source_ref'))}")
+    return "\n".join(part for part in parts if part)
+
+
+def _build_visual_query_text(
+    *,
+    query: str,
+    section_title: str,
+    expected_types: list[str],
+    target_taxonomy: dict[str, Any],
+) -> str:
+    parts = [
+        query,
+        section_title,
+        " ".join(str(item) for item in expected_types if str(item).strip()),
+        f"target_section_type:{target_taxonomy.get('section_type')}" if target_taxonomy.get("section_type") else "",
+        f"target_equipment_type:{target_taxonomy.get('equipment_type')}" if target_taxonomy.get("equipment_type") else "",
+    ]
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _compose_asset_score(
+    *,
+    query: str,
+    section_title: str,
+    expected_types: list[str],
+    target_taxonomy: dict[str, Any],
+    anchor_document_names: set[str],
+    anchor_headings: list[str],
+    card: AssetCard,
+    textual_semantic_score: float,
+    visual_semantic_score: float,
+    visual_collection_score: float = 0.0,
+    visual_collection_channel: str = "",
+    visual_enabled: bool = True,
+    visual_backend: str = "text-proxy",
+    visual_source: str = "text_proxy",
+) -> tuple[float, dict[str, float | str]]:
+    metadata_boost = _keyword_overlap_boost(query, card.retrieval_text)
+    section_boost = _keyword_overlap_boost(section_title, f"{card.heading_path or ''} {card.title or ''} {card.caption or ''}")
+    summary_boost = _asset_summary_boost(query=query, section_title=section_title, card=card)
+    textual_score = textual_semantic_score + metadata_boost + section_boost + summary_boost
+
+    effective_visual_semantic = max(0.0, visual_semantic_score, visual_collection_score)
+    if visual_enabled:
+        visual_keyword_boost = _asset_visual_keyword_boost(
+            query=query,
+            section_title=section_title,
+            expected_types=expected_types,
+            card=card,
+        )
+        visual_quality_bonus = _asset_visual_quality_bonus(
+            card=card,
+            expected_types=expected_types,
+        )
+        visual_score = effective_visual_semantic + visual_keyword_boost + visual_quality_bonus
+    else:
+        visual_keyword_boost = 0.0
+        visual_quality_bonus = 0.0
+        visual_score = 0.0
+
+    type_boost = _expected_type_boost(card.asset_type, expected_types)
+    taxonomy_boost = _asset_taxonomy_boost(card=card, target_taxonomy=target_taxonomy)
+    anchor_boost = _asset_anchor_boost(
+        card=card,
+        anchor_document_names=anchor_document_names,
+        anchor_headings=anchor_headings,
+    )
+    structural_score = type_boost + taxonomy_boost + anchor_boost
+
+    noise_penalty = _asset_noise_penalty(card=card, target_section_type=str(target_taxonomy.get("section_type") or "unknown"))
+    risk_penalty = {"high": 0.08, "medium": 0.03}.get(card.risk_level, 0.0)
+    penalties = risk_penalty + noise_penalty
+
+    if visual_enabled:
+        branch = "textual+visual"
+        final_score = (textual_score * 0.60) + (visual_score * 0.30) + (structural_score * 0.10) - penalties
+    else:
+        branch = "textual_only"
+        final_score = (textual_score * 0.90) + (structural_score * 0.10) - penalties
+    score_breakdown: dict[str, float | str] = {
+        "branch": branch,
+        "visual_backend": visual_backend,
+        "visual_source": visual_source,
+        "visual_collection_channel": visual_collection_channel or None,
+        "textual_semantic": round(textual_semantic_score, 4),
+        "textual_keyword": round(metadata_boost + section_boost, 4),
+        "summary": round(summary_boost, 4),
+        "textual": round(textual_score, 4),
+        "visual_semantic": round(effective_visual_semantic, 4),
+        "visual_direct_semantic": round(max(0.0, visual_semantic_score), 4),
+        "visual_collection": round(max(0.0, visual_collection_score), 4),
+        "visual_keyword": round(visual_keyword_boost, 4),
+        "visual_quality": round(visual_quality_bonus, 4),
+        "visual": round(visual_score, 4),
+        "structural": round(structural_score, 4),
+        "type": round(type_boost, 4),
+        "taxonomy": round(taxonomy_boost, 4),
+        "anchor": round(anchor_boost, 4),
+        "penalty": round(penalties, 4),
+        "risk_penalty": round(risk_penalty, 4),
+        "noise_penalty": round(noise_penalty, 4),
+        "final": round(final_score, 4),
+    }
+    return final_score, score_breakdown
+
+
+def _build_reason_trace(
+    *,
+    score_breakdown: dict[str, float | str],
+    visual_branch_enabled: bool,
+) -> list[str]:
+    trace = [
+        f"branch={str(score_breakdown.get('branch') or 'unknown')}",
+        f"textual={float(score_breakdown.get('textual') or 0.0):.3f}",
+        f"structural={float(score_breakdown.get('structural') or 0.0):.3f}",
+    ]
+    if visual_branch_enabled:
+        trace.append(f"visual={float(score_breakdown.get('visual') or 0.0):.3f}")
+        trace.append(f"visual_collection={float(score_breakdown.get('visual_collection') or 0.0):.3f}")
+        trace.append(f"visual_source={str(score_breakdown.get('visual_source') or 'disabled')}")
+    trace.append(f"penalty={float(score_breakdown.get('penalty') or 0.0):.3f}")
+    trace.append(f"final={float(score_breakdown.get('final') or 0.0):.3f}")
+    return trace
 
 
 def _asset_taxonomy_boost(*, card: AssetCard, target_taxonomy: dict[str, Any]) -> float:
@@ -737,6 +1031,45 @@ def _asset_summary_boost(*, query: str, section_title: str, card: AssetCard) -> 
     return min(0.3, (query_overlap * 1.8 + section_overlap * 1.2) * confidence_factor)
 
 
+def _asset_visual_keyword_boost(
+    *,
+    query: str,
+    section_title: str,
+    expected_types: list[str],
+    card: AssetCard,
+) -> float:
+    visual_text = card.visual_retrieval_text or card.semantic_summary_text or ""
+    if not visual_text:
+        return 0.0
+    query_overlap = _semantic_phrase_overlap_boost(query, visual_text)
+    section_overlap = _semantic_phrase_overlap_boost(section_title, visual_text)
+    expected_type_bonus = 0.0
+    normalized_expected_types = {str(item).lower() for item in expected_types}
+    if card.asset_type == "figure" and normalized_expected_types.intersection({"figure", "diagram"}):
+        expected_type_bonus = 0.05
+    confidence_factor = 0.6 + (card.semantic_summary_confidence * 0.4)
+    return min(0.32, ((query_overlap * 1.5) + (section_overlap * 1.1)) * confidence_factor + expected_type_bonus)
+
+
+def _asset_visual_quality_bonus(
+    *,
+    card: AssetCard,
+    expected_types: list[str],
+) -> float:
+    quality_flags = _asset_quality_flags(card=card)
+    bonus = 0.0
+    normalized_expected_types = {str(item).lower() for item in expected_types}
+    if card.asset_type == "figure" and normalized_expected_types.intersection({"figure", "diagram"}):
+        bonus += 0.04
+    if str(card.visual_role or "").lower() == "engineering_figure":
+        bonus += 0.05
+    if quality_flags["complete_diagram"]:
+        bonus += 0.1
+    if card.semantic_summary_confidence >= 0.75 and not quality_flags["summary_review_required"]:
+        bonus += 0.05
+    return min(0.24, bonus)
+
+
 def _build_reason(*, card: AssetCard, section_title: str) -> str:
     parts: list[str] = []
     if section_title:
@@ -901,3 +1234,10 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     if left_norm == 0 or right_norm == 0:
         return 0.0
     return dot / (left_norm * right_norm)
+
+
+def _resolve_visual_query_key(visual_source: str | None) -> str:
+    normalized = str(visual_source or "").strip().lower()
+    if normalized.endswith("_cache"):
+        normalized = normalized[: -len("_cache")]
+    return normalized if normalized in {"image", "text_proxy"} else "text_proxy"

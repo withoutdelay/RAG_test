@@ -28,7 +28,7 @@ from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationErro
 
 
 HARD_BLOCKING_CODES = {"VAL001", "VAL002", "VAL004", "VAL005", "VAL007", "VAL008", "VAL009", "VAL010"}
-CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103", "VAL104", "VAL105", "VAL106", "VAL107", "VAL108"}
+CONTENT_REVIEW_CODES = {"VAL101", "VAL102", "VAL103", "VAL104", "VAL105", "VAL106", "VAL107", "VAL108", "VAL109"}
 BLOCKING_CONTENT_REVIEW_CODES = {"VAL108"}
 ASSUMPTION_HINTS = ("待确认", "待补充", "TBD", "暂定", "后续确认")
 DECLARED_ASSUMPTION_CONTEXT_TOKENS = (
@@ -53,6 +53,10 @@ ASSET_PLACEHOLDER_DETAIL_PATTERN = re.compile(r"\[\[ASSET:(FIGURE|TABLE|FORMULA)
 MARKDOWN_TABLE_ROW_PATTERN = re.compile(r"(?m)^\|.+\|\s*$")
 MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(r"(?m)^\|\s*:?-{3,}.*\|\s*$")
 QUANTITY_PAIR_PATTERN = re.compile(r"\d+(?:\.\d+)?(?:套|台|个|项|柜|面|回|路|只|组|根|支)")
+RETRIEVAL_DIAGNOSTIC_MODES = {"full_section", "section_pack"}
+RETRIEVAL_TRACE_MIN_FINAL_SCORE = 0.55
+RETRIEVAL_TRACE_MIN_SEMANTIC_SCORE = 0.45
+RETRIEVAL_TRACE_MIN_RERANK_SCORE = 0.45
 
 
 def flatten_outline_sections(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -130,6 +134,124 @@ def _has_acceptable_case_fallback(evidence_bundle: EvidenceBundle) -> bool:
     fallback_count = int(trace.get("case_fallback_count") or 0)
     fallback_top_score = float(trace.get("case_fallback_top_score") or 0)
     return fallback_used and fallback_count >= 1 and fallback_top_score >= 0.45
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value in (None, "", [], {}):
+            return None
+        return round(float(value), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_retrieval_breakdown(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, float] = {}
+    for key, item in value.items():
+        numeric = _coerce_float(item)
+        if numeric is not None:
+            normalized[str(key)] = numeric
+    return normalized
+
+
+def _breakdown_metric(breakdown: dict[str, float], *keys: str) -> float | None:
+    for key in keys:
+        value = _coerce_float(breakdown.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _summarize_generation_retrieval(validator_result: dict[str, Any]) -> dict[str, Any]:
+    generation_details = (
+        validator_result.get("generation_details")
+        if isinstance(validator_result.get("generation_details"), dict)
+        else {}
+    )
+    selected_blocks = generation_details.get("selected_blocks") if isinstance(generation_details.get("selected_blocks"), list) else []
+    selected_sections = generation_details.get("selected_sections") if isinstance(generation_details.get("selected_sections"), list) else []
+    retrieval_mode = str(generation_details.get("retrieval_mode") or "").strip()
+    effective_path = str(generation_details.get("effective_path") or "").strip()
+
+    block_breakdowns = [
+        _normalize_retrieval_breakdown(item.get("retrieval_score_breakdown"))
+        for item in selected_blocks
+        if isinstance(item, dict)
+    ]
+    block_breakdowns = [item for item in block_breakdowns if item]
+    section_breakdowns = [
+        _normalize_retrieval_breakdown(item.get("score_breakdown"))
+        for item in selected_sections
+        if isinstance(item, dict)
+    ]
+    section_breakdowns = [item for item in section_breakdowns if item]
+    effective_breakdowns = block_breakdowns or section_breakdowns
+
+    final_values = [_breakdown_metric(item, "final", "hybrid") for item in effective_breakdowns]
+    final_values = [float(item) for item in final_values if item is not None]
+    average_final = _coerce_float(sum(final_values) / len(final_values)) if final_values else None
+    semantic_values = [_breakdown_metric(item, "semantic", "dense") for item in effective_breakdowns]
+    semantic_values = [float(item) for item in semantic_values if item is not None]
+    average_semantic = _coerce_float(sum(semantic_values) / len(semantic_values)) if semantic_values else None
+    average_rerank = _coerce_float(
+        sum(float(item.get("rerank") or 0.0) for item in effective_breakdowns if "rerank" in item) / len(
+            [item for item in effective_breakdowns if "rerank" in item]
+        )
+    ) if any("rerank" in item for item in effective_breakdowns) else None
+
+    return {
+        "retrieval_mode": retrieval_mode,
+        "effective_path": effective_path,
+        "selected_block_count": len(selected_blocks),
+        "selected_section_count": len(selected_sections),
+        "trace_source": "blocks" if block_breakdowns else "sections" if section_breakdowns else "none",
+        "trace_count": len(effective_breakdowns),
+        "average_final_score": average_final,
+        "average_semantic_score": average_semantic,
+        "average_rerank_score": average_rerank,
+    }
+
+
+def _evaluate_retrieval_trace_health(validator_result: dict[str, Any]) -> dict[str, Any] | None:
+    summary = _summarize_generation_retrieval(validator_result)
+    retrieval_mode = str(summary.get("retrieval_mode") or "")
+    effective_path = str(summary.get("effective_path") or "")
+    expects_trace = bool(
+        summary.get("selected_block_count")
+        or summary.get("selected_section_count")
+        or retrieval_mode in RETRIEVAL_DIAGNOSTIC_MODES
+        or effective_path.startswith("extractive_reuse")
+    )
+    if not expects_trace:
+        return None
+
+    weak_reasons: list[str] = []
+    trace_count = int(summary.get("trace_count") or 0)
+    if trace_count <= 0:
+        weak_reasons.append("missing_structured_trace")
+
+    average_final = _coerce_float(summary.get("average_final_score"))
+    if average_final is not None and average_final < RETRIEVAL_TRACE_MIN_FINAL_SCORE:
+        weak_reasons.append("low_final_score")
+
+    average_semantic = _coerce_float(summary.get("average_semantic_score"))
+    average_rerank = _coerce_float(summary.get("average_rerank_score"))
+    if (
+        average_semantic is not None
+        and average_semantic < RETRIEVAL_TRACE_MIN_SEMANTIC_SCORE
+        and (average_rerank is None or average_rerank < RETRIEVAL_TRACE_MIN_RERANK_SCORE)
+    ):
+        weak_reasons.append("low_semantic_and_rerank")
+
+    if not weak_reasons:
+        return None
+    return {
+        **summary,
+        "weak_reasons": weak_reasons,
+        "expects_trace": expects_trace,
+    }
 
 
 def collect_validation_findings(
@@ -374,6 +496,31 @@ def collect_validation_findings(
             )
             errors.append(issue)
             section_results[section_id]["errors"].append(issue)
+
+        retrieval_health = _evaluate_retrieval_trace_health(validator_result)
+        if retrieval_health is not None:
+            warning = make_issue(
+                code="VAL109",
+                level="P1",
+                section_id=section_id,
+                section_title=section_title,
+                message=f"章节《{section_title}》的历史复用检索信号偏弱，建议检查 hybrid retrieval 与 rerank 命中质量。",
+                suggested_action="检查候选 section/block 的 structured trace，确认检索 query、RRF 融合和 rerank 排序是否命中当前章节意图。",
+                details={
+                    "retrieval_mode": retrieval_health.get("retrieval_mode"),
+                    "effective_path": retrieval_health.get("effective_path"),
+                    "trace_source": retrieval_health.get("trace_source"),
+                    "trace_count": retrieval_health.get("trace_count"),
+                    "selected_block_count": retrieval_health.get("selected_block_count"),
+                    "selected_section_count": retrieval_health.get("selected_section_count"),
+                    "average_final_score": retrieval_health.get("average_final_score"),
+                    "average_semantic_score": retrieval_health.get("average_semantic_score"),
+                    "average_rerank_score": retrieval_health.get("average_rerank_score"),
+                    "weak_reasons": retrieval_health.get("weak_reasons") or [],
+                },
+            )
+            warnings.append(warning)
+            section_results[section_id]["warnings"].append(warning)
 
         leaked_terms = _find_reuse_leakage_terms(
             content=draft.content_md,

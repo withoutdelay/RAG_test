@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from app.config import get_settings
 from app.services.retrieval.asset_service import (
+    AssetRetrievalService,
     AssetCard,
     _asset_anchor_boost,
     _asset_noise_penalty,
@@ -15,7 +16,11 @@ from app.services.retrieval.asset_service import (
     _asset_taxonomy_boost,
     _build_asset_display_title,
     _build_preview_text,
+    _build_visual_retrieval_text,
+    _compose_asset_score,
     _derive_visual_role,
+    _resolve_visual_query_key,
+    _to_result,
 )
 from app.services.retrieval.service import (
     EvidenceBundleService,
@@ -24,12 +29,89 @@ from app.services.retrieval.service import (
     build_evidence_search_plan,
     filter_evidence_results,
 )
+from app.services.vectorstore.retriever import Retriever, _build_chunk_retrieval_text, _rank_chunk_candidates
 from app.services.vectorstore.chunker import Chunker
 from app.services.vectorstore.embedder import Embedder
 from app.services.vectorstore.block_taxonomy import infer_target_taxonomy
 
 
+class FakeReranker:
+    @property
+    def available(self) -> bool:
+        return True
+
+    def score_many(self, *, query: str, texts: list[str]) -> list[float]:
+        return [0.92 if "控制接口" in text else 0.18 for text in texts]
+
+
+class FakeEmbedder:
+    dimension = 4
+
+    async def embed_text(self, text: str) -> list[float]:
+        return [0.1, 0.2, 0.3, 0.4]
+
+
+class FakeQdrant:
+    def __init__(self, *, hits: list[SimpleNamespace]) -> None:
+        self._hits = hits
+
+    def search(self, *, query_vector: list[float], top_k: int, filters: dict | None = None) -> list[SimpleNamespace]:
+        return list(self._hits)
+
+
+class FakeExecuteResult:
+    def __init__(self, rows: list[tuple[object, object]]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[tuple[object, object]]:
+        return list(self._rows)
+
+
+class FakeAsyncSession:
+    def __init__(self, rows_by_call: list[list[tuple[object, object]]]) -> None:
+        self._rows_by_call = list(rows_by_call)
+
+    async def execute(self, stmt: object) -> FakeExecuteResult:
+        if not self._rows_by_call:
+            raise AssertionError("unexpected execute call")
+        return FakeExecuteResult(self._rows_by_call.pop(0))
+
+
+class FakeProjectSession:
+    def __init__(self, project: object) -> None:
+        self._project = project
+
+    async def get(self, model: object, key: object) -> object:
+        del model
+        del key
+        return self._project
+
+
+class FakeVisualEmbedder:
+    def __init__(self) -> None:
+        self.backend_name = "clip"
+        self.build_query_calls = 0
+        self.embed_asset_calls = 0
+
+    async def build_query_vectors(self, text: str) -> dict[str, list[float]]:
+        del text
+        self.build_query_calls += 1
+        return {"text_proxy": [0.3, 0.7], "image": [0.5, 0.5]}
+
+    async def embed_asset(self, *, asset_uri: str, fallback_text: str, asset_id: str = "") -> tuple[list[float], str]:
+        del asset_uri
+        del fallback_text
+        del asset_id
+        self.embed_asset_calls += 1
+        return [0.4, 0.6], "image"
+
+
 class RetrievalBuildingBlockTests(unittest.TestCase):
+    def test_resolve_visual_query_key_maps_cache_to_base_channel(self) -> None:
+        self.assertEqual(_resolve_visual_query_key("image_cache"), "image")
+        self.assertEqual(_resolve_visual_query_key("text_proxy_cache"), "text_proxy")
+        self.assertEqual(_resolve_visual_query_key("unknown_cache"), "text_proxy")
+
     def test_chunker_preserves_table_blocks(self) -> None:
         markdown = "# 标题\n\n说明文字\n\n| 设备 | 型号 |\n|---|---|\n| 变频器 | ABB |\n"
         chunks = Chunker(max_chars=80).split(markdown, base_metadata={"industry": "电气"})
@@ -129,6 +211,49 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         self.assertGreater(items[0]["reusability_score"], 0.8)
         self.assertEqual(items[0]["section_type"], "overall_solution")
         self.assertEqual(items[0]["equipment_type"], "vfd")
+
+    def test_build_evidence_items_preserves_structured_retrieval_trace(self) -> None:
+        items = build_evidence_items(
+            [
+                {
+                    "chunk_id": "chunk-2",
+                    "document_id": "doc-2",
+                    "document_name": "历史方案B",
+                    "heading_path": "4.2 控制接口说明",
+                    "chunk_type": "PLAIN",
+                    "content": "DCS 至变频器提供 DI/DO、AI/AO 和联锁接口。",
+                    "score": 0.86,
+                    "reason": "semantic_match=0.780; sparse_match=0.910; final_score=0.860",
+                    "reason_trace": [
+                        "semantic_match=0.780",
+                        "sparse_match=0.910",
+                        "hybrid_shortlist=0.820",
+                        "final_score=0.860",
+                    ],
+                    "score_breakdown": {
+                        "base": 0.78,
+                        "semantic": 0.78,
+                        "sparse": 0.91,
+                        "hybrid_rrf": 0.82,
+                        "rerank": 0.64,
+                        "hybrid_rerank": 0.04,
+                        "final": 0.86,
+                    },
+                    "metadata": {
+                        "content_risk_level": "low",
+                        "front_matter": False,
+                        "needs_asset_lookup": False,
+                        "section_type": "control_system",
+                        "equipment_type": "vfd",
+                        "content_form": "narrative",
+                    },
+                }
+            ]
+        )
+
+        self.assertEqual(items[0]["retrieval_reason"], "semantic_match=0.780; sparse_match=0.910; final_score=0.860")
+        self.assertEqual(items[0]["reason_trace"][0], "semantic_match=0.780")
+        self.assertEqual(items[0]["retrieval_score_breakdown"]["final"], 0.86)
 
     def test_filter_evidence_results_drops_short_garbled_plain_fragment(self) -> None:
         results = filter_evidence_results(
@@ -804,6 +929,460 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         )
 
         self.assertEqual(role, "page_furniture")
+
+    def test_build_visual_retrieval_text_prefers_semantic_summary_fields(self) -> None:
+        visual_text = _build_visual_retrieval_text(
+            asset_type="figure",
+            visual_role="engineering_figure",
+            title="系统功能描述",
+            display_title="LCI变频软起系统图",
+            caption=None,
+            heading_path="4.1 LCI 变频软起系统方案",
+            metadata={
+                "semantic_summary": {
+                    "status": "summarized",
+                    "title_hint": "LCI变频软起系统图",
+                    "diagram_type": "系统图",
+                    "summary": "该图展示了主电力链路以及 PLC、励磁柜和 DCS 的接口关系。",
+                    "problem_solved": "解释启动与同步切换过程中的主回路与控制边界。",
+                    "key_components": ["PLC", "励磁柜", "DCS", "同步电机"],
+                    "retrieval_keywords": ["主回路", "同步切换", "接口"],
+                }
+            },
+        )
+
+        self.assertIn("title_hint:LCI变频软起系统图", visual_text)
+        self.assertIn("diagram_type:系统图", visual_text)
+        self.assertIn("key_components:PLC 励磁柜 DCS 同步电机", visual_text)
+
+    def test_compose_asset_score_prefers_visual_complete_diagram(self) -> None:
+        complete = AssetCard(
+            asset_card_id="asset:complete",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="案例A.pdf",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=12,
+            heading_path="4.1 LCI 变频软起系统方案",
+            title="LCI变频软起系统图",
+            display_title="LCI变频软起系统图",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/lci.png",
+            preview_text="该图展示了主电力链路以及 PLC、励磁柜和 DCS 的接口关系。",
+            retrieval_text="LCI 变频软起 系统图 主电力链路 PLC 励磁柜 DCS",
+            section_type="main_circuit_scheme",
+            equipment_type="motor_drive",
+            content_form="figure",
+            metadata={
+                "semantic_summary": {
+                    "status": "summarized",
+                    "title_hint": "LCI变频软起系统图",
+                    "diagram_type": "系统图",
+                    "summary": "该图展示了主电力链路以及 PLC、励磁柜和 DCS 的接口关系。",
+                    "problem_solved": "解释启动与同步切换过程中的主回路与控制边界。",
+                    "confidence": 0.88,
+                    "review_required": False,
+                }
+            },
+            semantic_summary_text="LCI变频软起系统图；系统图；该图展示了主电力链路以及 PLC、励磁柜和 DCS 的接口关系。",
+            semantic_summary_confidence=0.88,
+            visual_retrieval_text="display_title:LCI变频软起系统图\ndiagram_type:系统图\nsummary:主电力链路 PLC 励磁柜 DCS",
+        )
+        fragment = AssetCard(
+            asset_card_id="asset:fragment",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="案例B.pdf",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=12,
+            heading_path="3 系统方案",
+            title="symbol / cropped figure fragment",
+            display_title="symbol / cropped figure fragment",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/fragment.png",
+            preview_text="局部裁剪图，难以判断有效图意。",
+            retrieval_text="fragment partial symbol",
+            section_type="main_circuit_scheme",
+            equipment_type="motor_drive",
+            content_form="figure",
+            metadata={
+                "semantic_summary": {
+                    "status": "summarized",
+                    "title_hint": "symbol / cropped figure fragment",
+                    "summary": "局部裁剪图，难以判断有效图意。",
+                    "confidence": 0.24,
+                    "review_required": True,
+                }
+            },
+            semantic_summary_text="局部裁剪图，难以判断有效图意。",
+            semantic_summary_confidence=0.24,
+            visual_retrieval_text="fragment partial symbol",
+        )
+        target_taxonomy = infer_target_taxonomy(
+            {
+                "title": "主回路与控制接口示意",
+                "purpose": "说明主回路连接关系、同步切换以及 PLC/DCS 接口边界。",
+                "expected_evidence_types": ["figure"],
+            }
+        )
+
+        complete_score, complete_breakdown = _compose_asset_score(
+            query="主回路与控制接口示意",
+            section_title="主回路与控制接口示意",
+            expected_types=["figure"],
+            target_taxonomy=target_taxonomy,
+            anchor_document_names=set(),
+            anchor_headings=[],
+            card=complete,
+            textual_semantic_score=0.18,
+            visual_semantic_score=0.82,
+        )
+        fragment_score, fragment_breakdown = _compose_asset_score(
+            query="主回路与控制接口示意",
+            section_title="主回路与控制接口示意",
+            expected_types=["figure"],
+            target_taxonomy=target_taxonomy,
+            anchor_document_names=set(),
+            anchor_headings=[],
+            card=fragment,
+            textual_semantic_score=0.24,
+            visual_semantic_score=0.05,
+        )
+
+        self.assertGreater(complete_score, fragment_score)
+        self.assertGreater(complete_breakdown["visual"], fragment_breakdown["visual"])
+        self.assertLess(complete_breakdown["penalty"], fragment_breakdown["penalty"])
+
+    def test_to_result_includes_asset_retrieval_breakdown(self) -> None:
+        card = AssetCard(
+            asset_card_id="asset:complete",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="案例A.pdf",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=12,
+            heading_path="4.1 LCI 变频软起系统方案",
+            title="LCI变频软起系统图",
+            display_title="LCI变频软起系统图",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/lci.png",
+            preview_text="该图展示了主电力链路以及 PLC、励磁柜和 DCS 的接口关系。",
+            retrieval_text="LCI 变频软起 系统图",
+            section_type="main_circuit_scheme",
+            equipment_type="motor_drive",
+            content_form="figure",
+            metadata={},
+            semantic_summary_text="该图展示了主电力链路以及 PLC、励磁柜和 DCS 的接口关系。",
+            semantic_summary_confidence=0.88,
+            visual_retrieval_text="display_title:LCI变频软起系统图\ndiagram_type:系统图",
+        )
+
+        result = _to_result(
+            card=card,
+            score=0.77,
+            section_title="主回路与控制接口示意",
+            reason_trace=["branch=textual+visual", "visual=0.620", "final=0.770"],
+            score_breakdown={
+                "branch": "textual+visual",
+                "visual_backend": "clip",
+                "visual_source": "image",
+                "visual": 0.62,
+                "final": 0.77,
+            },
+        )
+
+        self.assertIn("retrieval_score_breakdown", result.metadata)
+        self.assertEqual(result.metadata["retrieval_score_breakdown"]["branch"], "textual+visual")
+        self.assertEqual(result.metadata["visual_backend"], "clip")
+        self.assertEqual(result.metadata["visual_source"], "image")
+        self.assertIn("visual_retrieval_text_preview", result.metadata)
+        self.assertEqual(result.reason_trace[0], "branch=textual+visual")
+        self.assertEqual(result.score_breakdown["final"], 0.77)
+
+    def test_compose_asset_score_disables_visual_branch_for_text_only_context(self) -> None:
+        card = AssetCard(
+            asset_card_id="asset:text-only",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="案例A.pdf",
+            doc_type="historical_proposal",
+            asset_type="table",
+            visual_role="table_asset",
+            risk_level="high",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=8,
+            heading_path="5.1 控制接口点表",
+            title="控制接口点表",
+            display_title="控制接口点表",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/table.png",
+            preview_text="DCS 至变频器 DI/DO、AI/AO 接口点表。",
+            retrieval_text="控制接口 点表 DCS PLC AI AO DI DO",
+            section_type="communication_interface",
+            equipment_type="vfd",
+            content_form="parameter_table",
+            metadata={},
+            semantic_summary_text=None,
+            semantic_summary_confidence=0.0,
+            visual_retrieval_text="display_title:控制接口点表",
+        )
+        target_taxonomy = infer_target_taxonomy(
+            {
+                "title": "控制接口与点表",
+                "purpose": "说明 DCS / PLC 接口点表。",
+                "expected_evidence_types": ["table", "parameter"],
+            }
+        )
+
+        score, breakdown = _compose_asset_score(
+            query="控制接口与点表",
+            section_title="控制接口与点表",
+            expected_types=["table", "parameter"],
+            target_taxonomy=target_taxonomy,
+            anchor_document_names=set(),
+            anchor_headings=[],
+            card=card,
+            textual_semantic_score=0.66,
+            visual_semantic_score=0.91,
+            visual_collection_score=0.88,
+            visual_enabled=False,
+            visual_backend="disabled",
+            visual_source="disabled",
+        )
+
+        self.assertGreater(score, 0.0)
+        self.assertEqual(breakdown["branch"], "textual_only")
+        self.assertEqual(breakdown["visual"], 0.0)
+        self.assertEqual(breakdown["visual_backend"], "disabled")
+
+    def test_asset_retrieval_service_skips_visual_branch_when_figure_not_requested(self) -> None:
+        visual_embedder = FakeVisualEmbedder()
+        service = AssetRetrievalService(embedder=FakeEmbedder(), visual_embedder=visual_embedder)
+        card = AssetCard(
+            asset_card_id="asset:table-1",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="案例A.pdf",
+            doc_type="historical_proposal",
+            asset_type="table",
+            visual_role="table_asset",
+            risk_level="high",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=8,
+            heading_path="5.1 控制接口点表",
+            title="控制接口点表",
+            display_title="控制接口点表",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/table.png",
+            preview_text="DCS 至变频器 DI/DO、AI/AO 接口点表。",
+            retrieval_text="控制接口 点表 DCS PLC AI AO DI DO",
+            section_type="communication_interface",
+            equipment_type="vfd",
+            content_form="parameter_table",
+            metadata={},
+            semantic_summary_text=None,
+            semantic_summary_confidence=0.0,
+            visual_retrieval_text="display_title:控制接口点表",
+        )
+
+        with patch.object(service, "_load_asset_cards", return_value=[card]):
+            response = asyncio.run(
+                service.search_project_assets(
+                    session=FakeProjectSession(SimpleNamespace(id=uuid4())),
+                    project_id=uuid4(),
+                    query="控制接口 DI DO 点表",
+                    top_k=3,
+                    asset_types=["table"],
+                    section_context={
+                        "section_title": "控制接口与点表",
+                        "expected_evidence_types": ["table", "parameter"],
+                    },
+                )
+            )
+
+        self.assertEqual(visual_embedder.build_query_calls, 0)
+        self.assertEqual(visual_embedder.embed_asset_calls, 0)
+        self.assertIsNotNone(response.search_trace)
+        self.assertFalse(bool(response.search_trace.visual_branch_enabled))
+        self.assertEqual(response.results[0].score_breakdown["branch"], "textual_only")
+        self.assertEqual(response.results[0].reason_trace[0], "branch=textual_only")
+
+    def test_build_chunk_retrieval_text_prefers_semantic_retrieval_text(self) -> None:
+        chunk = SimpleNamespace(
+            meta={"semantic_retrieval_text": "文档A\n控制接口说明\nAI AO DI DO"},
+            heading_path="4.2 控制接口说明",
+            content="原始正文",
+        )
+
+        text = _build_chunk_retrieval_text(
+            chunk=chunk,
+            document_name="文档A.pdf",
+            payload={},
+        )
+
+        self.assertEqual(text, "文档A\n控制接口说明\nAI AO DI DO")
+
+    def test_rank_chunk_candidates_prefers_sparse_and_rerank_supported_match(self) -> None:
+        best_chunk = SimpleNamespace(meta={}, heading_path="4.2 控制接口说明", content="控制接口")
+        noisy_chunk = SimpleNamespace(meta={}, heading_path="1. 项目概述", content="项目概述")
+        ranked = _rank_chunk_candidates(
+            query_text="控制接口硬接点说明",
+            search_mode="hybrid",
+            candidates=[
+                {
+                    "chunk": noisy_chunk,
+                    "document": SimpleNamespace(filename="案例B.pdf"),
+                    "dense_score": 0.89,
+                    "retrieval_text": "案例B\n项目概述\n交付范围与组织安排",
+                },
+                {
+                    "chunk": best_chunk,
+                    "document": SimpleNamespace(filename="案例A.pdf"),
+                    "dense_score": 0.82,
+                    "retrieval_text": "案例A\n控制接口说明\nDCS PLC AI AO DI DO 硬接点",
+                },
+            ],
+            reranker=FakeReranker(),
+        )
+
+        self.assertIs(ranked[0]["chunk"], best_chunk)
+        self.assertTrue(any(item.startswith("semantic_match=") for item in ranked[0]["reason_trace"]))
+        self.assertEqual(ranked[0]["score_breakdown"]["final"], ranked[0]["hybrid_score"])
+        self.assertGreater(ranked[0]["score_breakdown"]["semantic_raw"], 0.0)
+        self.assertGreater(ranked[0]["score_breakdown"]["hybrid_rrf"], 0.0)
+        self.assertGreater(ranked[0]["score_breakdown"]["hybrid_rerank"], 0.0)
+        self.assertGreater(ranked[0]["score_breakdown"]["sparse"], ranked[1]["score_breakdown"]["sparse"])
+        self.assertGreater(ranked[0]["score_breakdown"]["rerank"], ranked[1]["score_breakdown"]["rerank"])
+
+    def test_retriever_keyword_mode_can_return_sparse_only_candidate(self) -> None:
+        chunk_id = uuid4()
+        document_id = uuid4()
+        project_id = uuid4()
+        sparse_chunk = SimpleNamespace(
+            id=chunk_id,
+            document_id=document_id,
+            heading_path="4.2 控制接口说明",
+            chunk_type="PLAIN",
+            content="DCS 至变频器提供 DI/DO、AI/AO 和联锁接口。",
+            meta={"semantic_retrieval_text": "案例A\n4.2 控制接口说明\nDCS PLC AI AO DI DO 联锁接口"},
+        )
+        sparse_document = SimpleNamespace(
+            id=document_id,
+            filename="案例A.pdf",
+            project_id=project_id,
+            doc_type="historical_proposal",
+        )
+        retriever = Retriever(
+            embedder=FakeEmbedder(),
+            qdrant=FakeQdrant(hits=[]),
+            reranker=FakeReranker(),
+        )
+        session = FakeAsyncSession(rows_by_call=[[(sparse_chunk, sparse_document)]])
+
+        response = asyncio.run(
+            retriever.search(
+                session=session,
+                request=SimpleNamespace(
+                    query="控制接口硬接点说明",
+                    project_id=project_id,
+                    top_k=5,
+                    filters=SimpleNamespace(model_dump=lambda exclude_none=True: {"doc_type": "historical_proposal", "chunk_type": ["PLAIN"]}),
+                    search_mode="keyword",
+                ),
+            )
+        )
+
+        self.assertEqual(response.total, 1)
+        self.assertEqual(response.search_trace.sparse_hit_count, 1)
+        self.assertEqual(response.search_trace.dense_hit_count, 0)
+        self.assertEqual(response.search_trace.sparse_candidate_count, 1)
+        self.assertEqual(response.results[0].chunk_id, chunk_id)
+        self.assertIn("candidate_sources=sparse", response.results[0].reason_trace[0])
+        self.assertGreater(response.results[0].score_breakdown["sparse"], 0.0)
+        self.assertEqual(response.results[0].metadata["candidate_sources"], ["sparse"])
+
+    def test_retriever_hybrid_mode_merges_dense_and_sparse_candidate_sources(self) -> None:
+        chunk_id = uuid4()
+        document_id = uuid4()
+        project_id = uuid4()
+        dense_sparse_chunk = SimpleNamespace(
+            id=chunk_id,
+            document_id=document_id,
+            heading_path="4.2 控制接口说明",
+            chunk_type="PLAIN",
+            content="DCS 至变频器提供 DI/DO、AI/AO 和联锁接口。",
+            meta={"semantic_retrieval_text": "案例A\n4.2 控制接口说明\nDCS PLC AI AO DI DO 联锁接口"},
+        )
+        dense_sparse_document = SimpleNamespace(
+            id=document_id,
+            filename="案例A.pdf",
+            project_id=project_id,
+            doc_type="historical_proposal",
+        )
+        qdrant_hit = SimpleNamespace(payload={"chunk_id": str(chunk_id)}, score=0.88)
+        retriever = Retriever(
+            embedder=FakeEmbedder(),
+            qdrant=FakeQdrant(hits=[qdrant_hit]),
+            reranker=FakeReranker(),
+        )
+        session = FakeAsyncSession(
+            rows_by_call=[
+                [(dense_sparse_chunk, dense_sparse_document)],
+                [(dense_sparse_chunk, dense_sparse_document)],
+            ]
+        )
+
+        response = asyncio.run(
+            retriever.search(
+                session=session,
+                request=SimpleNamespace(
+                    query="控制接口硬接点说明",
+                    project_id=project_id,
+                    top_k=5,
+                    filters=SimpleNamespace(model_dump=lambda exclude_none=True: {"doc_type": "historical_proposal", "chunk_type": ["PLAIN"]}),
+                    search_mode="hybrid",
+                ),
+            )
+        )
+
+        self.assertEqual(response.total, 1)
+        self.assertEqual(response.search_trace.dense_hit_count, 1)
+        self.assertEqual(response.search_trace.dense_candidate_count, 1)
+        self.assertEqual(response.search_trace.sparse_candidate_count, 1)
+        self.assertEqual(response.results[0].metadata["candidate_sources"], ["dense", "sparse"])
+        self.assertIn("candidate_sources=dense,sparse", response.results[0].reason_trace[0])
 
 
 if __name__ == "__main__":

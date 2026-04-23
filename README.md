@@ -2,6 +2,48 @@
 
 面向工业电气售前场景的方案生成系统。系统把客户需求、真实历史方案、图表资产和质量门禁串成一条端到端链路，目标不是“凭空写一份方案”，而是“优先复用相似历史方案中的高价值工程内容，再用 LLM 做受控改写、补齐和审校”。
 
+当前版本：`2.3.0`
+
+## Super Dev 使用入口
+
+本仓库已经接入 Super Dev 工作流，默认宿主是 Codex CLI。
+
+安装与升级参考：
+
+- `pip install -U super-dev`
+- `uv tool install super-dev`
+- `super-dev update`
+
+在支持 slash command 的宿主中，可使用 `/super-dev` 触发；在当前 Codex CLI 仓库中，优先使用：
+
+- `super-dev: 你的需求`
+
+本仓库还提供了宿主侧本地质量/发布门禁入口，优先用于交付前自检：
+
+- `super-dev host release-gate`
+- `super-dev host project-replay-gate`
+- `super-dev host quality-smoke`
+
+执行 `super-dev host release-gate` 后，会在 `output/` 下落地：
+
+- `RAG_test-release-gate.md`
+- `RAG_test-release-gate.json`
+
+如果仓库里已有最新的 `output/RAG_test-project-replay-eval.json`，`release-gate` / `project-replay-gate` 会自动复用其中的 `project_id`；也可以显式传入：
+
+- `super-dev host release-gate --project-id <uuid>`
+
+如果是从空白想法开始，也可先用：
+
+- `super-dev start --idea "你的需求"`
+
+文档入口：
+
+- [Quickstart](docs/QUICKSTART.md)
+- [Host Usage Guide](docs/HOST_USAGE_GUIDE.md)
+- [Workflow Guide](docs/WORKFLOW_GUIDE.md)
+- [Product Audit](docs/PRODUCT_AUDIT.md)
+
 当前 MVP 的核心路线是 `reuse-first`：
 
 ```text

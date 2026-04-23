@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from decimal import Decimal
 from datetime import datetime
 from uuid import UUID
@@ -27,6 +28,29 @@ class DocumentUploadAccepted(BaseModel):
     filename: str
     parse_status: str
     message: str
+
+
+class HistoryLibraryRefreshPipelineStatusRead(BaseModel):
+    status: str
+    requested_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    last_success_at: datetime | None = None
+    pending: bool = False
+    error: str | None = None
+    duration_seconds: float | None = None
+
+
+class HistoryLibraryRefreshStatusRead(BaseModel):
+    status: str
+    requested_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    last_success_at: datetime | None = None
+    pending: bool = False
+    error: str | None = None
+    stats: dict[str, Any] = Field(default_factory=dict)
+    pipelines: dict[str, HistoryLibraryRefreshPipelineStatusRead] = Field(default_factory=dict)
 
 
 class ChunkRead(BaseModel):

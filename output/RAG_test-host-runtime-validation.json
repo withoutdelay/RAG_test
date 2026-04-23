@@ -1,0 +1,16 @@
+{
+  "project_name": "RAG_test",
+  "validated_at": "2026-04-20T12:44:39+08:00",
+  "hosts": {
+    "codex-cli": {
+      "status": "passed",
+      "actor": "user",
+      "comment": "host runtime validation: Codex CLI 进入 Super Dev 时先进入 research，并遵守 docs confirmation gate；当前仓库已完成 docs review 记录，继续需求默认留在 Super Dev 流程内。"
+    }
+  },
+  "checks": {
+    "entered_research_first": true,
+    "respected_docs_confirmation_gate": true,
+    "continue_prompt_stayed_in_workflow": true
+  }
+}

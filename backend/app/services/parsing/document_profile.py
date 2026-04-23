@@ -21,6 +21,8 @@ class DocumentProfileResult:
     confidence: float
     reasons: tuple[str, ...]
     ingestion_recommendation: str
+    parse_gate_status: str
+    parse_gate_reason: str | None
     high_risk_content_flags: tuple[str, ...]
     metrics: dict[str, int | float]
 
@@ -33,6 +35,8 @@ class DocumentProfileResult:
                 "metrics": self.metrics,
             },
             "ingestion_recommendation": self.ingestion_recommendation,
+            "parse_gate_status": self.parse_gate_status,
+            "parse_gate_reason": self.parse_gate_reason,
             "high_risk_content_flags": list(self.high_risk_content_flags),
         }
 
@@ -81,6 +85,8 @@ def build_document_profile(
             confidence=0.96,
             reasons=tuple(dict.fromkeys(reasons)),
             ingestion_recommendation="conversion_required",
+            parse_gate_status="insufficient",
+            parse_gate_reason="legacy_doc_requires_conversion",
             high_risk_content_flags=tuple(dict.fromkeys(high_risk_flags)),
             metrics={
                 "markdown_char_count": markdown_char_count,
@@ -184,12 +190,18 @@ def build_document_profile(
         "front_matter_noise_count": front_matter_noise_count,
         "text_density": text_density,
     }
+    parse_gate_status, parse_gate_reason = _resolve_parse_gate_status(
+        file_format=file_format,
+        parser_backend_used=parser_backend_used,
+    )
 
     return DocumentProfileResult(
         name=profile_name,
         confidence=round(confidence, 2),
         reasons=tuple(dict.fromkeys(reasons)),
         ingestion_recommendation=ingestion_recommendation,
+        parse_gate_status=parse_gate_status,
+        parse_gate_reason=parse_gate_reason,
         high_risk_content_flags=tuple(dict.fromkeys(high_risk_flags)),
         metrics=metrics,
     )
@@ -207,6 +219,16 @@ def _is_large_visual_asset(asset: ParsedAsset) -> bool:
     if visual_role == "engineering_figure":
         return True
     return width >= 280 or height >= 180
+
+
+def _resolve_parse_gate_status(*, file_format: str, parser_backend_used: str) -> tuple[str, str | None]:
+    normalized_format = str(file_format or "").strip().lower()
+    normalized_backend = str(parser_backend_used or "").strip().lower()
+    if normalized_backend == "legacy_doc_placeholder" or normalized_format == "doc":
+        return "insufficient", "legacy_doc_requires_conversion"
+    if normalized_backend == "fallback" and normalized_format not in {"md", "txt"}:
+        return "insufficient", "fallback_binary_parser"
+    return "ready", None
 
 
 def _is_scanned_like_pdf(

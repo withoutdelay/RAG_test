@@ -397,6 +397,143 @@ class ValidationHelperTests(unittest.TestCase):
         self.assertIn("VAL010", {item["code"] for item in section_results["3"]["errors"]})
         self.assertIn("VAL108", {item["code"] for item in section_results["3"]["errors"]})
 
+    def test_collect_validation_findings_warns_on_weak_retrieval_trace(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(
+            quality_score=Decimal("0.9000"),
+            content={
+                "results": [
+                    {
+                        "evidence_id": "ev_011",
+                        "source_doc_id": "doc_11",
+                        "source_title": "历史方案D",
+                        "type": "section",
+                    }
+                ]
+            },
+        )
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "6",
+                        "title": "系统配置",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section"],
+                        "asset_required": False,
+                        "needs_human_review": False,
+                        "children": [],
+                    }
+                ],
+            }
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="6",
+                title="系统配置",
+                content_md="系统采用标准化控制架构，配置联锁、监测与保护回路。",
+                citation_refs=[
+                    {
+                        "evidence_id": "ev_011",
+                        "source_doc_id": "doc_11",
+                        "source_title": "历史方案D",
+                        "type": "section",
+                    }
+                ],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={
+                    "generation_details": {
+                        "effective_path": "extractive_reuse_llm_finalize",
+                        "retrieval_mode": "section_pack",
+                        "selected_blocks": [
+                            {
+                                "retrieval_score_breakdown": {
+                                    "final": 0.41,
+                                    "semantic": 0.33,
+                                    "hybrid_rrf": 0.09,
+                                    "rerank": 0.39,
+                                }
+                            }
+                        ],
+                    }
+                },
+            )
+        ]
+
+        errors, warnings, section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+        )
+
+        self.assertNotIn("VAL109", {item["code"] for item in errors})
+        self.assertIn("VAL109", {item["code"] for item in warnings})
+        self.assertIn("VAL109", {item["code"] for item in section_results["6"]["warnings"]})
+        warning = next(item for item in warnings if item["code"] == "VAL109")
+        self.assertEqual(warning["details"]["retrieval_mode"], "section_pack")
+        self.assertEqual(warning["details"]["trace_source"], "blocks")
+        self.assertEqual(warning["details"]["average_final_score"], 0.41)
+        self.assertIn("low_final_score", warning["details"]["weak_reasons"])
+
+    def test_collect_validation_findings_accepts_legacy_online_hybrid_breakdown_keys(self) -> None:
+        requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
+        evidence_bundle = SimpleNamespace(quality_score=Decimal("0.9000"), content={"results": []})
+        outline = SimpleNamespace(
+            outline_json={
+                "title": "测试方案",
+                "sections": [
+                    {
+                        "section_id": "7",
+                        "title": "控制接口",
+                        "mandatory": True,
+                        "expected_evidence_types": ["section"],
+                        "asset_required": False,
+                        "needs_human_review": False,
+                        "children": [],
+                    }
+                ],
+            }
+        )
+        section_drafts = [
+            SimpleNamespace(
+                section_id="7",
+                title="控制接口",
+                content_md="系统支持 DI/DO、AI/AO 及 DCS 联锁接口。",
+                citation_refs=[],
+                assumptions=[],
+                global_param_snapshot={},
+                validator_result={
+                    "generation_details": {
+                        "effective_path": "extractive_reuse_llm_finalize",
+                        "retrieval_mode": "section_pack",
+                        "selected_blocks": [
+                            {
+                                "retrieval_score_breakdown": {
+                                    "hybrid": 0.73,
+                                    "dense": 0.69,
+                                    "hybrid_rrf": 0.66,
+                                    "rerank": 0.71,
+                                }
+                            }
+                        ],
+                    }
+                },
+            )
+        ]
+
+        errors, warnings, _section_results = collect_validation_findings(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+            outline=outline,
+            section_drafts=section_drafts,
+        )
+
+        self.assertNotIn("VAL109", {item["code"] for item in warnings})
+        self.assertNotIn("VAL109", {item["code"] for item in errors})
+
     def test_collect_validation_findings_skips_table_confirmation_when_table_is_already_materialized(self) -> None:
         requirement_card = SimpleNamespace(content={"key_parameters": {}}, blocking_items=[])
         evidence_bundle = SimpleNamespace(quality_score=Decimal("0.9000"), content={"results": []})
@@ -764,6 +901,12 @@ class ValidationHelperTests(unittest.TestCase):
                     "section_id": "2",
                     "section_title": "硬件配置清单",
                     "message": "复用相似度过高",
+                },
+                {
+                    "code": "VAL109",
+                    "section_id": "4",
+                    "section_title": "系统配置",
+                    "message": "历史复用检索信号偏弱",
                 }
             ],
             outline=outline,
@@ -776,6 +919,7 @@ class ValidationHelperTests(unittest.TestCase):
         blocking_by_code = {item["payload"]["code"]: item["blocking_level"] for item in blueprints}
         self.assertEqual(blocking_by_code["VAL108"], "P0")
         self.assertEqual(blocking_by_code["VAL105"], "P1")
+        self.assertEqual(blocking_by_code["VAL109"], "P1")
 
     def test_build_review_task_blueprints_can_opt_in_final_review(self) -> None:
         outline = SimpleNamespace(id=uuid4(), outline_json={"title": "测试方案"})

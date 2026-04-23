@@ -6,17 +6,20 @@ import { UploadCloud, File, CheckCircle2, AlertCircle, XCircle, RefreshCw, Loade
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { toast } from 'sonner';
 import api, { getApiErrorMessage } from '@/lib/api';
-import { Document } from '@/lib/types';
+import { Document, HistoryLibraryRefreshStatus } from '@/lib/types';
 import { format } from 'date-fns';
 
 export default function DocumentsPage() {
   const params = useParams();
   const projectId = params.id as string;
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [historyLibraryStatus, setHistoryLibraryStatus] = useState<HistoryLibraryRefreshStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [docType, setDocType] = useState<'rfp' | 'historical_proposal'>('historical_proposal');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchDocuments = useCallback(async () => {
@@ -32,36 +35,88 @@ export default function DocumentsPage() {
     }
   }, [projectId]);
 
+  const fetchHistoryLibraryStatus = useCallback(async () => {
+    try {
+      const res = await api.get('/documents/history-library/status');
+      setHistoryLibraryStatus(res.data);
+    } catch (error) {
+      console.error(error);
+    }
+  }, []);
+
   useEffect(() => {
     if (projectId) {
       void fetchDocuments();
+      void fetchHistoryLibraryStatus();
     }
-  }, [fetchDocuments, projectId]);
+  }, [fetchDocuments, fetchHistoryLibraryStatus, projectId]);
+
+  useEffect(() => {
+    if (!historyLibraryStatus || !['queued', 'running'].includes(historyLibraryStatus.status)) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void fetchHistoryLibraryStatus();
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [fetchHistoryLibraryStatus, historyLibraryStatus]);
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
 
-    const formData = new FormData();
-    formData.append('file', file);
-    // Simple logic: if filename has 'rfp' or '需求' mark as RFP, else historical
-    const docType = file.name.toLowerCase().includes('rfp') ? 'rfp' : 'historical_proposal';
-    formData.append('doc_type', docType);
-    
     setUploading(true);
+    let successCount = 0;
+    let parseInsufficientCount = 0;
+    let lastAccepted: { parse_status?: string; message?: string } | null = null;
     try {
-      await api.post(`/projects/${projectId}/documents/upload`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
-      toast.success('Document uploaded successfully');
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('doc_type', docType);
+        const res = await api.post(`/projects/${projectId}/documents/upload`, formData, {
+          headers: { 'Content-Type': 'multipart/form-data' }
+        });
+        const accepted = res.data || {};
+        lastAccepted = accepted;
+        if (accepted.parse_status === 'parse_insufficient') {
+          parseInsufficientCount += 1;
+        }
+        successCount += 1;
+      }
+      if (files.length === 1 && lastAccepted?.message) {
+        if (lastAccepted.parse_status === 'parse_insufficient') {
+          toast.warning(lastAccepted.message);
+        } else {
+          toast.success(lastAccepted.message);
+        }
+      } else {
+        toast.success(`Imported ${successCount}/${files.length} documents`);
+        if (parseInsufficientCount > 0) {
+          toast.warning(
+            `${parseInsufficientCount} document(s) were saved but excluded from the historical library because the parse quality was insufficient.`
+          );
+        }
+      }
+      if (docType === 'historical_proposal' && successCount > parseInsufficientCount) {
+        toast.info('Historical library refresh, AI Wiki compilation, and visual indexing are running in the background.');
+      }
+      await fetchHistoryLibraryStatus();
       await fetchDocuments();
     } catch (error) {
       console.error(error);
-      toast.error(getApiErrorMessage(error, 'Error uploading document'));
+      toast.error(
+        getApiErrorMessage(
+          error,
+          files.length > 1
+            ? `Imported ${successCount}/${files.length} documents before the error`
+            : 'Error uploading document'
+        )
+      );
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -70,8 +125,14 @@ export default function DocumentsPage() {
 
   const handleReparse = async (docId: string) => {
     try {
-      await api.post(`/documents/${docId}/reparse`);
-      toast.success('Reparse triggered');
+      const res = await api.post(`/documents/${docId}/reparse`);
+      const accepted = res.data || {};
+      if (accepted.parse_status === 'parse_insufficient') {
+        toast.warning(accepted.message || 'Reparse completed, but the parse quality was insufficient.');
+      } else {
+        toast.success(accepted.message || 'Document reparsed successfully');
+      }
+      await fetchHistoryLibraryStatus();
       await fetchDocuments();
     } catch (error) {
       toast.error(getApiErrorMessage(error, 'Error triggering reparse'));
@@ -83,6 +144,7 @@ export default function DocumentsPage() {
     try {
       await api.delete(`/documents/${docId}`);
       toast.success('Document deleted');
+      await fetchHistoryLibraryStatus();
       await fetchDocuments();
     } catch (error) {
       toast.error(getApiErrorMessage(error, 'Error deleting document'));
@@ -95,11 +157,165 @@ export default function DocumentsPage() {
         return <Badge className="bg-green-500 hover:bg-green-600"><CheckCircle2 className="mr-1 w-3 h-3" /> Done</Badge>;
       case 'parsing':
         return <Badge variant="secondary" className="bg-blue-100 text-blue-800"><RefreshCw className="mr-1 w-3 h-3 animate-spin" /> Parsing</Badge>;
+      case 'parse_insufficient':
+        return <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800"><AlertCircle className="mr-1 w-3 h-3" /> Parse Insufficient</Badge>;
       case 'failed':
         return <Badge variant="destructive"><XCircle className="mr-1 w-3 h-3" /> Failed</Badge>;
       default:
         return <Badge variant="outline"><AlertCircle className="mr-1 w-3 h-3" /> {status}</Badge>;
     }
+  };
+
+  const formatStatusTime = (value?: string | null) => {
+    if (!value) return '';
+    return format(new Date(value), 'MMM d, yyyy HH:mm:ss');
+  };
+
+  const formatPipelineLabel = (name: string) => {
+    switch (name) {
+      case 'case_library':
+        return 'Reuse Library + AI Wiki';
+      case 'visual_cache':
+        return 'Visual Index';
+      default:
+        return name;
+    }
+  };
+
+  const readNumberStat = (key: string) => {
+    const value = historyLibraryStatus?.stats?.[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  };
+
+  const formatDurationSeconds = (value?: number | null) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      return null;
+    }
+    if (value >= 60) {
+      const minutes = Math.floor(value / 60);
+      const seconds = value - minutes * 60;
+      return `${minutes}m ${seconds.toFixed(seconds >= 10 ? 0 : 1)}s`;
+    }
+    if (value >= 10) {
+      return `${value.toFixed(1)}s`;
+    }
+    if (value >= 1) {
+      return `${value.toFixed(2)}s`;
+    }
+    return `${Math.round(value * 1000)}ms`;
+  };
+
+  const renderPipelineSummary = () => {
+    if (!historyLibraryStatus?.pipelines) return null;
+    const entries = Object.entries(historyLibraryStatus.pipelines);
+    if (!entries.length) return null;
+    return (
+      <div className="mt-2 flex flex-wrap gap-2">
+        {entries.map(([name, pipeline]) => {
+          const durationLabel = formatDurationSeconds(pipeline.duration_seconds);
+          return (
+            <Badge key={name} variant="outline" className="text-xs font-normal">
+              {formatPipelineLabel(name)}: {pipeline.status}
+              {durationLabel ? ` · ${durationLabel}` : ''}
+            </Badge>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderHistoryLibraryAlert = () => {
+    if (!historyLibraryStatus) return null;
+    const cacheHitCount = readNumberStat('cache_hit_uploaded_documents');
+    const cacheMissCount = readNumberStat('cache_miss_uploaded_documents');
+    const uploadedOutlineCount = readNumberStat('uploaded_outline_documents');
+    const visualCacheEntryCount = readNumberStat('visual_cache_entry_count');
+    const visualQdrantIndexedPoints = readNumberStat('visual_qdrant_indexed_points');
+    const visualQdrantSyncStatus =
+      typeof historyLibraryStatus.stats?.visual_qdrant_sync_status === 'string'
+        ? String(historyLibraryStatus.stats?.visual_qdrant_sync_status)
+        : null;
+
+    if (historyLibraryStatus.status === 'idle' && !historyLibraryStatus.last_success_at) {
+      return null;
+    }
+
+    if (historyLibraryStatus.status === 'failed') {
+      return (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Historical library refresh failed</AlertTitle>
+          <AlertDescription>
+            {historyLibraryStatus.error || 'The latest AI Wiki refresh did not complete successfully.'}
+            {renderPipelineSummary()}
+          </AlertDescription>
+        </Alert>
+      );
+    }
+
+    if (historyLibraryStatus.status === 'partial_failed') {
+      return (
+        <Alert>
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Historical refresh completed with partial failures</AlertTitle>
+          <AlertDescription>
+            {historyLibraryStatus.error || 'One background refresh pipeline failed while another completed successfully.'}
+            {uploadedOutlineCount !== null
+              ? ` Rebuilt ${uploadedOutlineCount} uploaded historical proposals before the failing pipeline stopped.`
+              : ''}
+            {cacheHitCount !== null || cacheMissCount !== null
+              ? ` Projection cache hits ${cacheHitCount ?? 0}, misses ${cacheMissCount ?? 0}.`
+              : ''}
+            {visualQdrantIndexedPoints !== null
+              ? ` Visual ANN index wrote ${visualQdrantIndexedPoints} points${visualQdrantSyncStatus ? ` (${visualQdrantSyncStatus})` : ''}.`
+              : ''}
+            {renderPipelineSummary()}
+          </AlertDescription>
+        </Alert>
+      );
+    }
+
+    if (['queued', 'running'].includes(historyLibraryStatus.status)) {
+      return (
+        <Alert>
+          <RefreshCw className="h-4 w-4 animate-spin" />
+          <AlertTitle>Historical library refresh in progress</AlertTitle>
+          <AlertDescription>
+            {historyLibraryStatus.status === 'queued'
+              ? 'Imported historical proposals are waiting to refresh the reuse library, AI Wiki, and visual index.'
+              : 'Imported historical proposals are refreshing the reuse library, AI Wiki, and visual index.'}
+            {historyLibraryStatus.started_at || historyLibraryStatus.requested_at
+              ? ` Last update: ${formatStatusTime(historyLibraryStatus.started_at || historyLibraryStatus.requested_at)}.`
+              : ''}
+            {historyLibraryStatus.pending ? ' A newer refresh request is already queued.' : ''}
+            {renderPipelineSummary()}
+          </AlertDescription>
+        </Alert>
+      );
+    }
+
+    return (
+      <Alert>
+        <CheckCircle2 className="h-4 w-4" />
+        <AlertTitle>Historical library, AI Wiki, and visual index are up to date</AlertTitle>
+        <AlertDescription>
+          Last completed at {formatStatusTime(historyLibraryStatus.last_success_at || historyLibraryStatus.finished_at)}.
+          {uploadedOutlineCount !== null
+            ? ` Compiled ${uploadedOutlineCount} uploaded historical proposals into the current library snapshot.`
+            : ''}
+          {cacheHitCount !== null || cacheMissCount !== null
+            ? ` Projection cache hits ${cacheHitCount ?? 0}, misses ${cacheMissCount ?? 0}.`
+            : ''}
+          {visualCacheEntryCount !== null
+            ? ` Visual index now contains ${visualCacheEntryCount} cached assets.`
+            : ''}
+          {visualQdrantIndexedPoints !== null
+            ? ` ANN visual collection now contains ${visualQdrantIndexedPoints} indexed points${visualQdrantSyncStatus ? ` (${visualQdrantSyncStatus})` : ''}.`
+            : ''}
+          {renderPipelineSummary()}
+        </AlertDescription>
+      </Alert>
+    );
   };
 
   return (
@@ -108,29 +324,50 @@ export default function DocumentsPage() {
         <div>
           <h2 className="text-2xl font-bold">Documents</h2>
           <p className="text-muted-foreground mt-1">
-            Upload RFP documents and historical technical proposals.
+            Upload RFP documents or batch import historical technical proposals.
           </p>
         </div>
-        <div>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center rounded-md border p-1">
+            <Button
+              variant={docType === 'historical_proposal' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setDocType('historical_proposal')}
+              disabled={uploading}
+            >
+              Historical Library
+            </Button>
+            <Button
+              variant={docType === 'rfp' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setDocType('rfp')}
+              disabled={uploading}
+            >
+              RFP
+            </Button>
+          </div>
           <input 
             type="file" 
             ref={fileInputRef} 
             onChange={handleFileChange} 
             className="hidden" 
+            multiple
             accept=".pdf,.docx,.doc,.txt,.md"
           />
           <Button onClick={handleUploadClick} disabled={uploading}>
             {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
-            {uploading ? 'Uploading...' : 'Upload Document'}
+            {uploading ? 'Uploading...' : docType === 'historical_proposal' ? 'Import Documents' : 'Upload Document'}
           </Button>
         </div>
       </div>
+
+      {renderHistoryLibraryAlert()}
 
       <Card>
         <CardHeader>
           <CardTitle>Project Repository</CardTitle>
           <CardDescription>
-            Documents are automatically parsed into intelligent chunks.
+            Documents are automatically parsed into intelligent chunks. Historical proposals also refresh the reuse library, AI Wiki, and visual index in the background.
           </CardDescription>
         </CardHeader>
         <CardContent>

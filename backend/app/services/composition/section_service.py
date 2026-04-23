@@ -21,7 +21,9 @@ from app.services.agents.executor import ExecutorAgent
 from app.services.agents.state import WorkflowState
 from app.services.composition.outline_service import outline_is_approved
 from app.services.composition.section_quality import SectionQualityGateService
+from app.services.domain.synonyms import expand_domain_terms, extract_domain_terms
 from app.services.evidence_binding import resolve_outline_evidence_bundle
+from app.services.knowledge import KnowledgeWikiContextProvider
 from app.services.retrieval import AssetRetrievalService
 from app.services.retrieval.case_service import CaseLibraryService
 from app.services.validation.service import flatten_outline_sections
@@ -246,7 +248,83 @@ REWRITE_LEAKAGE_TOKENS = (
     "QWEN模型",
 )
 MAIN_CIRCUIT_FOCUS_TOKENS = ("主回路", "主接线", "一次接线", "一次系统", "单线图", "变压器", "旁路", "隔离", "母排", "电缆", "绝缘", "短路", "温升", "谐波")
-MAIN_CIRCUIT_NOISE_TOKENS = ("控制", "监控", "辅助设备", "油站", "冷却器", "励磁柜", "启动时间", "同步过程", "运行方式", "dcs")
+MAIN_CIRCUIT_TOPOLOGY_TOKENS = (
+    "单线图",
+    "single line diagram",
+    "进线",
+    "断路器",
+    "icb",
+    "ocb",
+    "rcb",
+    "输入变压器",
+    "输出变压器",
+    "同步电机",
+    "并网",
+    "工频",
+    "旁路",
+    "同步装置",
+    "synchrotact",
+    "切换",
+    "加速",
+)
+MAIN_CIRCUIT_NOISE_TOKENS = ("控制", "监控", "辅助设备", "油站", "冷却器", "励磁柜", "启动时间", "同步过程", "运行方式", "dcs", "认证", "证书", "测试", "试验")
+MAIN_CIRCUIT_HARD_NOISE_TOKENS = (
+    "fieldbus",
+    "profibus",
+    "modbus",
+    "rs485",
+    "i/o",
+    "digital input",
+    "routine test",
+    "type test",
+    "tests and certificates",
+    "standard and certification",
+    "packing",
+    "transportation",
+    "冷却系统",
+    "润滑",
+    "轴承",
+    "保护功能",
+)
+MAIN_CIRCUIT_LINE_KEEP_TOKENS = (
+    "进线",
+    "断路器",
+    "icb",
+    "ocb",
+    "rcb",
+    "变频变压器",
+    "输入变压器",
+    "输出变压器",
+    "同步装置",
+    "synchrotact",
+    "励磁装置",
+    "切换",
+    "工频运行",
+    "并网",
+    "同步电机",
+    "主回路",
+)
+MAIN_CIRCUIT_LINE_DROP_TOKENS = (
+    "description of start and sychronization",
+    "lci start-up characteristic",
+    "load data",
+    "component technical data",
+    "converter configuration",
+    "converter system overview",
+    "start curve by sfc",
+    "变频启动曲线",
+    "启动曲线",
+    "负载数据",
+    "飞轮力矩",
+    "起动阻力矩",
+    "静阻力矩",
+    "总启动时间",
+    "纯加速时间",
+    "建立磁场",
+    "连续启动3次",
+    "连续启动 3 次",
+    "gd2",
+)
 PROTECTION_FOCUS_TOKENS = ("控制", "监控", "监视", "联锁", "保护", "告警", "报警", "跳闸", "顺控", "故障", "信号接口", "plc", "dcs")
 PROTECTION_NOISE_TOKENS = (
     "主回路",
@@ -282,7 +360,18 @@ VFD_SPEC_NOISE_TOKENS = ("柜体尺寸", "外形尺寸", "控制总图", "油站
 VFD_LCI_ALLOWED_SIGNAL_TOKENS = ("lci", "sfc", "软起", "软启动", "软起动", "变频软起", "同步切换", "工频切换", "启动时间", "启动过程")
 VFD_LCI_SPECIFIC_TOKENS = ("lci", "sfc", "变频软起", "软起动", "软启动", "晶闸管", "换相", "纯加速", "同步切换", "工频切换", "励磁柜")
 MOTOR_INTERFACE_FOCUS_TOKENS = ("同步电机", "励磁", "转子", "定子", "测温", "测振", "轴承", "接口", "绝缘", "整流", "触发", "适配")
-MOTOR_INTERFACE_NOISE_TOKENS = ("柜体结构", "外形尺寸", "开关柜参数", "供货范围", "售后", "培训", "维保")
+MOTOR_INTERFACE_NOISE_TOKENS = (
+    "柜体结构",
+    "外形尺寸",
+    "开关柜参数",
+    "供货范围",
+    "售后",
+    "培训",
+    "维保",
+    "油站",
+    "润滑油",
+    "冷却器",
+)
 SUPPLY_SCOPE_FOCUS_TOKENS = ("供货范围", "供货", "设备清单", "专用工具", "随机资料", "软件", "接口分工", "责任边界", "资料交付")
 SUPPLY_SCOPE_NOISE_TOKENS = ("售后服务", "培训", "维保", "质保", "巡检", "波形", "启动曲线", "控制总图")
 TABLE_PLACEHOLDER_REFERENCE_ONLY_SECTION_TYPES = {
@@ -807,6 +896,11 @@ def _make_generation_metric(
     generation_details: dict[str, Any],
     quality_gate_result: dict[str, Any],
 ) -> dict[str, Any]:
+    knowledge_wiki_prior_summary = (
+        generation_details.get("knowledge_wiki_prior_summary")
+        if isinstance(generation_details.get("knowledge_wiki_prior_summary"), dict)
+        else {}
+    )
     return {
         "section_id": section_id,
         "draft_status": str(draft_status or ""),
@@ -814,6 +908,8 @@ def _make_generation_metric(
         "refinement_status": str(generation_details.get("refinement_status") or "not_applicable"),
         "refinement_error": str(generation_details.get("refinement_error") or "").strip(),
         "quality_gate_status": str(quality_gate_result.get("status") or "skipped"),
+        "knowledge_wiki_prior_hit_block_count": int(knowledge_wiki_prior_summary.get("prior_hit_block_count") or 0),
+        "knowledge_wiki_prior_total_boost": float(knowledge_wiki_prior_summary.get("total_prior_boost") or 0),
     }
 
 
@@ -830,6 +926,9 @@ def _build_generation_summary(metrics: list[dict[str, Any]]) -> dict[str, Any]:
             "quality_gate_statuses": {},
             "fallback_rate": 0.0,
             "refinement_error_count": 0,
+            "knowledge_wiki_prior_sections": 0,
+            "knowledge_wiki_prior_block_count": 0,
+            "knowledge_wiki_prior_total_boost": 0.0,
         }
 
     total = len(metrics)
@@ -838,6 +937,14 @@ def _build_generation_summary(metrics: list[dict[str, Any]]) -> dict[str, Any]:
     quality_gate_statuses = Counter(str(item.get("quality_gate_status") or "skipped") for item in metrics)
     fallback_count = sum(1 for item in metrics if str(item.get("refinement_status") or "").startswith("fallback_"))
     refinement_error_count = sum(1 for item in metrics if str(item.get("refinement_error") or "").strip())
+    knowledge_wiki_prior_sections = sum(
+        1 for item in metrics if int(item.get("knowledge_wiki_prior_hit_block_count") or 0) > 0
+    )
+    knowledge_wiki_prior_block_count = sum(int(item.get("knowledge_wiki_prior_hit_block_count") or 0) for item in metrics)
+    knowledge_wiki_prior_total_boost = round(
+        sum(float(item.get("knowledge_wiki_prior_total_boost") or 0) for item in metrics),
+        4,
+    )
     return {
         "total_sections": total,
         "effective_paths": dict(sorted(effective_paths.items())),
@@ -845,6 +952,9 @@ def _build_generation_summary(metrics: list[dict[str, Any]]) -> dict[str, Any]:
         "quality_gate_statuses": dict(sorted(quality_gate_statuses.items())),
         "fallback_rate": round(fallback_count / max(total, 1), 4),
         "refinement_error_count": refinement_error_count,
+        "knowledge_wiki_prior_sections": knowledge_wiki_prior_sections,
+        "knowledge_wiki_prior_block_count": knowledge_wiki_prior_block_count,
+        "knowledge_wiki_prior_total_boost": knowledge_wiki_prior_total_boost,
     }
 
 
@@ -876,11 +986,13 @@ def _build_asset_retrieval_trace(
     asset_types: list[str] | None,
     skipped_optional_search: bool,
     recommended_assets: list[dict[str, Any]],
+    search_trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "query": str(query or ""),
         "asset_types": list(asset_types or []),
         "skipped_optional_search": bool(skipped_optional_search),
+        "search_trace": dict(search_trace or {}),
         "selected_count": len(recommended_assets),
         "selected_assets": [
             {
@@ -891,6 +1003,17 @@ def _build_asset_retrieval_trace(
                 "document_name": item.get("document_name"),
                 "heading_path": item.get("heading_path"),
                 "score": item.get("score"),
+                "reason": item.get("reason"),
+                "reason_trace": item.get("reason_trace") or [],
+                "score_breakdown": item.get("score_breakdown")
+                or (item.get("metadata") or {}).get("retrieval_score_breakdown")
+                or {},
+                "visual_backend": item.get("score_breakdown", {}).get("visual_backend")
+                if isinstance(item.get("score_breakdown"), dict)
+                else (item.get("metadata") or {}).get("visual_backend"),
+                "visual_source": item.get("score_breakdown", {}).get("visual_source")
+                if isinstance(item.get("score_breakdown"), dict)
+                else (item.get("metadata") or {}).get("visual_source"),
             }
             for item in recommended_assets[:REUSE_TRACE_BLOCK_LIMIT]
         ],
@@ -916,11 +1039,16 @@ def _build_composition_retrieval_trace(
                 "role": "历史方案复用层",
                 "query": reuse_trace.get("query"),
                 "query_intents": reuse_trace.get("query_intents") or {},
+                "knowledge_wiki_terms": reuse_trace.get("knowledge_wiki_terms") or [],
+                "knowledge_wiki_product_cards": reuse_trace.get("knowledge_wiki_product_cards") or [],
+                "knowledge_wiki_module_cards": reuse_trace.get("knowledge_wiki_module_cards") or [],
                 "section_candidates": reuse_trace.get("section_candidates") or [],
                 "scoped_sections": reuse_trace.get("scoped_sections") or [],
                 "retrieval_mode": generation_details.get("retrieval_mode"),
                 "selected_sections": generation_details.get("selected_sections") or [],
                 "selected_blocks": generation_details.get("selected_blocks") or [],
+                "knowledge_wiki_prior_summary": generation_details.get("knowledge_wiki_prior_summary") or {},
+                "selection_reason": generation_details.get("selection_reason") or {},
                 "token_budget": generation_details.get("token_budget") or {},
             },
             "assets": {
@@ -1030,8 +1158,13 @@ def _build_preceding_context_from_existing_drafts(
             section_title=str(section.get("title") or getattr(draft, "title", "") or ""),
             draft_status=str(getattr(draft, "status", "") or ""),
             content_md=str(getattr(draft, "content_md", "") or ""),
-        )
+    )
     return _build_preceding_context(state=state, covered_topics=covered_topics, current_index=current_index)
+
+
+def _merge_prompt_context(*segments: str) -> str:
+    normalized_segments = [str(segment or "").strip() for segment in segments if str(segment or "").strip()]
+    return "\n\n".join(normalized_segments)
 
 
 def should_use_extractive_reuse(*, section: dict[str, Any], reuse_pack: dict[str, Any]) -> bool:
@@ -1059,6 +1192,7 @@ def build_extractive_reuse_section_content(
     section: dict[str, Any],
     reuse_pack: dict[str, Any],
     global_params: dict[str, Any],
+    knowledge_wiki_context: str = "",
 ) -> str:
     title = str(section.get("title") or "未命名章节").strip() or "未命名章节"
     query_terms = _build_reuse_query_terms(section=section, global_params=global_params)
@@ -1070,6 +1204,20 @@ def build_extractive_reuse_section_content(
     )
     candidate_blocks = _order_assembly_blocks(candidate_blocks=candidate_blocks, target_taxonomy=target_taxonomy)
     target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
+    if _is_site_conditions_section(section=section, target_taxonomy=target_taxonomy):
+        return _build_site_conditions_reuse_section_content(
+            title=title,
+            section=section,
+            candidate_blocks=candidate_blocks,
+        )
+    if _is_power_condition_section(section=section, target_taxonomy=target_taxonomy):
+        return _build_power_condition_reuse_section_content(
+            title=title,
+            section=section,
+            candidate_blocks=candidate_blocks,
+            global_params=global_params,
+            knowledge_wiki_context=knowledge_wiki_context,
+        )
     if target_section_type in {"bom_or_supply_list", "supply_scope"}:
         return _build_supply_scope_reuse_section_content(
             section=section,
@@ -1091,7 +1239,11 @@ def build_extractive_reuse_section_content(
         body = _normalize_reuse_block_body(str(block.get("content_md") or ""))
         if not body:
             continue
-        paragraphs = _extract_reuse_paragraphs(body)
+        content_form = str((block.get("metadata") or {}).get("content_form") or "narrative").lower()
+        if target_section_type == "main_circuit_scheme" and content_form not in {"parameter_table", "bom_table"}:
+            paragraphs = _extract_main_circuit_reuse_paragraphs(body)
+        else:
+            paragraphs = _extract_reuse_paragraphs(body)
         ranked_paragraphs = sorted(
             paragraphs,
             key=lambda paragraph: _score_reuse_paragraph(
@@ -1187,20 +1339,367 @@ def _build_supply_scope_reuse_section_content(
     candidate_blocks: list[dict[str, Any]],
     reuse_pack: dict[str, Any],
 ) -> str:
-    lines = [f"## {title}", "", "### 主要设备及供货范围", ""]
+    lines = [
+        f"## {title}",
+        "",
+        f"本章节用于说明{str(section.get('project_name') or '本项目')}中软起动系统相关设备的供货边界、随机资料和接口分工。最终供货内容以双方确认的供货清单、技术协议和合同文件为准。",
+        "",
+        "### 主设备供货清单",
+        "",
+        "结合现有对标资料，当前可按下表理解主设备供货范围：",
+        "",
+    ]
     note = _extract_supply_scope_note(candidate_blocks)
-    if note:
-        lines.extend([note, ""])
-
     primary_table = _select_primary_supply_scope_table(candidate_blocks)
     if primary_table:
-        primary_table = _ensure_supply_scope_required_items(table_md=primary_table, section=section)
+        primary_table = _build_canonical_supply_scope_table(table_md=primary_table, section=section)
         lines.extend([primary_table, ""])
-        if "待技术确认" in primary_table:
-            lines.extend(["注：表中标记为“待技术确认”的型号、制造商或边界信息，需以最终技术协议和供货清单为准。", ""])
+    if note:
+        lines.extend([note, ""])
+    lines.extend(
+        [
+            "如项目范围后续明确包含电机本体、励磁装置或其他成套附件，则应在最终供货清单中单独列项，不在本章节默认扩展。",
+            "",
+            "### 随机资料与随机附件",
+            "",
+            "随设备交付的资料和附件通常包括：",
+            "",
+            "- 装箱清单、合格证明和出厂试验资料；",
+            "- 安装、接线、调试和维护说明文件；",
+            "- 设备外形、布置、接口及端子相关资料；",
+            "- 随机专用工具和首批备品备件清单；",
+            "- 与通信接口、联锁配合和运行维护相关的技术文件。",
+            "",
+            "### 监测元件与软件范围",
+            "",
+            "本项目如涉及装置内部必要的测温、测流、状态检测等监测元件，原则上随主设备成套配置，不再单独拆分列项；如需独立列示，则在最终供货清单或技术文件中明确。",
+            "",
+            "与装置运行相关的软件、参数文件、数据点表、通信接口定义及联锁配合内容，作为主设备技术文件的一部分交付，并在项目确认文件中固定版本边界。",
+            "",
+            "### 供货边界与接口分工",
+            "",
+            "本次装置本体供货范围之外的现场实施内容，通常包括以下部分：",
+            "",
+            "- 设备之间以及设备至现场系统接口的动力电缆和控制电缆；",
+            "- 电缆终端、安装附件及现场敷设材料；",
+            "- 设备基础、支架、桥架、接地及土建安装配合内容；",
+            "- 与既有电机、开关设备、上位控制系统及现场仪表的外部接口实施工作。",
+            "",
+            "因此，本章节既用于说明主设备和随机资料的交付范围，也用于明确现场接口和实施责任边界，避免对供货范围产生歧义。",
+            "",
+            "### 说明事项",
+            "",
+            "1. 表内数量和范围用于当前方案阶段的交付边界表达，最终以确认清单为准。",
+            "2. 未在本表中单独列项但属于设备内部集成功能的检测器件、标准附件和基础软件，按主设备成套供货理解。",
+            "3. 需要在现场实施阶段完成的外部电缆、安装材料和土建配合内容，不视为装置本体供货范围。",
+            "",
+        ]
+    )
 
     content = "\n".join(lines).rstrip() + "\n"
     return ensure_required_asset_placeholders(content_md=content, reuse_pack=reuse_pack)
+
+
+def _build_site_conditions_reuse_section_content(
+    *,
+    title: str,
+    section: dict[str, Any],
+    candidate_blocks: list[dict[str, Any]],
+) -> str:
+    summary = _extract_site_condition_summary(candidate_blocks)
+    project_name = str(section.get("project_name") or "本项目")
+    lines = [
+        f"## {title}",
+        "",
+        f"本章节用于明确{project_name}的环境边界、安装条件、公用工程配套条件及实施接口要求，作为 LCI 软起动系统、配套变压器及相关电气接口设计的统一边界。",
+        "",
+        "### 环境与安装边界",
+        "",
+        "根据现有项目需求和对标资料，本项目安装环境按工业厂房内布置条件执行，主要边界如下：",
+        "",
+        "| 项目 | 设计边界 |",
+        "| --- | --- |",
+        f"| 安装场所 | {summary['install_location']} |",
+        f"| 海拔 | {summary['altitude']} |",
+        f"| 环境温度 | {summary['ambient_temp']} |",
+        f"| 大气环境 | {summary['hazardous_area']} |",
+        f"| 基本要求 | {summary['basic_requirements']} |",
+        "",
+        "上述边界用于约束设备选型、绝缘配合、布置方式及防护等级要求；若现场存在持续凝露、强腐蚀性介质、导电粉尘或高温辐射，应在接口联络文件中同步调整防护与降额边界。",
+        "",
+        "### 公用工程与配套条件",
+        "",
+        "现场配套条件应满足以下要求：",
+        "",
+        "- 安装区域应提供稳定的低压辅助电源和控制电源，并在接口文件中明确来源、电压等级和容量边界；",
+        "- 装置安装区域应具备持续通风散热条件，满足电力电子设备和配套变压器长期运行要求；",
+        "- 桥架、接地干线、电缆通道及端子分界应与既有系统布置保持一致，避免二次改造冲突；",
+        "- 设备室应满足照明、检修通道、吊装空间及日常维护的基本条件。",
+        "",
+        "### 安装与实施接口边界",
+        "",
+        "安装实施阶段应重点落实以下接口条件：",
+        "",
+        "- LCI 软起动装置、配套变压器及相关附件具备独立安装和检修空间；",
+        "- 高压主回路、低压辅助电源、控制信号和接地系统具备清晰的接口分界；",
+        "- 运输通道、门洞尺寸、吊装点位和基础承载条件满足设备就位要求；",
+        "- 电缆进出线方向、桥架衔接和端子分界与既有系统布置协调一致；",
+        "- 与既有高压开关设备、电机回路及土建条件的衔接边界应在联络阶段固化。",
+        "",
+        "### 运输与储存要求",
+        "",
+        "为保证设备在制造、到货和现场就位过程中的完整性，运输与储存阶段应满足以下要求：",
+        "",
+        "- 运输过程中采取防雨、防潮、防冲击和防倾覆措施；",
+        "- 储存区域保持干燥、通风，避免腐蚀性气体和持续凝露影响；",
+        "- 长期存放时对电子元件、绝缘件和接插件进行防潮保护并定期检查；",
+        "- 设备到货后按照包装标识完成开箱检查、分类存放和条件保护。",
+        "",
+        "### 联络阶段需固化的现场条件",
+        "",
+        "| 确认项 | 固化目的 |",
+        "| --- | --- |",
+        "| 设备室净尺寸、门洞尺寸及运输吊装路径 | 固化设备拆包、运输和就位方案 |",
+        "| 柜列布置、检修通道及散热组织方式 | 固化设备布置和长期运行条件 |",
+        "| 桥架走向、进出线方向及端子分界点 | 固化电缆接口与施工界面 |",
+        "| 与既有高压开关设备、电机回路及土建条件的衔接边界 | 固化改造范围和实施责任 |",
+        "| 特殊环境附加防护要求 | 固化防护等级、防腐及降额措施 |",
+        "",
+        "上述条件固化后，可形成最终安装布置、接口分工和实施边界文件。",
+        "",
+    ]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _build_power_condition_reuse_section_content(
+    *,
+    title: str,
+    section: dict[str, Any],
+    candidate_blocks: list[dict[str, Any]],
+    global_params: dict[str, Any],
+    knowledge_wiki_context: str = "",
+) -> str:
+    project_name = str(global_params.get("project_name") or "本项目")
+    voltage_level = _extract_power_condition_voltage(global_params=global_params, candidate_blocks=candidate_blocks)
+    frequency = _extract_power_condition_frequency(candidate_blocks=candidate_blocks)
+    application_object = _infer_power_condition_application(section=section, global_params=global_params)
+    reference_text = _collect_power_condition_reference_text(
+        candidate_blocks=candidate_blocks,
+        knowledge_wiki_context=knowledge_wiki_context,
+    )
+    supply_voltage_range = _extract_power_condition_supply_window(reference_text)
+    frequency_range = _extract_power_condition_frequency_window(reference_text)
+    grounding_mode = _extract_power_condition_grounding(reference_text)
+    short_circuit_boundary = _extract_power_condition_short_circuit(reference_text)
+    voltage_dip_boundary = _extract_power_condition_voltage_dip(reference_text)
+    control_power_boundary = _extract_power_condition_control_power(reference_text)
+    motor_reference_rows = _extract_power_condition_motor_reference_rows(reference_text)
+    lines = [
+        f"## {title}",
+        "",
+        f"本章节用于归纳{project_name}当前已确认的供电边界、负载属性和启动约束，并把已取得的项目输入、对标资料参考值和待最终锁定参数分开表达，作为 LCI 软起动系统选型和控制设计的依据。",
+        "",
+        "### 项目已确认的设计输入",
+        "",
+        "结合项目需求和当前已确认边界，本项目已落实的基础输入如下：",
+        "",
+        "| 项目 | 当前边界 | 来源 |",
+        "| --- | --- | --- |",
+        f"| 应用对象 | {application_object} | 项目需求 |",
+        f"| 系统电压等级 | {voltage_level} | 项目需求 / 全局参数 |",
+        f"| 系统频率 | {frequency} | 项目需求 / 对标资料 |",
+        "| 启动方式 | LCI 变频软起动 | 项目需求 |",
+        "| 运行方式 | 启动完成后切换至工频运行 | 项目需求 |",
+        "| 控制配合对象 | 励磁系统、同步装置及一次开关设备 | 现有系统边界 |",
+        "",
+    ]
+    reference_rows: list[tuple[str, str, str]] = []
+    if supply_voltage_range:
+        reference_rows.append(("电网电压允许范围", supply_voltage_range, "用于校核绝缘配合和变压器匹配"))
+    if frequency_range:
+        reference_rows.append(("频率边界", frequency_range, "用于校核同步切换与控制整定"))
+    if grounding_mode:
+        reference_rows.append(("接地方式", grounding_mode, "用于校核保护与绝缘边界"))
+    if short_circuit_boundary:
+        reference_rows.append(("短路能力", short_circuit_boundary, "用于校核主回路耐受与保护整定"))
+    if voltage_dip_boundary:
+        reference_rows.append(("启动期间电压波动", voltage_dip_boundary, "用于评估母线扰动适应能力"))
+    if control_power_boundary:
+        reference_rows.append(("辅助 / 控制电源", control_power_boundary, "用于落实辅机与控制回路供电条件"))
+    if reference_rows:
+        lines.extend(
+            [
+                "### 对标资料提取的供电与系统参考边界",
+                "",
+                "以下参数来自已导入历史方案资料，可作为当前方案阶段的参考边界，最终项目值以业主确认资料为准：",
+                "",
+                "| 项目 | 参考值 | 用途 |",
+                "| --- | --- | --- |",
+            ]
+        )
+        for label, value, usage in reference_rows:
+            lines.append(f"| {label} | {value} | {usage} |")
+        lines.append("")
+
+    if motor_reference_rows:
+        lines.extend(
+            [
+                "### 对标资料中的电机参数线索",
+                "",
+                "已导入资料中可直接识别的电机参数如下，可用于装置预选型和接口校核：",
+                "",
+                "| 参数项 | 参考值 | 使用方式 |",
+                "| --- | --- | --- |",
+            ]
+        )
+        for label, value, usage in motor_reference_rows:
+            lines.append(f"| {label} | {value} | {usage} |")
+        lines.append("")
+
+    lines.extend(
+        [
+            "### 负载特性与启动约束",
+            "",
+            "高炉鼓风机属于大惯量、连续运行类关键机组，启动过程应重点控制母线冲击、加速平稳性和同步切换可靠性。LCI 软起动系统应满足以下基本约束：",
+            "",
+            "- 启动阶段对 10kV 母线的电压扰动可控，避免对既有系统造成明显冲击；",
+            "- 从静止到接近额定转速的加速过程保持连续转矩输出，兼顾风机和联轴器机械应力控制；",
+            "- 与励磁系统、同期装置及一次开关设备之间的动作边界清晰，确保切换条件明确、反馈完整；",
+            "- 启动完成后可靠切换至工频运行，软起动系统退出启动控制状态。",
+            "",
+            "### 对装置选型的直接约束",
+            "",
+            "- 电网短路容量、接地方式和允许电压波动范围将直接影响整流变压器阻抗匹配、主回路器件耐受能力及保护定值协调；",
+            "- 同步电机额定功率、额定电流、额定转速和等效惯量将直接决定装置容量、热容量和加速曲线整定边界；",
+            "- 允许启动时间、允许启动次数及最低可接受起动转矩将直接影响功率器件热设计和控制限值设置；",
+            "- 与励磁系统、上位控制系统及一次开关设备的接口分工将直接影响联锁逻辑和切换时序设计。",
+            "",
+            "### 需在联络阶段锁定的项目参数",
+            "",
+            "| 参数项 | 当前状态 / 来源 | 用途 |",
+            "| --- | --- | --- |",
+            "| 10kV 母线短路容量及接地方式 | 以业主电气系统资料和现场核实结果为准 | 固化主回路选型、保护定值和绝缘校核边界 |",
+            "| 电机额定功率、额定电流、额定转速及等效惯量 | 以电机铭牌、试验资料和负载曲线为准 | 固化装置容量、加速能力和热容量校核 |",
+            "| 风机静阻转矩、负载转矩曲线及最低可接受起动转矩 | 需结合工艺和机组运行条件确认 | 固化起动转矩储备和加速斜率设置 |",
+            "| 允许启动时间、启动次数及连续再启动要求 | 需由业主运行条件确认 | 固化控制限值、热保护和运行策略 |",
+            "| 励磁系统接口、同步切换判据及断路器动作边界 | 需在联络阶段与现地系统共同确认 | 固化接口信号、动作时序和联锁逻辑 |",
+            "",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _collect_power_condition_reference_text(
+    *,
+    candidate_blocks: list[dict[str, Any]],
+    knowledge_wiki_context: str,
+) -> str:
+    parts: list[str] = []
+    for block in candidate_blocks[:8]:
+        body = _normalize_reuse_block_body(str(block.get("content_md") or ""))
+        if body:
+            parts.append(body)
+    context = str(knowledge_wiki_context or "").strip()
+    if context:
+        parts.append(context)
+    return _normalize_technical_spacing("\n".join(parts))
+
+
+def _extract_first_power_condition_match(reference_text: str, patterns: tuple[str, ...]) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, reference_text, re.IGNORECASE)
+        if match:
+            return _normalize_technical_spacing(str(match.group(1) or "").strip("：: ;；,，"))
+    return ""
+
+
+def _extract_power_condition_supply_window(reference_text: str) -> str:
+    return _extract_first_power_condition_match(
+        reference_text,
+        (
+            r"(?:电压|额定电压|系统电压等级)\s*[:：]?\s*([0-9.]+\s*kV\s*[+±][^,\n;；]{1,18})",
+            r"(?:电压|额定电压|系统电压等级)\s*[:：]?\s*([0-9.]+\s*kV\s*~\s*[0-9.]+\s*kV)",
+            r"(?:电压|额定电压|系统电压等级)[^\n]{0,16}([0-9.]+\s*kV)",
+        ),
+    )
+
+
+def _extract_power_condition_frequency_window(reference_text: str) -> str:
+    return _extract_first_power_condition_match(
+        reference_text,
+        (
+            r"(?:频率|额定频率|系统额定频率)\s*[:：]?\s*([0-9.]+\s*Hz\s*[±+][^,\n;；]{1,18})",
+            r"(?:频率|额定频率|系统额定频率)[^\n]{0,16}([0-9.]+\s*Hz)",
+        ),
+    )
+
+
+def _extract_power_condition_grounding(reference_text: str) -> str:
+    return _extract_first_power_condition_match(
+        reference_text,
+        (r"(?:接地系统|接地方式)\s*[:：]?\s*([^\n|,，;；]{2,32})",),
+    )
+
+
+def _extract_power_condition_short_circuit(reference_text: str) -> str:
+    return _extract_first_power_condition_match(
+        reference_text,
+        (
+            r"(?:短路容量)\s*[:：]?\s*([^\n|]{0,36}(?:MVA|mva)[^\n|]{0,12})",
+            r"(?:短路电流)\s*[:：]?\s*([^\n|]{0,36}(?:kA|ka)[^\n|]{0,12})",
+        ),
+    )
+
+
+def _extract_power_condition_voltage_dip(reference_text: str) -> str:
+    return _extract_first_power_condition_match(
+        reference_text,
+        (
+            r"(?:电压波动)\s*[:：]?\s*([^\n|]{0,40})",
+            r"(?:压降)\s*[:：]?\s*([^\n|]{0,24})",
+        ),
+    )
+
+
+def _extract_power_condition_control_power(reference_text: str) -> str:
+    return _extract_first_power_condition_match(
+        reference_text,
+        (
+            r"(?:二次控制电源|辅助电源)\s*[:：]?\s*([A-Z]*\s*[0-9/]+\s*V[^\n|;；]{0,18})",
+            r"([A-Z]*\s*220V\s*/\s*380V[^\n|;；]{0,18})",
+        ),
+    )
+
+
+def _extract_power_condition_motor_reference_rows(reference_text: str) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    candidates = (
+        ("额定功率", _extract_first_power_condition_match(reference_text, (r"(?:额定功率)\s*[:：]?\s*([0-9./]+\s*(?:kW|MW))",))),
+        ("额定电流", _extract_first_power_condition_match(reference_text, (r"(?:额定电流)\s*[:：]?\s*([0-9.]+\s*A)",))),
+        ("额定转速", _extract_first_power_condition_match(reference_text, (r"(?:额定转速|工作转速)\s*[:：]?\s*([0-9.]+\s*(?:r/min|rpm))",))),
+    )
+    for label, value in candidates:
+        if not value:
+            continue
+        usage = {
+            "额定功率": "用于预估装置容量和主回路电流等级",
+            "额定电流": "用于校核功率单元和变压器电流边界",
+            "额定转速": "用于校核加速区间和切换条件",
+        }[label]
+        rows.append((label, value, usage))
+    return rows
+
+
+def _use_deterministic_reuse_builder(
+    *,
+    section: dict[str, Any],
+    target_taxonomy: dict[str, Any] | None = None,
+) -> bool:
+    taxonomy = target_taxonomy or infer_target_taxonomy(section)
+    return _is_site_conditions_section(section=section, target_taxonomy=taxonomy) or _is_power_condition_section(
+        section=section,
+        target_taxonomy=taxonomy,
+    )
 
 
 def _extract_supply_scope_note(candidate_blocks: list[dict[str, Any]]) -> str:
@@ -1235,10 +1734,190 @@ def _clean_supply_scope_note(text: str) -> str:
         ascii_word_count = len(re.findall(r"[A-Za-z]{2,}", line))
         if cjk_count == 0 and ascii_word_count >= 3:
             continue
+        line = re.sub(r"\bABB\b", "本次供货", line, flags=re.IGNORECASE)
+        line = re.sub(r"本次供货\s*仅提供", "本次供货仅提供", line)
+        line = re.sub(r"供货范围表内的设备，该套变频系统的如下部分不在\s*本次供货\s*的供货范围内", "供货范围表内的设备，以下内容不在本次供货范围内", line)
         line = _normalize_technical_spacing(line)
         if line not in cleaned:
             cleaned.append(line)
     return "\n".join(cleaned[:6]).strip()
+
+
+def _extract_site_condition_summary(candidate_blocks: list[dict[str, Any]]) -> dict[str, str]:
+    combined_text = "\n".join(
+        _normalize_reuse_block_body(str(block.get("content_md") or ""))
+        for block in candidate_blocks[:6]
+        if str(((block.get("metadata") or {}).get("content_form") or "")).lower() in {"narrative", "parameter_table", "interface_table"}
+    )
+    combined_text = _normalize_technical_spacing(combined_text)
+    install_location = "LCI 软起动装置及配套变压器按户内电气室或鼓风机配套站房布置"
+    if any(token in combined_text.casefold() for token in ("outdoor", "户外")):
+        install_location = "LCI 软起动装置及配套设备按户外或半户外条件布置，详细防护等级需进一步确认"
+
+    altitude = "小于 1000 m"
+    altitude_match = re.search(r"(?:海拔|Altitude)[^\n|:：]*([<≤]?\s*\d{3,4}\s*m)", combined_text, re.IGNORECASE)
+    if altitude_match:
+        altitude = altitude_match.group(1).replace("<", "小于 ").replace("≤", "不大于 ").strip()
+
+    ambient_temp = "最高 40°C，最低 -10°C"
+    max_match = re.search(r"(?:最高|Max\.?|MAX\.?)[^\d\-+]*([\-+]?\d{1,3})\s*°?\s*C", combined_text, re.IGNORECASE)
+    min_match = re.search(r"(?:最低|Min\.?|MIN\.?)[^\d\-+]*([\-+]?\d{1,3})\s*°?\s*C", combined_text, re.IGNORECASE)
+    if max_match and min_match:
+        ambient_temp = f"最高 {max_match.group(1)}°C，最低 {min_match.group(1)}°C"
+
+    hazardous_area = "非爆炸危险区域，不按防爆场所设计"
+    if any(token in combined_text.casefold() for token in ("hazardous", "防爆")) and "non hazardous" not in combined_text.casefold():
+        hazardous_area = "危险区域等级需结合现场防爆分区进一步确认"
+
+    return {
+        "install_location": install_location,
+        "altitude": altitude,
+        "ambient_temp": ambient_temp,
+        "hazardous_area": hazardous_area,
+        "basic_requirements": "满足通风散热、检修通道、吊装运输及安全接地条件",
+    }
+
+
+def _extract_power_condition_voltage(*, global_params: dict[str, Any], candidate_blocks: list[dict[str, Any]]) -> str:
+    voltage_level = str(global_params.get("voltage_level") or "").strip()
+    if voltage_level:
+        return voltage_level
+    combined_text = "\n".join(
+        _normalize_reuse_block_body(str(block.get("content_md") or ""))
+        for block in candidate_blocks[:6]
+    )
+    match = re.search(r"(\d+(?:\.\d+)?)\s*kV", combined_text, re.IGNORECASE)
+    if match:
+        return f"{match.group(1)}kV"
+    return "10kV"
+
+
+def _extract_power_condition_frequency(*, candidate_blocks: list[dict[str, Any]]) -> str:
+    combined_text = "\n".join(
+        _normalize_reuse_block_body(str(block.get("content_md") or ""))
+        for block in candidate_blocks[:6]
+    )
+    match = re.search(r"(\d+(?:\.\d+)?)\s*Hz", combined_text, re.IGNORECASE)
+    if match:
+        return f"{match.group(1)}Hz"
+    return "50Hz"
+
+
+def _infer_power_condition_application(*, section: dict[str, Any], global_params: dict[str, Any]) -> str:
+    signal_text = " ".join(
+        [
+            str(section.get("title") or ""),
+            str(section.get("purpose") or ""),
+            str(global_params.get("business_objective") or ""),
+            str(global_params.get("project_name") or ""),
+        ]
+    ).casefold()
+    if "鼓风机" in signal_text and "同步电机" in signal_text:
+        return "高炉鼓风机高压同步电机"
+    if "同步电机" in signal_text:
+        return "高压同步电机"
+    return "高压电机软起动对象"
+
+
+def _build_canonical_supply_scope_table(*, table_md: str, section: dict[str, Any]) -> str:
+    rows = _extract_canonical_supply_scope_rows(table_md=table_md)
+    required_items = _infer_supply_scope_required_items(section)
+    existing_text = "\n".join(row["device_name"] for row in rows).casefold()
+    for item in required_items:
+        if _supply_scope_item_present(item=item, existing_text=existing_text):
+            continue
+        rows.append(_default_supply_scope_row(item))
+        existing_text += f"\n{item}".casefold()
+    if not rows:
+        rows = [_default_supply_scope_row(item) for item in ("LCI 软起动装置", "输入变压器", "输出变压器", "专用工具", "备品备件")]
+    lines = [
+        "| 序号 | 设备名称 | 主要内容 | 数量 | 单位 | 说明 |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for index, row in enumerate(rows, start=1):
+        lines.append(
+            f"| {index} | {row['device_name']} | {row['description']} | {row['quantity']} | {row['unit']} | {row['remark']} |"
+        )
+    return "\n".join(lines)
+
+
+def _extract_canonical_supply_scope_rows(*, table_md: str) -> list[dict[str, str]]:
+    table_lines = [line.rstrip() for line in str(table_md or "").splitlines() if "|" in line]
+    if len(table_lines) < 3:
+        return []
+    data_lines = table_lines[2:]
+    rows: list[dict[str, str]] = []
+    seen_items: set[str] = set()
+    for line in data_lines:
+        cells = _split_markdown_table_row(line)
+        if len(cells) < 2:
+            continue
+        joined = " ".join(cells)
+        canonical = _match_supply_scope_item(joined)
+        if canonical is None:
+            continue
+        item, description, default_unit, remark = canonical
+        if item in seen_items:
+            continue
+        quantity = _extract_supply_scope_quantity(cells)
+        unit = _extract_supply_scope_unit(cells, default=default_unit)
+        rows.append(
+            {
+                "device_name": item,
+                "description": description,
+                "quantity": quantity,
+                "unit": unit,
+                "remark": remark,
+            }
+        )
+        seen_items.add(item)
+    return rows
+
+
+def _match_supply_scope_item(text: str) -> tuple[str, str, str, str] | None:
+    lowered = str(text or "").casefold()
+    if any(token in lowered for token in ("lci", "sfc", "converter", "软起", "变频器")):
+        return ("LCI 软起动装置", "含主功率单元、控制单元及启动回路成套功能", "套", "用于同步电机受控启动和切换")
+    if any(token in lowered for token in ("input transformer", "输入变压器", "进线变压器")):
+        return ("输入变压器", "与 LCI 启动回路配套", "台", "额定参数以最终确认资料为准")
+    if any(token in lowered for token in ("output transformer", "输出变压器", "出线变压器")):
+        return ("输出变压器", "与电机侧启动回路配套", "台", "与主回路方案同步定型")
+    if any(token in lowered for token in ("special tools", "特殊工具", "专用工具")):
+        return ("专用工具", "晶闸管更换工具等随机专用工具", "套", "随主设备成套供货")
+    if any(token in lowered for token in ("spare", "备品备件", "备件")):
+        return ("备品备件", "首批随机备品备件", "批", "具体明细在最终备件清单中明确")
+    return None
+
+
+def _default_supply_scope_row(item: str) -> dict[str, str]:
+    matched = _match_supply_scope_item(item) or (item, "待技术确认", _supply_scope_unit_for_item(item), "待技术确认")
+    return {
+        "device_name": matched[0],
+        "description": matched[1],
+        "quantity": "1",
+        "unit": matched[2],
+        "remark": matched[3],
+    }
+
+
+def _extract_supply_scope_quantity(cells: list[str]) -> str:
+    for cell in cells:
+        match = re.search(r"\b(\d+(?:\.\d+)?)\b", cell)
+        if match:
+            return match.group(1)
+    return "1"
+
+
+def _extract_supply_scope_unit(cells: list[str], *, default: str) -> str:
+    for cell in cells:
+        lowered = cell.casefold()
+        if any(token in lowered for token in ("台", "pcs")):
+            return "台"
+        if any(token in lowered for token in ("套", "set")):
+            return "套"
+        if any(token in lowered for token in ("批", "batch")):
+            return "批"
+    return default
 
 
 def _select_primary_supply_scope_table(candidate_blocks: list[dict[str, Any]]) -> str:
@@ -1689,6 +2368,47 @@ def _extract_reuse_paragraphs(text: str) -> list[str]:
     return paragraphs
 
 
+def _extract_main_circuit_reuse_paragraphs(text: str) -> list[str]:
+    paragraphs = _extract_reuse_paragraphs(text)
+    refined: list[str] = []
+    seen: set[str] = set()
+    for paragraph in paragraphs:
+        segments = [paragraph]
+        if len(paragraph) >= 160 and ("\n" in paragraph or "•" in paragraph):
+            segments = [
+                item.strip()
+                for item in re.split(r"\n+|\t*•\t*|\s+•\s+", paragraph)
+                if item.strip()
+            ]
+        kept_lines: list[str] = []
+        for raw_segment in segments:
+            line = _normalize_technical_spacing(raw_segment.strip("• \t"))
+            if not line:
+                continue
+            lowered = line.casefold()
+            if any(token in lowered for token in MAIN_CIRCUIT_LINE_DROP_TOKENS):
+                continue
+            cjk_count = len(re.findall(r"[\u4e00-\u9fff]", line))
+            ascii_word_count = len(re.findall(r"[A-Za-z]{2,}", line))
+            if cjk_count == 0 and ascii_word_count >= 3:
+                continue
+            topology_hits = _focus_token_hit_count(
+                heading_text="",
+                content_text=line,
+                focus_tokens=MAIN_CIRCUIT_TOPOLOGY_TOKENS,
+            )
+            if topology_hits <= 0 and not any(token.casefold() in lowered for token in MAIN_CIRCUIT_LINE_KEEP_TOKENS):
+                continue
+            normalized = re.sub(r"\s+", " ", line).strip()
+            if normalized in seen:
+                continue
+            kept_lines.append(line)
+            seen.add(normalized)
+        if kept_lines:
+            refined.append("\n".join(kept_lines))
+    return refined
+
+
 def _filter_reuse_blocks_for_assembly(
     *,
     reusable_blocks: list[dict[str, Any]],
@@ -1733,11 +2453,29 @@ def _filter_reuse_blocks_for_assembly(
                 heading_text=heading_text,
                 content_text=content_text,
             )
+            topology_hits = _focus_token_hit_count(
+                heading_text=heading_text,
+                content_text=content_text,
+                focus_tokens=MAIN_CIRCUIT_TOPOLOGY_TOKENS,
+            )
+            hard_noise_hits = _focus_token_hit_count(
+                heading_text=heading_text,
+                content_text=content_text,
+                focus_tokens=MAIN_CIRCUIT_HARD_NOISE_TOKENS,
+            )
             if content_form == "figure":
                 continue
-            if section_type in {"protection_interlock", "control_logic", "communication_interface"} and not focus_match:
+            if heading_looks_like_document_title(heading_text) and topology_hits < 3:
                 continue
-            if noise_match and not focus_match:
+            if section_type in {"protection_interlock", "control_logic", "communication_interface"} and topology_hits < 2:
+                continue
+            if section_type in {"vfd_spec", "transformer_spec", "motor_spec", "supply_scope"} and topology_hits < 2:
+                continue
+            if hard_noise_hits >= 2 and topology_hits < 3:
+                continue
+            if content_form == "narrative" and noise_match and topology_hits < 2:
+                continue
+            if content_form == "narrative" and not focus_match and topology_hits < 2:
                 continue
         elif target_section_type == "design_basis":
             focus_match, noise_match = _design_basis_focus_flags(
@@ -1990,12 +2728,42 @@ def _is_parameter_summary_section(
     section = section or {}
     taxonomy = target_taxonomy or infer_target_taxonomy(section)
     text = _section_asset_signal_text(section).casefold()
+    if _is_power_condition_section(section=section, target_taxonomy=taxonomy):
+        return True
     explicit_parameter_title = any(token in text for token in ("技术参数", "性能指标", "技术数据", "额定容量"))
     if explicit_parameter_title:
         return True
     if bool(section.get("parameter_sensitive")) and any(token in text for token in ("参数", "性能", "容量", "电压", "电流")):
         return True
     return str(taxonomy.get("section_type") or "unknown").lower() in {"motor_spec", "vfd_spec", "starter_spec", "transformer_spec"} and bool(section.get("parameter_sensitive"))
+
+
+def _is_site_conditions_section(
+    *,
+    section: dict[str, Any] | None,
+    target_taxonomy: dict[str, Any] | None = None,
+) -> bool:
+    section = section or {}
+    taxonomy = target_taxonomy or infer_target_taxonomy(section)
+    text = _section_asset_signal_text(section).casefold()
+    section_type = str(taxonomy.get("section_type") or "unknown").lower()
+    if section_type == "site_conditions":
+        return True
+    return any(token in text for token in ("工厂设计环境", "环境与边界条件", "安装条件", "运输储存", "现场边界"))
+
+
+def _is_power_condition_section(
+    *,
+    section: dict[str, Any] | None,
+    target_taxonomy: dict[str, Any] | None = None,
+) -> bool:
+    section = section or {}
+    taxonomy = target_taxonomy or infer_target_taxonomy(section)
+    text = _section_asset_signal_text(section).casefold()
+    section_type = str(taxonomy.get("section_type") or "unknown").lower()
+    if any(token in text for token in ("供电系统条件", "负载参数", "电网条件", "短路容量", "启动约束")):
+        return True
+    return section_type in {"motor_spec", "starter_spec"} and any(token in text for token in ("供电", "负载", "同步电机", "启动"))
 
 
 def _normalize_invalid_asset_placeholders(
@@ -2517,7 +3285,12 @@ def build_section_asset_query(*, section: dict[str, Any], global_params: dict[st
     return " ".join(part for part in parts if part).strip()
 
 
-def build_section_reuse_query_intents(*, section: dict[str, Any], global_params: dict[str, Any]) -> dict[str, Any]:
+def build_section_reuse_query_intents(
+    *,
+    section: dict[str, Any],
+    global_params: dict[str, Any],
+    extra_terms: list[str] | None = None,
+) -> dict[str, Any]:
     title_parts = [
         str(section.get("title") or "").strip(),
         " ".join(str(item) for item in (section.get("keywords") or []) if item),
@@ -2526,6 +3299,7 @@ def build_section_reuse_query_intents(*, section: dict[str, Any], global_params:
         str(section.get("purpose") or "").strip(),
         " ".join(str(item) for item in (section.get("expected_evidence_types") or []) if item),
         str(section.get("section_class") or "").strip(),
+        " ".join(str(item).strip() for item in (extra_terms or []) if str(item).strip()),
     ]
     context_parts = [
         str(global_params.get("project_name") or "").strip(),
@@ -2542,11 +3316,21 @@ def build_section_reuse_query_intents(*, section: dict[str, Any], global_params:
         "title_terms": _tokenize_reuse_text(title_text),
         "detail_terms": _tokenize_reuse_text(detail_text),
         "context_terms": _tokenize_reuse_text(context_text),
+        "knowledge_terms": _tokenize_reuse_text(" ".join(str(item).strip() for item in (extra_terms or []) if str(item).strip())),
     }
 
 
-def build_section_reuse_query(*, section: dict[str, Any], global_params: dict[str, Any]) -> str:
-    intents = build_section_reuse_query_intents(section=section, global_params=global_params)
+def build_section_reuse_query(
+    *,
+    section: dict[str, Any],
+    global_params: dict[str, Any],
+    extra_terms: list[str] | None = None,
+) -> str:
+    intents = build_section_reuse_query_intents(
+        section=section,
+        global_params=global_params,
+        extra_terms=extra_terms,
+    )
     parts = [
         intents["title_text"],
         intents["detail_text"],
@@ -2594,10 +3378,16 @@ def _select_evidence_items(
     global_params: dict[str, Any] | None = None,
     limit: int,
     preferred_evidence_ids: set[str] | None = None,
+    extra_query_terms: list[str] | None = None,
+    knowledge_retrieval_bundle: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     expected_types = {str(item) for item in (section.get("expected_evidence_types") or [])}
     results = (evidence_bundle.content or {}).get("results") or []
-    query_terms = _build_reuse_query_terms(section=section, global_params=global_params or {})
+    query_terms = _build_reuse_query_terms(
+        section=section,
+        global_params=global_params or {},
+        extra_terms=extra_query_terms,
+    )
     target_taxonomy = infer_target_taxonomy(section)
 
     candidates: list[tuple[float, dict[str, Any]]] = []
@@ -2605,13 +3395,14 @@ def _select_evidence_items(
     for result in results:
         if not isinstance(result, dict):
             continue
-        score, _ = _score_reuse_candidate(
+        score, _, _ = _score_reuse_candidate(
             section=section,
             item=result,
             raw_content=str(result.get("raw_content") or result.get("summary") or ""),
             heading_path=result.get("heading_path") or [],
             query_terms=query_terms,
             target_taxonomy=target_taxonomy,
+            knowledge_retrieval_bundle=knowledge_retrieval_bundle,
         )
         result_type = str(result.get("type") or "")
         target_pool = candidates if (not expected_types or result_type in expected_types) else fallback_candidates
@@ -2778,12 +3569,16 @@ def build_reusable_blocks(
     global_params: dict[str, Any],
     case_library_matches: list[dict[str, Any]] | None = None,
     limit: int = DEFAULT_REUSE_LIMIT,
+    extra_query_terms: list[str] | None = None,
+    knowledge_retrieval_bundle: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     blocks = _build_evidence_reusable_blocks(
         section=section,
         evidence_bundle=evidence_bundle,
         global_params=global_params,
         limit=limit,
+        extra_query_terms=extra_query_terms,
+        knowledge_retrieval_bundle=knowledge_retrieval_bundle,
     )
     blocks.extend(
         _build_case_library_reusable_blocks(
@@ -2791,6 +3586,8 @@ def build_reusable_blocks(
             global_params=global_params,
             case_library_matches=case_library_matches or [],
             limit=limit,
+            extra_query_terms=extra_query_terms,
+            knowledge_retrieval_bundle=knowledge_retrieval_bundle,
         )
     )
     deduped = _dedupe_reusable_blocks(blocks)
@@ -2810,6 +3607,8 @@ def _build_evidence_reusable_blocks(
     evidence_bundle: EvidenceBundle,
     global_params: dict[str, Any],
     limit: int,
+    extra_query_terms: list[str] | None = None,
+    knowledge_retrieval_bundle: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     target_taxonomy = infer_target_taxonomy(section)
     target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
@@ -2818,9 +3617,15 @@ def _build_evidence_reusable_blocks(
         evidence_bundle=evidence_bundle,
         global_params=global_params,
         limit=max(limit * REUSE_CANDIDATE_MULTIPLIER, REUSE_MIN_CANDIDATES),
+        extra_query_terms=extra_query_terms,
+        knowledge_retrieval_bundle=knowledge_retrieval_bundle,
     )
     blocks: list[dict[str, Any]] = []
-    query_terms = _build_reuse_query_terms(section=section, global_params=global_params)
+    query_terms = _build_reuse_query_terms(
+        section=section,
+        global_params=global_params,
+        extra_terms=extra_query_terms,
+    )
     for item in selected:
         raw_content = _strip_internal_reuse_summary_lines(str(item.get("raw_content") or item.get("summary") or ""))
         if not raw_content:
@@ -2839,13 +3644,14 @@ def _build_evidence_reusable_blocks(
             content_text=raw_content,
         ):
             continue
-        selection_score, selection_reasons = _score_reuse_candidate(
+        selection_score, selection_reasons, selection_score_breakdown = _score_reuse_candidate(
             section=section,
             item=item,
             raw_content=raw_content,
             heading_path=heading_path,
             query_terms=query_terms,
             target_taxonomy=target_taxonomy,
+            knowledge_retrieval_bundle=knowledge_retrieval_bundle,
         )
         blocks.append(
             {
@@ -2859,8 +3665,15 @@ def _build_evidence_reusable_blocks(
                 "content_md": raw_content,
                 "block_type": block_type,
                 "reusability_score": float(item.get("reusability_score") or item.get("relevance_score") or 0),
+                "retrieval_reason": str(item.get("retrieval_reason") or item.get("reason") or item.get("recommended_use") or ""),
+                "retrieval_reason_trace": (
+                    [str(reason) for reason in (item.get("reason_trace") or []) if str(reason or "").strip()]
+                    or ([str(item.get("recommended_use") or "")] if str(item.get("recommended_use") or "").strip() else [])
+                ),
+                "retrieval_score_breakdown": _extract_retrieval_score_breakdown(item),
                 "selection_score": selection_score,
                 "selection_reasons": selection_reasons,
+                "selection_score_breakdown": selection_score_breakdown,
                 "customer_specificity_score": 0.8 if metadata.get("front_matter") else 0.25,
                 "asset_dependency_level": "high" if metadata.get("needs_asset_lookup") else "low",
                 "must_replace_fields": _collect_replace_fields(raw_content=raw_content, global_params=global_params),
@@ -2885,10 +3698,16 @@ def _build_case_library_reusable_blocks(
     global_params: dict[str, Any],
     case_library_matches: list[dict[str, Any]],
     limit: int,
+    extra_query_terms: list[str] | None = None,
+    knowledge_retrieval_bundle: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     target_taxonomy = infer_target_taxonomy(section)
     target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
-    query_terms = _build_reuse_query_terms(section=section, global_params=global_params)
+    query_terms = _build_reuse_query_terms(
+        section=section,
+        global_params=global_params,
+        extra_terms=extra_query_terms,
+    )
     blocks: list[dict[str, Any]] = []
     for item in case_library_matches[: max(limit * REUSE_CANDIDATE_MULTIPLIER, REUSE_MIN_CANDIDATES)]:
         raw_content = _strip_internal_reuse_summary_lines(str(item.get("content") or ""))
@@ -2921,13 +3740,14 @@ def _build_case_library_reusable_blocks(
             "equipment_type": metadata["equipment_type"],
             "content_form": metadata["content_form"],
         }
-        selection_score, selection_reasons = _score_reuse_candidate(
+        selection_score, selection_reasons, selection_score_breakdown = _score_reuse_candidate(
             section=section,
             item=score_input,
             raw_content=raw_content,
             heading_path=heading_path,
             query_terms=query_terms,
             target_taxonomy=target_taxonomy,
+            knowledge_retrieval_bundle=knowledge_retrieval_bundle,
         )
         blocks.append(
             {
@@ -2944,8 +3764,12 @@ def _build_case_library_reusable_blocks(
                 "content_md": raw_content,
                 "block_type": str(item.get("chunk_type") or "section").lower(),
                 "reusability_score": float(item.get("score") or 0),
+                "retrieval_reason": str(item.get("reason") or ""),
+                "retrieval_reason_trace": [str(reason) for reason in (item.get("reason_trace") or []) if str(reason or "").strip()],
+                "retrieval_score_breakdown": _extract_retrieval_score_breakdown(item),
                 "selection_score": selection_score,
                 "selection_reasons": selection_reasons,
+                "selection_score_breakdown": selection_score_breakdown,
                 "customer_specificity_score": 0.8 if metadata.get("front_matter") else 0.25,
                 "asset_dependency_level": "high" if metadata.get("needs_asset_lookup") else "low",
                 "must_replace_fields": _collect_replace_fields(raw_content=raw_content, global_params=global_params),
@@ -3297,14 +4121,24 @@ def _find_asset_insertion_index(*, lines: list[str], heading_index: int) -> int:
     return len(lines)
 
 
-def _build_reuse_query_terms(*, section: dict[str, Any], global_params: dict[str, Any]) -> list[str]:
-    intents = build_section_reuse_query_intents(section=section, global_params=global_params)
+def _build_reuse_query_terms(
+    *,
+    section: dict[str, Any],
+    global_params: dict[str, Any],
+    extra_terms: list[str] | None = None,
+) -> list[str]:
+    intents = build_section_reuse_query_intents(
+        section=section,
+        global_params=global_params,
+        extra_terms=extra_terms,
+    )
     tokens: list[str] = []
     weighted_parts = [
         intents["title_text"],
         intents["title_text"],
         intents["detail_text"],
         intents["context_text"],
+        " ".join(str(item).strip() for item in (extra_terms or []) if str(item).strip()),
     ]
     for part in weighted_parts:
         for token in _tokenize_reuse_text(part):
@@ -3319,11 +4153,17 @@ def _build_reuse_query_terms(*, section: dict[str, Any], global_params: dict[str
 
 def _tokenize_reuse_text(text: str) -> list[str]:
     tokens: list[str] = []
+    raw_text = str(text or "")
     for match in REUSE_TOKEN_PATTERN.findall(str(text or "")):
         token = match.strip().lower()
-        if len(token) < 2 or token in REUSE_STOPWORDS:
+        for expanded in expand_domain_terms([token]):
+            if len(expanded) < 2 or expanded in REUSE_STOPWORDS or expanded in tokens:
+                continue
+            tokens.append(expanded)
+    for term in extract_domain_terms(raw_text):
+        if len(term) < 2 or term in REUSE_STOPWORDS or term in tokens:
             continue
-        tokens.append(token)
+        tokens.append(term)
     return tokens
 
 
@@ -3335,7 +4175,8 @@ def _score_reuse_candidate(
     heading_path: list[Any],
     query_terms: list[str],
     target_taxonomy: dict[str, Any] | None = None,
-) -> tuple[float, list[str]]:
+    knowledge_retrieval_bundle: dict[str, Any] | None = None,
+) -> tuple[float, list[str], dict[str, float]]:
     base_score = float(item.get("reusability_score") or item.get("relevance_score") or 0)
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     result_type = str(item.get("type") or item.get("source_chunk_type") or "").lower()
@@ -3461,8 +4302,189 @@ def _score_reuse_candidate(
         score += heading_adjustment
         reasons.extend(heading_reasons)
 
+    knowledge_prior_score, knowledge_prior_reasons, knowledge_prior_breakdown = _score_knowledge_wiki_retrieval_priors(
+        knowledge_retrieval_bundle=knowledge_retrieval_bundle,
+        heading_text=heading_text,
+        raw_content=raw_content,
+        heading_terms=heading_terms,
+        content_terms=content_terms,
+        section_type=section_type,
+        equipment_type=equipment_type,
+        query_target_section_type=target_section_type if target_taxonomy else "",
+        query_target_equipment_type=target_equipment_type if target_taxonomy else "",
+    )
+    score += knowledge_prior_score
+    reasons.extend(knowledge_prior_reasons)
+
     normalized_score = round(min(max(score, 0.0), 1.2), 4)
-    return normalized_score, reasons
+    score_breakdown = {
+        "base_score": round(base_score, 4),
+        "knowledge_wiki_prior_total": round(knowledge_prior_score, 4),
+        **knowledge_prior_breakdown,
+        "final_score": normalized_score,
+    }
+    return normalized_score, reasons, score_breakdown
+
+
+def _score_knowledge_wiki_retrieval_priors(
+    *,
+    knowledge_retrieval_bundle: dict[str, Any] | None,
+    heading_text: str,
+    raw_content: str,
+    heading_terms: set[str],
+    content_terms: set[str],
+    section_type: str,
+    equipment_type: str,
+    query_target_section_type: str,
+    query_target_equipment_type: str,
+) -> tuple[float, list[str], dict[str, float]]:
+    if not isinstance(knowledge_retrieval_bundle, dict):
+        return 0.0, [], {}
+
+    candidate_terms = set(heading_terms) | set(content_terms)
+    if not candidate_terms:
+        return 0.0, [], {}
+    if not _knowledge_prior_candidate_is_structurally_relevant(
+        query_target_section_type=query_target_section_type,
+        query_target_equipment_type=query_target_equipment_type,
+        candidate_section_type=section_type,
+        candidate_equipment_type=equipment_type,
+    ):
+        return 0.0, [], {}
+
+    score = 0.0
+    reasons: list[str] = []
+    breakdown: dict[str, float] = {}
+    product_cards = [
+        item
+        for item in (knowledge_retrieval_bundle.get("product_cards") or [])
+        if isinstance(item, dict)
+    ]
+    module_cards = [
+        item
+        for item in (knowledge_retrieval_bundle.get("module_cards") or [])
+        if isinstance(item, dict)
+    ]
+
+    if _candidate_matches_knowledge_card(
+        candidate_text=f"{heading_text}\n{raw_content}",
+        candidate_terms=candidate_terms,
+        cards=product_cards,
+        text_fields=("title", "aliases", "representative_titles", "representative_headings"),
+    ):
+        score += 0.03
+        reasons.append("knowledge_wiki_product_match")
+        breakdown["knowledge_wiki_product_match"] = 0.03
+    if _candidate_matches_knowledge_card(
+        candidate_text=f"{heading_text}\n{raw_content}",
+        candidate_terms=candidate_terms,
+        cards=module_cards,
+        text_fields=("title", "aliases", "top_headings"),
+    ):
+        score += 0.04
+        reasons.append("knowledge_wiki_module_match")
+        breakdown["knowledge_wiki_module_match"] = 0.04
+    if _knowledge_cards_match_section_type(cards=product_cards, section_type=section_type):
+        score += 0.03
+        reasons.append("knowledge_wiki_product_section_prior")
+        breakdown["knowledge_wiki_product_section_prior"] = 0.03
+    if _knowledge_cards_match_equipment_type(cards=product_cards, equipment_type=equipment_type):
+        score += 0.03
+        reasons.append("knowledge_wiki_product_equipment_prior")
+        breakdown["knowledge_wiki_product_equipment_prior"] = 0.03
+
+    return score, reasons, breakdown
+
+
+def _candidate_matches_knowledge_card(
+    *,
+    candidate_text: str,
+    candidate_terms: set[str],
+    cards: list[dict[str, Any]],
+    text_fields: tuple[str, ...],
+) -> bool:
+    normalized_candidate_text = _normalize_knowledge_card_match_text(candidate_text)
+    for card in cards:
+        values: list[str] = []
+        for field in text_fields:
+            raw_value = card.get(field)
+            if isinstance(raw_value, list):
+                values.extend(str(item).strip() for item in raw_value if str(item).strip())
+            else:
+                text = str(raw_value or "").strip()
+                if text:
+                    values.append(text)
+        for value in values:
+            normalized_value = _normalize_knowledge_card_match_text(value)
+            if normalized_value and normalized_value in normalized_candidate_text:
+                return True
+        card_terms = {
+            token
+            for token in _tokenize_reuse_text(" ".join(values))
+            if token
+        }
+        if card_terms & candidate_terms:
+            return True
+    return False
+
+
+def _knowledge_prior_candidate_is_structurally_relevant(
+    *,
+    query_target_section_type: str,
+    query_target_equipment_type: str,
+    candidate_section_type: str,
+    candidate_equipment_type: str,
+) -> bool:
+    normalized_query_section_type = str(query_target_section_type or "").strip().lower()
+    normalized_query_equipment_type = str(query_target_equipment_type or "").strip().lower()
+    normalized_candidate_section_type = str(candidate_section_type or "").strip().lower()
+    normalized_candidate_equipment_type = str(candidate_equipment_type or "").strip().lower()
+
+    section_type_guard = normalized_query_section_type not in {"", "unknown", "overall_solution"}
+    equipment_type_guard = normalized_query_equipment_type not in {"", "unknown", "generic"}
+
+    if not section_type_guard and not equipment_type_guard:
+        return True
+    if section_type_guard and (
+        normalized_candidate_section_type == normalized_query_section_type
+        or normalized_candidate_section_type in related_section_types(normalized_query_section_type)
+    ):
+        return True
+    if equipment_type_guard and normalized_candidate_equipment_type == normalized_query_equipment_type:
+        return True
+    return False
+
+
+def _normalize_knowledge_card_match_text(text: str) -> str:
+    normalized = str(text or "").casefold()
+    normalized = re.sub(r"[()（）【】\[\]《》·:：,，/\\\-\s]+", "", normalized)
+    return normalized.strip()
+
+
+def _knowledge_cards_match_section_type(*, cards: list[dict[str, Any]], section_type: str) -> bool:
+    normalized_section_type = str(section_type or "").strip().lower()
+    if not normalized_section_type or normalized_section_type == "unknown":
+        return False
+    for card in cards:
+        for item in (card.get("top_section_types") or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("section_type") or "").strip().lower() == normalized_section_type:
+                return True
+    return False
+
+
+def _knowledge_cards_match_equipment_type(*, cards: list[dict[str, Any]], equipment_type: str) -> bool:
+    normalized_equipment_type = str(equipment_type or "").strip().lower()
+    if not normalized_equipment_type or normalized_equipment_type == "generic":
+        return False
+    for card in cards:
+        for item in (card.get("top_equipment_types") or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("equipment_type") or "").strip().lower() == normalized_equipment_type:
+                return True
+    return False
 
 
 def _looks_customer_specific(content: str) -> bool:
@@ -3535,6 +4557,13 @@ def _select_section_scope_candidates(section_candidates: list[dict[str, Any]], *
 
 
 def _serialize_section_candidate(section_candidate: dict[str, Any]) -> dict[str, Any]:
+    score_breakdown = section_candidate.get("score_breakdown") if isinstance(section_candidate.get("score_breakdown"), dict) else {}
+    normalized_breakdown: dict[str, float] = {}
+    for key, value in score_breakdown.items():
+        try:
+            normalized_breakdown[str(key)] = round(float(value), 4)
+        except (TypeError, ValueError):
+            continue
     return {
         "sample_id": str(section_candidate.get("sample_id") or ""),
         "file_name": str(section_candidate.get("file_name") or ""),
@@ -3544,6 +4573,8 @@ def _serialize_section_candidate(section_candidate: dict[str, Any]) -> dict[str,
         "level": int(section_candidate.get("level") or 0),
         "score": float(section_candidate.get("score") or 0),
         "reason": str(section_candidate.get("reason") or ""),
+        "reason_trace": [str(item) for item in (section_candidate.get("reason_trace") or []) if str(item or "").strip()],
+        "score_breakdown": normalized_breakdown,
     }
 
 
@@ -3603,9 +4634,77 @@ def _build_selected_block_trace(blocks: list[dict[str, Any]], *, limit: int = RE
                 "heading_path": heading_path,
                 "selection_score": float(block.get("selection_score") or 0),
                 "selection_reasons": list(block.get("selection_reasons") or []),
+                "retrieval_reason": str(block.get("retrieval_reason") or ""),
+                "retrieval_reason_trace": [str(item) for item in (block.get("retrieval_reason_trace") or []) if str(item).strip()],
+                "retrieval_score_breakdown": _extract_retrieval_score_breakdown(block),
+                "selection_score_breakdown": _extract_selection_score_breakdown(block),
             }
         )
     return trace
+
+
+def _extract_retrieval_score_breakdown(block: dict[str, Any]) -> dict[str, float]:
+    breakdown = (
+        block.get("retrieval_score_breakdown")
+        if isinstance(block.get("retrieval_score_breakdown"), dict)
+        else block.get("score_breakdown")
+        if isinstance(block.get("score_breakdown"), dict)
+        else (
+            (block.get("metadata") or {}).get("hybrid_score_breakdown")
+            if isinstance(block.get("metadata"), dict) and isinstance((block.get("metadata") or {}).get("hybrid_score_breakdown"), dict)
+            else {}
+        )
+    )
+    normalized: dict[str, float] = {}
+    for key, value in breakdown.items():
+        try:
+            normalized[str(key)] = round(float(value), 4)
+        except (TypeError, ValueError):
+            continue
+    return normalized
+
+
+def _extract_selection_score_breakdown(block: dict[str, Any]) -> dict[str, float]:
+    breakdown = block.get("selection_score_breakdown") if isinstance(block.get("selection_score_breakdown"), dict) else {}
+    normalized: dict[str, float] = {}
+    for key, value in breakdown.items():
+        try:
+            normalized[key] = round(float(value), 4)
+        except (TypeError, ValueError):
+            continue
+    return normalized
+
+
+def _build_knowledge_wiki_prior_summary(blocks: list[dict[str, Any]]) -> dict[str, Any]:
+    reason_hits: Counter[str] = Counter()
+    prior_hit_block_count = 0
+    total_prior_boost = 0.0
+    max_prior_boost = 0.0
+    for block in blocks:
+        breakdown = _extract_selection_score_breakdown(block)
+        prior_total = float(breakdown.get("knowledge_wiki_prior_total") or 0)
+        if prior_total <= 0:
+            continue
+        prior_hit_block_count += 1
+        total_prior_boost += prior_total
+        max_prior_boost = max(max_prior_boost, prior_total)
+        for key in (
+            "knowledge_wiki_product_match",
+            "knowledge_wiki_module_match",
+            "knowledge_wiki_product_section_prior",
+            "knowledge_wiki_product_equipment_prior",
+        ):
+            if float(breakdown.get(key) or 0) > 0:
+                reason_hits[key] += 1
+    selected_block_count = len(blocks)
+    return {
+        "selected_block_count": selected_block_count,
+        "prior_hit_block_count": prior_hit_block_count,
+        "prior_hit_ratio": round(prior_hit_block_count / max(selected_block_count, 1), 4) if selected_block_count else 0.0,
+        "total_prior_boost": round(total_prior_boost, 4),
+        "max_prior_boost": round(max_prior_boost, 4),
+        "reason_hits": dict(sorted(reason_hits.items())),
+    }
 
 
 def _match_blocks_to_selected_section(
@@ -3635,6 +4734,73 @@ def _match_blocks_to_selected_section(
     return matched
 
 
+def _build_reuse_selection_reason(
+    *,
+    section: dict[str, Any],
+    retrieval_mode: str,
+    top_section: dict[str, Any] | None,
+    runner_up: dict[str, Any] | None,
+    reusable_blocks: list[dict[str, Any]],
+    full_section_blocks: list[dict[str, Any]],
+    full_section_budget: dict[str, Any],
+) -> dict[str, Any]:
+    top_score = float((top_section or {}).get("score") or 0)
+    runner_up_score = float((runner_up or {}).get("score") or 0)
+    lead_score = top_score - runner_up_score
+    reasons: list[str] = []
+    generation_mode = str(section.get("generation_mode") or "baseline")
+
+    if generation_mode != "reuse_first":
+        reasons.append("generation_mode_not_reuse_first")
+    if not reusable_blocks:
+        reasons.append("no_reusable_blocks")
+    if top_section:
+        reasons.append(f"top_section_score={top_score:.4f}")
+        reasons.append(f"top_section_id={str(top_section.get('section_id') or '').strip() or 'unknown'}")
+    else:
+        reasons.append("no_section_candidate")
+    if runner_up:
+        reasons.append(f"runner_up_score={runner_up_score:.4f}")
+        reasons.append(f"lead_score={lead_score:.4f}")
+    elif top_section:
+        reasons.append("single_section_candidate")
+    if full_section_blocks:
+        reasons.append(f"full_section_block_count={len(full_section_blocks)}")
+    elif generation_mode == "reuse_first" and reusable_blocks:
+        reasons.append("no_top_section_block_alignment")
+    if full_section_budget:
+        reasons.append(f"full_section_within_budget={bool(full_section_budget.get('within_budget'))}")
+
+    if retrieval_mode == "baseline_fallback":
+        reasons.append("selected_baseline_fallback")
+    elif retrieval_mode == "full_section":
+        reasons.append("selected_full_section")
+    elif retrieval_mode == "section_pack":
+        if not top_section:
+            reasons.append("section_pack_due_to_missing_top_section")
+        elif top_score < FULL_SECTION_MIN_SCORE:
+            reasons.append("section_pack_due_to_low_top_section_score")
+        elif lead_score < FULL_SECTION_MIN_LEAD:
+            reasons.append("section_pack_due_to_low_section_lead")
+        elif not full_section_blocks:
+            reasons.append("section_pack_due_to_missing_aligned_blocks")
+        elif not bool(full_section_budget.get("within_budget")):
+            reasons.append("section_pack_due_to_token_budget")
+        else:
+            reasons.append("selected_section_pack")
+
+    return {
+        "mode": retrieval_mode,
+        "top_section_id": str((top_section or {}).get("section_id") or "").strip(),
+        "top_section_score": round(top_score, 4),
+        "runner_up_score": round(runner_up_score, 4),
+        "lead_score": round(lead_score, 4),
+        "full_section_block_count": len(full_section_blocks),
+        "full_section_within_budget": bool(full_section_budget.get("within_budget")),
+        "reasons": reasons,
+    }
+
+
 def resolve_reuse_generation_strategy(
     *,
     section: dict[str, Any],
@@ -3661,6 +4827,7 @@ def resolve_reuse_generation_strategy(
             "prompt_blocks": prompt_blocks,
             "selected_sections": selected_sections,
             "selected_blocks": _build_selected_block_trace(prompt_blocks),
+            "knowledge_wiki_prior_summary": _build_knowledge_wiki_prior_summary(prompt_blocks),
             "token_budget": _estimate_material_tokens(blocks=prompt_blocks, assets=recommended_assets),
         }
 
@@ -3699,12 +4866,23 @@ def resolve_reuse_generation_strategy(
         prompt_blocks = reusable_blocks[:DEFAULT_REUSE_LIMIT]
         retrieval_mode = "section_pack"
         token_budget = _estimate_material_tokens(blocks=prompt_blocks, assets=recommended_assets)
+    selection_reason = _build_reuse_selection_reason(
+        section=section,
+        retrieval_mode=retrieval_mode,
+        top_section=top_section,
+        runner_up=runner_up,
+        reusable_blocks=reusable_blocks,
+        full_section_blocks=full_section_blocks,
+        full_section_budget=full_section_budget,
+    )
     return {
         "retrieval_mode": retrieval_mode,
         "prompt_blocks": prompt_blocks,
         "selected_sections": selected_sections,
         "selected_blocks": _build_selected_block_trace(prompt_blocks),
+        "knowledge_wiki_prior_summary": _build_knowledge_wiki_prior_summary(prompt_blocks),
         "token_budget": token_budget,
+        "selection_reason": selection_reason,
     }
 
 
@@ -3716,11 +4894,16 @@ class SectionDraftService:
         asset_retriever: AssetRetrievalService | None = None,
         case_library: CaseLibraryService | None = None,
         quality_gate: SectionQualityGateService | None = None,
+        knowledge_wiki: KnowledgeWikiContextProvider | None = None,
     ) -> None:
         self.executor = executor or ExecutorAgent()
         self._asset_retriever = asset_retriever
+        self.knowledge_wiki = knowledge_wiki or KnowledgeWikiContextProvider()
         self.case_library = case_library or CaseLibraryService()
-        self.quality_gate = quality_gate or SectionQualityGateService(executor=self.executor)
+        self.quality_gate = quality_gate or SectionQualityGateService(
+            executor=self.executor,
+            knowledge_wiki=self.knowledge_wiki,
+        )
 
     @property
     def asset_retriever(self) -> AssetRetrievalService:
@@ -3780,6 +4963,11 @@ class SectionDraftService:
 
         for index, section in enumerate(sections):
             generation_mode = str(section.get("generation_mode") or "baseline")
+            knowledge_retrieval_bundle = self._build_knowledge_wiki_retrieval_bundle(
+                section=section,
+                global_params=global_params,
+            )
+            knowledge_wiki_terms = list(knowledge_retrieval_bundle.get("query_expansion_terms") or [])
             preceding_context = _build_preceding_context(
                 state=inter_section_state,
                 covered_topics=covered_topics,
@@ -3801,12 +4989,16 @@ class SectionDraftService:
                 evidence_bundle=evidence_bundle,
                 global_params=global_params,
                 case_library_matches=case_library_result.get("matches") or [],
+                extra_query_terms=knowledge_wiki_terms,
+                knowledge_retrieval_bundle=knowledge_retrieval_bundle,
             )
             reusable_blocks = self._expand_reusable_blocks_from_neighbors(
                 section=section,
                 reusable_blocks=reusable_blocks,
                 global_params=global_params,
                 limit=DEFAULT_REUSE_LIMIT,
+                extra_query_terms=knowledge_wiki_terms,
+                knowledge_retrieval_bundle=knowledge_retrieval_bundle,
             )
             recommended_assets, asset_trace = await self._search_recommended_assets(
                 session=session,
@@ -3979,6 +5171,11 @@ class SectionDraftService:
         normalized_preferred_citation_ids = _normalize_preferred_citation_ids(preferred_citation_ids)
         global_params = build_section_global_params(requirement_card.content)
         outline_title = (outline.outline_json or {}).get("title", "技术方案")
+        knowledge_retrieval_bundle = self._build_knowledge_wiki_retrieval_bundle(
+            section=section,
+            global_params=global_params,
+        )
+        knowledge_wiki_terms = list(knowledge_retrieval_bundle.get("query_expansion_terms") or [])
         existing_drafts = await self._load_section_drafts(
             session=session,
             project_id=project_id,
@@ -4012,6 +5209,8 @@ class SectionDraftService:
             evidence_bundle=evidence_bundle,
             global_params=global_params,
             case_library_matches=case_library_result.get("matches") or [],
+            extra_query_terms=knowledge_wiki_terms,
+            knowledge_retrieval_bundle=knowledge_retrieval_bundle,
         )
         reusable_blocks = prioritize_reusable_blocks_for_citations(
             reusable_blocks,
@@ -4022,6 +5221,8 @@ class SectionDraftService:
             reusable_blocks=reusable_blocks,
             global_params=global_params,
             limit=DEFAULT_REUSE_LIMIT,
+            extra_query_terms=knowledge_wiki_terms,
+            knowledge_retrieval_bundle=knowledge_retrieval_bundle,
         )
         reusable_blocks = prioritize_reusable_blocks_for_citations(
             reusable_blocks,
@@ -4219,6 +5420,7 @@ class SectionDraftService:
             asset_types=asset_types,
             skipped_optional_search=False,
             recommended_assets=assets,
+            search_trace=response.search_trace.model_dump(mode="json") if response.search_trace is not None else None,
         )
 
     def _retrieve_case_library_matches(
@@ -4242,8 +5444,21 @@ class SectionDraftService:
         }
         if not sample_ids:
             return {"matches": [], "trace": {"query": "", "query_intents": {}, "section_candidates": [], "scoped_sections": []}}
-        query = build_section_reuse_query(section=section, global_params=global_params)
-        query_intents = build_section_reuse_query_intents(section=section, global_params=global_params)
+        knowledge_retrieval_bundle = self._build_knowledge_wiki_retrieval_bundle(
+            section=section,
+            global_params=global_params,
+        )
+        knowledge_wiki_terms = list(knowledge_retrieval_bundle.get("query_expansion_terms") or [])
+        query = build_section_reuse_query(
+            section=section,
+            global_params=global_params,
+            extra_terms=knowledge_wiki_terms,
+        )
+        query_intents = build_section_reuse_query_intents(
+            section=section,
+            global_params=global_params,
+            extra_terms=knowledge_wiki_terms,
+        )
         section_candidates = self.case_library.retrieve_sections(
             query=query,
             section_title=str(section.get("title") or ""),
@@ -4289,6 +5504,17 @@ class SectionDraftService:
             "trace": {
                 "query": query,
                 "query_intents": query_intents,
+                "knowledge_wiki_terms": knowledge_wiki_terms,
+                "knowledge_wiki_product_cards": [
+                    str(item.get("title") or item.get("product_family") or "").strip()
+                    for item in (knowledge_retrieval_bundle.get("product_cards") or [])
+                    if isinstance(item, dict) and str(item.get("title") or item.get("product_family") or "").strip()
+                ],
+                "knowledge_wiki_module_cards": [
+                    str(item.get("title") or item.get("module_key") or "").strip()
+                    for item in (knowledge_retrieval_bundle.get("module_cards") or [])
+                    if isinstance(item, dict) and str(item.get("title") or item.get("module_key") or "").strip()
+                ],
                 "section_candidates": [
                     _serialize_section_candidate(item)
                     for item in section_candidates[:REUSE_TRACE_SECTION_LIMIT]
@@ -4307,6 +5533,8 @@ class SectionDraftService:
         reusable_blocks: list[dict[str, Any]],
         global_params: dict[str, Any],
         limit: int,
+        extra_query_terms: list[str] | None = None,
+        knowledge_retrieval_bundle: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if not reusable_blocks:
             return []
@@ -4335,6 +5563,8 @@ class SectionDraftService:
                 global_params=global_params,
                 case_library_matches=neighbor_matches,
                 limit=max(limit, len(neighbor_matches)),
+                extra_query_terms=extra_query_terms,
+                knowledge_retrieval_bundle=knowledge_retrieval_bundle,
             )
         )
         deduped = _dedupe_reusable_blocks(expanded)
@@ -4347,6 +5577,49 @@ class SectionDraftService:
         )
         expanded_limit = max(limit, len(reusable_blocks) + len(neighbor_matches))
         return deduped[:expanded_limit]
+
+    def _build_knowledge_wiki_retrieval_bundle(
+        self,
+        *,
+        section: dict[str, Any],
+        global_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        collect_bundle = getattr(self.knowledge_wiki, "collect_retrieval_prior_bundle", None)
+        if callable(collect_bundle):
+            try:
+                result = collect_bundle(section=section, global_params=global_params)
+            except Exception:  # noqa: BLE001
+                result = {}
+            if isinstance(result, dict):
+                return {
+                    "query_expansion_terms": list(result.get("query_expansion_terms") or []),
+                    "glossary_entries": list(result.get("glossary_entries") or []),
+                    "product_cards": list(result.get("product_cards") or []),
+                    "module_cards": list(result.get("module_cards") or []),
+                }
+        return {
+            "query_expansion_terms": self.knowledge_wiki.collect_query_expansion_terms(
+                section=section,
+                global_params=global_params,
+            ),
+            "glossary_entries": [],
+            "product_cards": [],
+            "module_cards": [],
+        }
+
+    def _build_knowledge_wiki_query_terms(
+        self,
+        *,
+        section: dict[str, Any],
+        global_params: dict[str, Any],
+    ) -> list[str]:
+        return list(
+            self._build_knowledge_wiki_retrieval_bundle(
+                section=section,
+                global_params=global_params,
+            ).get("query_expansion_terms")
+            or []
+        )
 
     async def _generate_section_content(
         self,
@@ -4366,7 +5639,11 @@ class SectionDraftService:
         effective_citations = citations
         assembly_blocks = reusable_blocks
         effective_reuse_pack = reuse_pack
-        normalized_preceding_context = str(preceding_context or "").strip()
+        knowledge_wiki_context = self.knowledge_wiki.build_section_context(
+            section=section,
+            global_params=global_params,
+        )
+        normalized_preceding_context = _merge_prompt_context(preceding_context, knowledge_wiki_context)
         reuse_strategy = resolve_reuse_generation_strategy(
             section=section,
             reuse_pack=reuse_pack,
@@ -4376,6 +5653,8 @@ class SectionDraftService:
         retrieval_mode = str(reuse_strategy.get("retrieval_mode") or "baseline_fallback")
         selected_sections = list(reuse_strategy.get("selected_sections") or [])
         selected_blocks = list(reuse_strategy.get("selected_blocks") or [])
+        knowledge_wiki_prior_summary = dict(reuse_strategy.get("knowledge_wiki_prior_summary") or {})
+        selection_reason = dict(reuse_strategy.get("selection_reason") or {})
         token_budget = dict(reuse_strategy.get("token_budget") or {})
         if generation_mode == "reuse_first" and reusable_blocks:
             retrieved_context = ""
@@ -4389,6 +5668,7 @@ class SectionDraftService:
                     section=section,
                 )
             selected_blocks = _build_selected_block_trace(assembly_blocks)
+            knowledge_wiki_prior_summary = _build_knowledge_wiki_prior_summary(assembly_blocks)
             token_budget = _estimate_material_tokens(blocks=assembly_blocks, assets=recommended_assets)
             effective_citations = build_reuse_citations(assembly_blocks)
             effective_reuse_pack = dict(reuse_pack)
@@ -4404,8 +5684,11 @@ class SectionDraftService:
                     "retrieval_mode": retrieval_mode,
                     "selected_sections": selected_sections,
                     "selected_blocks": selected_blocks,
+                    "knowledge_wiki_prior_summary": knowledge_wiki_prior_summary,
+                    "selection_reason": selection_reason,
                     "token_budget": token_budget,
                     "preceding_context_chars": len(normalized_preceding_context),
+                    "knowledge_wiki_context_chars": len(knowledge_wiki_context),
                 },
             )
 
@@ -4413,12 +5696,22 @@ class SectionDraftService:
         if should_use_extractive_reuse(section=section, reuse_pack=effective_reuse_pack):
             assembly_reuse_pack = dict(effective_reuse_pack)
             assembly_reuse_pack["reusable_blocks"] = assembly_blocks
+            target_taxonomy = infer_target_taxonomy(section)
+            deterministic_reuse_builder = _use_deterministic_reuse_builder(
+                section=section,
+                target_taxonomy=target_taxonomy,
+            )
             assembled_content = build_extractive_reuse_section_content(
                 section=section,
                 reuse_pack=assembly_reuse_pack,
                 global_params=global_params,
+                knowledge_wiki_context=knowledge_wiki_context,
             )
-            assembled_content = ensure_required_asset_placeholders(content_md=assembled_content, reuse_pack=assembly_reuse_pack)
+            if not deterministic_reuse_builder:
+                assembled_content = ensure_required_asset_placeholders(
+                    content_md=assembled_content,
+                    reuse_pack=assembly_reuse_pack,
+                )
             assembled_content = polish_extractive_reuse_section_content(
                 section=section,
                 content_md=assembled_content,
@@ -4427,50 +5720,60 @@ class SectionDraftService:
             refinement_status = "fallback_assembled"
             refinement_fallback_reason: str | None = "finalize_missing"
             refinement_error: str | None = None
-            try:
-                llm_reuse_pack = dict(assembly_reuse_pack)
-                llm_reuse_pack["reusable_blocks"] = assembly_blocks[:3]
-                response = await self.executor.write_section(
-                    task_id=f"{task_id}-finalize",
-                    section=section_outline_to_executor_payload(section),
-                    global_params=global_params,
-                    retrieved_context="",
-                    outline_title=outline_title,
-                    recommended_assets=recommended_assets,
-                    reuse_pack=llm_reuse_pack,
-                    assembled_draft=assembled_content,
-                    preceding_context=normalized_preceding_context,
-                )
-                finalized_content = response.content
-                finalized_content = sanitize_generated_section_content(
-                    content_md=finalized_content,
-                    section_title=section_title,
-                )
-                finalized_content = _normalize_invalid_asset_placeholders(
-                    content_md=finalized_content,
-                    recommended_assets=recommended_assets,
-                )
-                _, refinement_status, refinement_fallback_reason = resolve_reuse_refinement_content(
+            if deterministic_reuse_builder:
+                content_md = assembled_content
+                refinement_status = "deterministic_assembled"
+                refinement_fallback_reason = "deterministic_section_builder"
+                effective_path = "extractive_reuse_deterministic"
+            else:
+                try:
+                    llm_reuse_pack = dict(assembly_reuse_pack)
+                    llm_reuse_pack["reusable_blocks"] = assembly_blocks[:3]
+                    response = await self.executor.write_section(
+                        task_id=f"{task_id}-finalize",
+                        section=section_outline_to_executor_payload(section),
+                        global_params=global_params,
+                        retrieved_context="",
+                        outline_title=outline_title,
+                        recommended_assets=recommended_assets,
+                        reuse_pack=llm_reuse_pack,
+                        assembled_draft=assembled_content,
+                        preceding_context=normalized_preceding_context,
+                    )
+                    finalized_content = response.content
+                    finalized_content = sanitize_generated_section_content(
+                        content_md=finalized_content,
+                        section_title=section_title,
+                    )
+                    finalized_content = _normalize_invalid_asset_placeholders(
+                        content_md=finalized_content,
+                        recommended_assets=recommended_assets,
+                    )
+                    _, refinement_status, refinement_fallback_reason = resolve_reuse_refinement_content(
+                        assembled_content=assembled_content,
+                        rewritten_content=finalized_content,
+                        section_title=section_title,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    refinement_error = str(exc)
+                    refinement_fallback_reason = "finalize_error"
+                content_md, refinement_status, selection_fallback_reason = resolve_reuse_refinement_content(
                     assembled_content=assembled_content,
                     rewritten_content=finalized_content,
                     section_title=section_title,
                 )
-            except Exception as exc:  # noqa: BLE001
-                refinement_error = str(exc)
-                refinement_fallback_reason = "finalize_error"
-            content_md, refinement_status, selection_fallback_reason = resolve_reuse_refinement_content(
-                assembled_content=assembled_content,
-                rewritten_content=finalized_content,
-                section_title=section_title,
-            )
-            refinement_fallback_reason = refinement_fallback_reason or selection_fallback_reason
-            content_md = _normalize_invalid_asset_placeholders(
-                content_md=content_md,
-                recommended_assets=recommended_assets,
-            )
-            content_md = ensure_required_asset_placeholders(content_md=content_md, reuse_pack=assembly_reuse_pack)
-            content_md = polish_extractive_reuse_section_content(section=section, content_md=content_md)
-            effective_path = "extractive_reuse_llm_finalize" if finalized_content is not None and refinement_error is None else "extractive_reuse"
+                refinement_fallback_reason = refinement_fallback_reason or selection_fallback_reason
+                content_md = _normalize_invalid_asset_placeholders(
+                    content_md=content_md,
+                    recommended_assets=recommended_assets,
+                )
+                content_md = ensure_required_asset_placeholders(content_md=content_md, reuse_pack=assembly_reuse_pack)
+                content_md = polish_extractive_reuse_section_content(section=section, content_md=content_md)
+                effective_path = (
+                    "extractive_reuse_llm_finalize"
+                    if finalized_content is not None and refinement_error is None
+                    else "extractive_reuse"
+                )
             return (
                 content_md,
                 "generated",
@@ -4480,12 +5783,15 @@ class SectionDraftService:
                     "retrieval_mode": retrieval_mode,
                     "selected_sections": selected_sections,
                     "selected_blocks": selected_blocks,
+                    "knowledge_wiki_prior_summary": knowledge_wiki_prior_summary,
+                    "selection_reason": selection_reason,
                     "token_budget": token_budget,
                     "refinement_status": refinement_status,
                     "refinement_fallback_reason": refinement_fallback_reason,
                     "refinement_error": refinement_error,
                     "assembled_block_count": len(assembly_blocks),
                     "preceding_context_chars": len(normalized_preceding_context),
+                    "knowledge_wiki_context_chars": len(knowledge_wiki_context),
                 },
             )
 
@@ -4525,9 +5831,12 @@ class SectionDraftService:
                 "retrieval_mode": retrieval_mode,
                 "selected_sections": selected_sections,
                 "selected_blocks": selected_blocks,
+                "knowledge_wiki_prior_summary": knowledge_wiki_prior_summary,
+                "selection_reason": selection_reason,
                 "token_budget": token_budget,
                 "write_error": write_error,
                 "preceding_context_chars": len(normalized_preceding_context),
+                "knowledge_wiki_context_chars": len(knowledge_wiki_context),
             },
         )
 

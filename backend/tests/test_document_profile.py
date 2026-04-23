@@ -14,6 +14,8 @@ class DocumentProfileTests(unittest.TestCase):
 
         self.assertEqual(profile.name, "text_digital")
         self.assertEqual(profile.ingestion_recommendation, "main_vector_ready")
+        self.assertEqual(profile.parse_gate_status, "ready")
+        self.assertIsNone(profile.parse_gate_reason)
         self.assertEqual(profile.high_risk_content_flags, ())
 
     def test_mixed_engineering_profile_for_pdf_with_figures_tables_and_formula(self) -> None:
@@ -72,6 +74,7 @@ class DocumentProfileTests(unittest.TestCase):
 
         self.assertEqual(profile.name, "scanned_pdf")
         self.assertEqual(profile.ingestion_recommendation, "asset_only_review")
+        self.assertEqual(profile.parse_gate_status, "ready")
         self.assertIn("scanned_content_likely", profile.high_risk_content_flags)
 
     def test_legacy_doc_profile_requires_conversion(self) -> None:
@@ -83,7 +86,19 @@ class DocumentProfileTests(unittest.TestCase):
 
         self.assertEqual(profile.name, "legacy_word_doc")
         self.assertEqual(profile.ingestion_recommendation, "conversion_required")
+        self.assertEqual(profile.parse_gate_status, "insufficient")
+        self.assertEqual(profile.parse_gate_reason, "legacy_doc_requires_conversion")
         self.assertIn("legacy_doc_requires_conversion", profile.high_risk_content_flags)
+
+    def test_pdf_fallback_parser_marks_parse_gate_insufficient(self) -> None:
+        profile = build_document_profile(
+            markdown="# 扫描文本\n\nfallback parser output",
+            metadata={"format": "pdf", "parser_backend_used": "fallback", "table_count": 0, "image_count": 0},
+            assets=[],
+        )
+
+        self.assertEqual(profile.parse_gate_status, "insufficient")
+        self.assertEqual(profile.parse_gate_reason, "fallback_binary_parser")
 
 
 if __name__ == "__main__":

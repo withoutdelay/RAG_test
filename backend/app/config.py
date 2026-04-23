@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-large-zh-v1.5"
     embedding_dimension: int = 1024
     embedding_local_files_only: bool = True
+    visual_embedding_backend: Literal["proxy", "auto", "clip"] = "proxy"
+    visual_embedding_model: str = "openai/clip-vit-base-patch32"
+    visual_embedding_local_files_only: bool = True
+    visual_embedding_device: str = "cpu"
+    visual_embedding_cache_path: str = str(BACKEND_ROOT / "data" / "visual_index" / "asset_embedding_cache.json")
+    visual_qdrant_collection_prefix: str = "presale_visual_assets"
+    reranker_backend: Literal["none", "auto", "cross-encoder", "heuristic"] = "heuristic"
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_local_files_only: bool = True
 
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"

@@ -9,6 +9,7 @@ from typing import Any
 
 from app.config import Settings, get_settings
 from app.services.agents.executor import ExecutorAgent
+from app.services.knowledge import KnowledgeWikiContextProvider
 from app.services.llm.client import LLMClient, LLMRequest, TaskType
 from app.services.llm.prompts import SECTION_QUALITY_REVIEW_SCHEMA, build_section_quality_prompts
 
@@ -196,10 +197,12 @@ class SectionQualityGateService:
         llm_client: LLMClient | None = None,
         executor: ExecutorAgent | None = None,
         settings: Settings | None = None,
+        knowledge_wiki: KnowledgeWikiContextProvider | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.llm_client = llm_client or LLMClient()
         self.executor = executor or ExecutorAgent(llm_client=self.llm_client)
+        self.knowledge_wiki = knowledge_wiki
 
     async def review_and_repair(
         self,
@@ -212,6 +215,11 @@ class SectionQualityGateService:
         recommended_assets: list[dict[str, Any]] | None = None,
         allow_rewrite: bool = True,
     ) -> tuple[str, str, dict[str, Any]]:
+        knowledge_review_context = (
+            self.knowledge_wiki.build_quality_review_context(section=section, global_params=global_params)
+            if self.knowledge_wiki is not None
+            else ""
+        )
         initial_review = await self.review(
             task_id=task_id,
             section=section,
@@ -235,6 +243,7 @@ class SectionQualityGateService:
                         section=section,
                         initial_review=initial_review,
                         global_params=global_params,
+                        knowledge_review_context=knowledge_review_context,
                     ),
                     selected_text=content_md,
                     instruction=initial_review.rewrite_instruction,
@@ -271,6 +280,7 @@ class SectionQualityGateService:
             "rewrite_attempted": rewrite_attempted,
             "rewrite_applied": rewrite_applied,
             "rewrite_discard_reason": rewrite_discard_reason,
+            "knowledge_review_context_chars": len(knowledge_review_context),
             "initial_review": initial_review.to_dict(),
             "final_review": best_review.to_dict(),
         }
@@ -286,10 +296,25 @@ class SectionQualityGateService:
         content_md: str,
         recommended_assets: list[dict[str, Any]] | None = None,
     ) -> SectionQualityReview:
+        knowledge_review_bundle = (
+            self.knowledge_wiki.collect_quality_review_bundle(section=section, global_params=global_params)
+            if self.knowledge_wiki is not None
+            else {}
+        )
+        knowledge_review_context = (
+            self.knowledge_wiki.build_quality_review_context(section=section, global_params=global_params)
+            if self.knowledge_wiki is not None
+            else ""
+        )
         section_title = str(section.get("title") or "")
         rule_issues = [
             *analyze_section_heading_quality(section_title=section_title, content_md=content_md),
-            *analyze_section_content_quality(section=section, content_md=content_md, global_params=global_params),
+            *analyze_section_content_quality(
+                section=section,
+                content_md=content_md,
+                global_params=global_params,
+                knowledge_review_bundle=knowledge_review_bundle,
+            ),
         ]
         llm_review = await self._review_with_llm(
             task_id=task_id,
@@ -298,6 +323,7 @@ class SectionQualityGateService:
             global_params=global_params,
             content_md=content_md,
             recommended_assets=recommended_assets or [],
+            knowledge_review_context=knowledge_review_context,
         )
         merged_issues = _normalize_quality_issues(
             _merge_issues(rule_issues, llm_review.issues),
@@ -338,6 +364,7 @@ class SectionQualityGateService:
         global_params: dict[str, Any],
         content_md: str,
         recommended_assets: list[dict[str, Any]],
+        knowledge_review_context: str = "",
     ) -> SectionQualityReview:
         system_prompt, user_prompt = build_section_quality_prompts(
             section=section,
@@ -345,6 +372,7 @@ class SectionQualityGateService:
             global_params=global_params,
             content_md=content_md,
             recommended_assets=recommended_assets,
+            quality_constraints=knowledge_review_context,
         )
         try:
             max_tokens = _estimate_section_quality_max_tokens(
@@ -464,6 +492,7 @@ def analyze_section_content_quality(
     section: dict[str, Any],
     content_md: str,
     global_params: dict[str, Any] | None = None,
+    knowledge_review_bundle: dict[str, Any] | None = None,
 ) -> list[SectionQualityIssue]:
     issues: list[SectionQualityIssue] = []
     paragraphs = _extract_quality_paragraphs(content_md)
@@ -508,6 +537,7 @@ def analyze_section_content_quality(
         issues.append(scenario_issue)
 
     issues.extend(_detect_repeated_paragraph_issues(paragraphs))
+    issues.extend(_detect_knowledge_wiki_quality_issues(body_text=body_text, knowledge_review_bundle=knowledge_review_bundle or {}))
 
     if _is_technical_section(section=section) and _visible_text_length(body_text) < 300:
         issues.append(
@@ -521,6 +551,107 @@ def analyze_section_content_quality(
         )
 
     return _dedupe_issue_list(issues)
+
+
+def _detect_knowledge_wiki_quality_issues(
+    *,
+    body_text: str,
+    knowledge_review_bundle: dict[str, Any],
+) -> list[SectionQualityIssue]:
+    if not knowledge_review_bundle:
+        return []
+    issues: list[SectionQualityIssue] = []
+    issues.extend(
+        _detect_forbidden_phrase_issues(
+            body_text=body_text,
+            forbidden_phrases=list(knowledge_review_bundle.get("forbidden_phrases") or []),
+        )
+    )
+    issues.extend(
+        _detect_glossary_consistency_issues(
+            body_text=body_text,
+            glossary_entries=list(knowledge_review_bundle.get("glossary_entries") or []),
+        )
+    )
+    return _dedupe_issue_list(issues)
+
+
+def _detect_forbidden_phrase_issues(
+    *,
+    body_text: str,
+    forbidden_phrases: list[dict[str, Any]],
+) -> list[SectionQualityIssue]:
+    issues: list[SectionQualityIssue] = []
+    haystack = str(body_text or "")
+    haystack_lower = haystack.casefold()
+    for item in forbidden_phrases[:4]:
+        phrase = str(item.get("phrase") or "").strip()
+        preferred = str(item.get("preferred") or "").strip()
+        if not phrase:
+            continue
+        index = haystack_lower.find(phrase.casefold())
+        if index < 0:
+            continue
+        severity = "high" if phrase in {"我公司"} else "medium"
+        issues.append(
+            SectionQualityIssue(
+                code="KW001",
+                severity=severity,
+                target=phrase,
+                message=f"正文出现 AI Wiki 禁用表述“{phrase}”，客户口径不稳。",
+                suggested_fix=f"将“{phrase}”改为“{preferred}”。" if preferred else f"删除“{phrase}”这类表述。",
+            )
+        )
+    return issues
+
+
+def _detect_glossary_consistency_issues(
+    *,
+    body_text: str,
+    glossary_entries: list[dict[str, Any]],
+) -> list[SectionQualityIssue]:
+    issues: list[SectionQualityIssue] = []
+    normalized_text = str(body_text or "").casefold()
+    for entry in glossary_entries[:4]:
+        primary_term = str(entry.get("display_primary_term") or entry.get("primary_term") or "").strip()
+        aliases = [
+            str(alias).strip()
+            for alias in (entry.get("display_aliases") or entry.get("aliases") or [])
+            if str(alias).strip()
+        ]
+        if not primary_term or not aliases:
+            continue
+        counts: dict[str, int] = {}
+        for form in [primary_term, *aliases]:
+            count = _count_term_occurrences(normalized_text, form)
+            if count > 0:
+                counts[form] = count
+        if len(counts) < 2:
+            continue
+        alias_hits = sum(count for form, count in counts.items() if form != primary_term)
+        if alias_hits < 1 or sum(counts.values()) < 3:
+            continue
+        mixed_forms = " / ".join(counts.keys())
+        issues.append(
+            SectionQualityIssue(
+                code="KW010",
+                severity="medium",
+                target=primary_term,
+                message=f"同一对象同时使用“{mixed_forms}”等称呼，术语不统一。",
+                suggested_fix=f"统一使用“{primary_term}”作为主称谓，避免与“{' / '.join(aliases[:3])}”混用。",
+            )
+        )
+    return issues
+
+
+def _count_term_occurrences(normalized_text: str, term: str) -> int:
+    normalized_term = str(term or "").strip().casefold()
+    if not normalized_term:
+        return 0
+    if re.fullmatch(r"[a-z0-9_./+-]+", normalized_term):
+        pattern = re.compile(rf"(?<![a-z0-9]){re.escape(normalized_term)}(?![a-z0-9])")
+        return len(pattern.findall(normalized_text))
+    return normalized_text.count(normalized_term)
 
 
 def _estimate_section_quality_max_tokens(*, content_md: str, recommended_assets: list[dict[str, Any]] | None = None) -> int:
@@ -775,18 +906,20 @@ def _build_quality_rewrite_context(
     section: dict[str, Any],
     initial_review: SectionQualityReview,
     global_params: dict[str, Any],
+    knowledge_review_context: str = "",
 ) -> str:
     key_params = ", ".join(f"{key}={value}" for key, value in global_params.items() if value not in (None, "", [], {})) or "无"
-    return "\n".join(
-        [
-            f"章节标题: {section.get('title') or ''}",
-            f"章节目的: {section.get('purpose') or section.get('description') or ''}",
-            f"当前关键参数: {key_params}",
-            f"当前质量摘要: {initial_review.summary}",
-            "当前问题:",
-            *[f"- {issue.message}" for issue in initial_review.issues[:6]],
-        ]
-    )
+    lines = [
+        f"章节标题: {section.get('title') or ''}",
+        f"章节目的: {section.get('purpose') or section.get('description') or ''}",
+        f"当前关键参数: {key_params}",
+        f"当前质量摘要: {initial_review.summary}",
+        "当前问题:",
+        *[f"- {issue.message}" for issue in initial_review.issues[:6]],
+    ]
+    if knowledge_review_context:
+        lines.extend(["AI Wiki 约束:", knowledge_review_context])
+    return "\n".join(lines)
 
 
 def _prefer_rewrite(*, initial: SectionQualityReview, follow_up: SectionQualityReview) -> bool:

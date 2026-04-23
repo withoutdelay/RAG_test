@@ -1,0 +1,26 @@
+name: cd
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+
+jobs:
+  release-rehearsal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Release bundle sanity
+        run: |
+          test -f output/RAG_test-redteam.json
+          test -f output/RAG_test-quality-gate.md
+          test -f output/RAG_test-task-execution.md
+
+      - name: Rollback marker
+        run: |
+          echo "rollback plan available in output/rehearsal/RAG_test-rollback-playbook.md"
+          echo "rollback simulation remains a documented manual rehearsal gate"

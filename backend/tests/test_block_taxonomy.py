@@ -31,6 +31,16 @@ class BlockTaxonomyTests(unittest.TestCase):
         self.assertEqual(taxonomy["section_type"], "bom_or_supply_list")
         self.assertEqual(taxonomy["content_form"], "bom_table")
 
+    def test_classify_document_delivery_heading_as_commercial_manual_only(self) -> None:
+        taxonomy = classify_block_taxonomy(
+            content="卖方应提交设备配置图纸、接线图以及文字资料，供设计联络和后续审查使用。",
+            heading_path="7 资料提供及数量",
+            chunk_type="PLAIN",
+        )
+
+        self.assertEqual(taxonomy["section_type"], "commercial_manual_only")
+        self.assertEqual(taxonomy["content_form"], "narrative")
+
     def test_classify_interface_table_prefers_interface_form(self) -> None:
         taxonomy = classify_block_taxonomy(
             content="| 序号 | 结点定义 | 技术要求 |\n| 1 | 变频器启动指令 | 干接点输入额定电压24Vdc |\n| 2 | DCS模拟量给定 | 4~20mA |",
@@ -66,6 +76,20 @@ class BlockTaxonomyTests(unittest.TestCase):
 
         self.assertEqual(taxonomy["section_type"], "main_circuit_scheme")
         self.assertIn("figure", taxonomy["preferred_content_forms"])
+
+    def test_infer_target_taxonomy_honors_explicit_holdout_targets(self) -> None:
+        taxonomy = infer_target_taxonomy(
+            {
+                "title": "2 供货范围 Scopes of supply",
+                "purpose": "说明供货边界和随机资料。",
+                "keywords": ["LCI", "供货范围", "控制柜"],
+                "target_section_type": "supply_scope",
+                "target_equipment_type": "lci",
+            }
+        )
+
+        self.assertEqual(taxonomy["section_type"], "supply_scope")
+        self.assertEqual(taxonomy["equipment_type"], "lci")
 
     def test_heading_match_beats_protection_terms_for_interface_sections(self) -> None:
         taxonomy = classify_block_taxonomy(
@@ -105,6 +129,16 @@ class BlockTaxonomyTests(unittest.TestCase):
         )
 
         self.assertEqual(taxonomy["section_type"], "vfd_spec")
+
+    def test_classify_interface_with_full_chinese_controller_terms(self) -> None:
+        taxonomy = classify_block_taxonomy(
+            content="可编程逻辑控制器与分布式控制系统之间通过通信总线交换命令、状态和报警信号。",
+            heading_path="8. 可编程逻辑控制器接口说明",
+            chunk_type="PLAIN",
+        )
+
+        self.assertEqual(taxonomy["section_type"], "communication_interface")
+        self.assertEqual(taxonomy["equipment_type"], "dcs_plc_interface")
 
     def test_support_content_forms_include_tables_for_main_circuit(self) -> None:
         forms = support_content_forms("main_circuit_scheme")

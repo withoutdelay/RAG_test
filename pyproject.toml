@@ -1,0 +1,16 @@
+[project]
+name = "rag-test-super-dev-host"
+version = "2.3.0"
+description = "Repository-local Super Dev host wrapper and release metadata for RAG_test"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+super-dev = "super_dev.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["super_dev*"]

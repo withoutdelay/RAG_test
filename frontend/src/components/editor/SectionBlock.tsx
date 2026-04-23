@@ -1,6 +1,6 @@
 'use client';
 
-import { ComponentProps, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ExternalLink,
   Eye,
@@ -14,8 +14,6 @@ import {
   Sparkles,
   Target,
 } from 'lucide-react';
-import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -42,6 +40,8 @@ import type {
   SectionValidatorResult,
 } from '@/lib/types';
 import { toast } from 'sonner';
+import { MarkdownArticle } from './MarkdownArticle';
+import { isVisualAsset, markdownTableCandidate, mergeMarkdownTableBlocks } from './sectionBlockHelpers';
 
 type EditableBlockKind = 'heading' | 'table' | 'list' | 'quote' | 'paragraph' | 'placeholder';
 
@@ -88,6 +88,139 @@ function normalizeHeadingPath(value: string[] | string | undefined): string {
     .map((item) => item.trim())
     .filter(Boolean)
     .join(' > ');
+}
+
+function formatIntentLabel(key: string): string {
+  if (key === 'title_text') return 'Title Intent';
+  if (key === 'detail_text') return 'Detail Intent';
+  if (key === 'context_text') return 'Context Intent';
+  return key;
+}
+
+function formatTraceMetric(value: number | string | undefined, digits = 2): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value.toFixed(digits);
+  }
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+  return 'n/a';
+}
+
+function formatSelectionReason(reason: string): string {
+  const normalized = String(reason || '').trim();
+  if (!normalized) return '';
+  const [rawKey, rawValue] = normalized.split('=', 2);
+  const value = rawValue?.trim();
+  switch (rawKey) {
+    case 'generation_mode_not_reuse_first':
+      return '当前章节不在 reuse_first 模式';
+    case 'no_reusable_blocks':
+      return '当前没有可复用块';
+    case 'top_section_score':
+      return `Top1 章节分数 ${formatTraceMetric(value, 4)}`;
+    case 'top_section_id':
+      return `Top1 章节 ID ${value || 'unknown'}`;
+    case 'runner_up_score':
+      return `Top2 章节分数 ${formatTraceMetric(value, 4)}`;
+    case 'lead_score':
+      return `Top1 与 Top2 分差 ${formatTraceMetric(value, 4)}`;
+    case 'full_section_block_count':
+      return `Top1 对齐块数 ${value || '0'}`;
+    case 'full_section_within_budget':
+      return value === 'True' || value === 'true' ? '整章材料在 token 预算内' : '整章材料超出 token 预算';
+    case 'selected_baseline_fallback':
+      return '本次走 baseline fallback';
+    case 'selected_full_section':
+      return '本次走 full_section';
+    case 'section_pack_due_to_missing_top_section':
+      return '降级到 section_pack：没有稳定的 Top1 章节';
+    case 'section_pack_due_to_low_top_section_score':
+      return '降级到 section_pack：Top1 章节分数不够高';
+    case 'section_pack_due_to_low_section_lead':
+      return '降级到 section_pack：Top1 与 Top2 分差不足';
+    case 'section_pack_due_to_missing_aligned_blocks':
+      return '降级到 section_pack：Top1 章节下没有对齐块';
+    case 'section_pack_due_to_token_budget':
+      return '降级到 section_pack：整章材料超出 token 预算';
+    case 'selected_section_pack':
+      return '本次走 section_pack';
+    case 'single_section_candidate':
+      return '只有一个章节候选';
+    case 'no_top_section_block_alignment':
+      return 'Top1 章节没有找到对齐块';
+    case 'no_section_candidate':
+      return '当前没有章节候选';
+    default:
+      return normalized.replace(/_/g, ' ');
+  }
+}
+
+function formatKnowledgeWikiPriorLabel(key: string): string {
+  switch (key) {
+    case 'knowledge_wiki_product_match':
+      return '产品族命中';
+    case 'knowledge_wiki_module_match':
+      return '模块命中';
+    case 'knowledge_wiki_product_section_prior':
+      return '产品族章节先验';
+    case 'knowledge_wiki_product_equipment_prior':
+      return '产品族设备先验';
+    default:
+      return key.replace(/^knowledge_wiki_/, '').replace(/_/g, ' ');
+  }
+}
+
+function buildKnowledgeWikiPriorBreakdownText(
+  breakdown: Record<string, number> | undefined,
+): string {
+  if (!breakdown) return '';
+  const priorTotal = typeof breakdown.knowledge_wiki_prior_total === 'number' ? breakdown.knowledge_wiki_prior_total : 0;
+  if (!(priorTotal > 0)) return '';
+  const parts = [
+    `AI Wiki prior +${priorTotal.toFixed(2)}`,
+    ...Object.entries(breakdown)
+      .filter(([key, value]) => key !== 'knowledge_wiki_prior_total' && key !== 'base_score' && key !== 'final_score' && typeof value === 'number' && value > 0)
+      .map(([key, value]) => `${formatKnowledgeWikiPriorLabel(key)} +${value.toFixed(2)}`),
+  ];
+  return parts.join(' / ');
+}
+
+function buildSectionCandidateBreakdownText(
+  breakdown: Record<string, number> | undefined,
+): string {
+  if (!breakdown) return '';
+  const parts: string[] = [];
+  if (typeof breakdown.base === 'number' && breakdown.base > 0) {
+    parts.push(`base ${breakdown.base.toFixed(2)}`);
+  }
+  if (typeof breakdown.hybrid_rrf === 'number' && breakdown.hybrid_rrf > 0) {
+    parts.push(`rrf +${breakdown.hybrid_rrf.toFixed(2)}`);
+  }
+  if (typeof breakdown.hybrid_rerank === 'number' && breakdown.hybrid_rerank > 0) {
+    parts.push(`rerank +${breakdown.hybrid_rerank.toFixed(2)}`);
+  }
+  if (typeof breakdown.semantic === 'number' && breakdown.semantic > 0) {
+    parts.push(`semantic ${breakdown.semantic.toFixed(2)}`);
+  }
+  return parts.join(' / ');
+}
+
+function buildBlockRetrievalBreakdownText(
+  breakdown: Record<string, number> | undefined,
+): string {
+  if (!breakdown) return '';
+  const parts: string[] = [];
+  if (typeof breakdown.base === 'number' && breakdown.base > 0) {
+    parts.push(`base ${breakdown.base.toFixed(2)}`);
+  }
+  if (typeof breakdown.hybrid_rrf === 'number' && breakdown.hybrid_rrf > 0) {
+    parts.push(`rrf +${breakdown.hybrid_rrf.toFixed(2)}`);
+  }
+  if (typeof breakdown.hybrid_rerank === 'number' && breakdown.hybrid_rerank > 0) {
+    parts.push(`rerank +${breakdown.hybrid_rerank.toFixed(2)}`);
+  }
+  return parts.join(' / ');
 }
 
 function classifyMarkdownBlock(content: string): EditableBlockKind {
@@ -232,61 +365,6 @@ function findMatchingReusableBlocks(
     });
 }
 
-function parseMarkdownTableParts(markdown: string): { header: string; delimiter: string; rows: string[] } | null {
-  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
-  for (let index = 0; index < lines.length - 1; index += 1) {
-    const header = lines[index].trim();
-    const delimiter = lines[index + 1].trim();
-    if (!header.includes('|')) {
-      continue;
-    }
-    if (!/^\|?[\s:|-]+\|?$/.test(delimiter) || !delimiter.includes('-')) {
-      continue;
-    }
-    const rows: string[] = [];
-    for (let rowIndex = index + 2; rowIndex < lines.length; rowIndex += 1) {
-      const row = lines[rowIndex].trim();
-      if (!row) {
-        continue;
-      }
-      if (!row.includes('|')) {
-        break;
-      }
-      rows.push(row);
-    }
-    return { header, delimiter, rows };
-  }
-  return null;
-}
-
-function mergeMarkdownTableBlocks(blocks: ReuseBlockLike[]): string | undefined {
-  const mergedRows: string[] = [];
-  let header = '';
-  let delimiter = '';
-
-  for (const block of blocks) {
-    const content = block.content_md?.trim();
-    if (!content) {
-      continue;
-    }
-    const table = parseMarkdownTableParts(content);
-    if (!table) {
-      return undefined;
-    }
-    if (!header) {
-      header = table.header;
-      delimiter = table.delimiter;
-    }
-    mergedRows.push(...table.rows);
-  }
-
-  if (!header || !delimiter) {
-    return undefined;
-  }
-
-  return [header, delimiter, ...mergedRows].join('\n');
-}
-
 function findReusableBlockContent(
   section: SectionDraft,
   citationOrAsset: { evidence_id?: string; source_title?: string; heading_path?: string[] | string; document_name?: string },
@@ -335,36 +413,6 @@ function resolveCitationSourceContent(
   return findReusableBlockContent(section, citation) || citation.excerpt || '';
 }
 
-function markdownTableCandidate(text: string): boolean {
-  return text.includes('|') && /\n\|?[-: ]+\|[-|: ]+/.test(text);
-}
-
-function isVisualAsset(asset?: RecommendedAsset): boolean {
-  return asset?.asset_type === 'figure' || asset?.asset_type === 'formula_candidate';
-}
-
-function MarkdownArticle({ markdown, compact = false }: { markdown: string; compact?: boolean }) {
-  return (
-    <div className={`prose prose-slate max-w-none ${compact ? 'prose-sm' : ''} [&_table]:my-4 [&_table]:w-full [&_table]:border-collapse [&_table]:overflow-hidden [&_table]:rounded-2xl [&_table]:border [&_table]:border-slate-200 [&_table]:bg-white [&_th]:border-b [&_th]:border-slate-200 [&_th]:bg-slate-100 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:text-xs [&_th]:font-semibold [&_th]:uppercase [&_th]:tracking-wide [&_th]:text-slate-600 [&_td]:border-b [&_td]:border-slate-100 [&_td]:px-3 [&_td]:py-2 [&_td]:align-top [&_td]:text-sm [&_li]:my-1.5 [&_p]:leading-7`}>
-      <Markdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          code(props: ComponentProps<'code'>) {
-            const { className, children, ...rest } = props;
-            return (
-              <code className={`rounded bg-slate-100 px-1.5 py-0.5 text-[0.92em] text-slate-700 ${className || ''}`} {...rest}>
-                {children}
-              </code>
-            );
-          },
-        }}
-      >
-        {markdown}
-      </Markdown>
-    </div>
-  );
-}
-
 function AssetPreviewCard({
   asset,
   placeholderLabel,
@@ -388,6 +436,32 @@ function AssetPreviewCard({
   const imageFailed = imageState.assetId === currentAssetId ? imageState.failed : false;
   const assetContentUrl = asset?.asset_id && visualAsset ? buildAssetContentUrl(asset.asset_id) : null;
   const summaryText = (asset?.caption || asset?.preview_text || '').trim();
+  const metadata = (asset?.metadata || {}) as Record<string, unknown>;
+  const breakdown = asset?.score_breakdown || (metadata.retrieval_score_breakdown as Record<string, number | string> | undefined);
+  const visualBackend =
+    typeof breakdown?.visual_backend === 'string'
+      ? breakdown.visual_backend
+      : typeof metadata.visual_backend === 'string'
+        ? metadata.visual_backend
+        : '';
+  const visualSource =
+    typeof breakdown?.visual_source === 'string'
+      ? breakdown.visual_source
+      : typeof metadata.visual_source === 'string'
+        ? metadata.visual_source
+        : '';
+  const assetTraceText = Array.isArray(asset?.reason_trace) && asset.reason_trace.length > 0 ? asset.reason_trace.slice(0, 3).join(' / ') : '';
+  const breakdownSummary =
+    breakdown && typeof breakdown === 'object'
+      ? [
+          typeof breakdown.textual === 'number' ? `text ${breakdown.textual.toFixed(2)}` : null,
+          typeof breakdown.visual === 'number' ? `visual ${breakdown.visual.toFixed(2)}` : null,
+          typeof breakdown.structural === 'number' ? `struct ${breakdown.structural.toFixed(2)}` : null,
+          typeof breakdown.final === 'number' ? `final ${breakdown.final.toFixed(2)}` : null,
+        ]
+          .filter(Boolean)
+          .join(' / ')
+      : '';
 
   return (
     <div className={`rounded-2xl border ${embedded ? 'border-emerald-200 bg-emerald-50/70' : asset?.review_required ? 'border-amber-300 bg-amber-50/70' : 'border-slate-200 bg-slate-50/70'} p-4`}>
@@ -405,7 +479,7 @@ function AssetPreviewCard({
       )}
       {visualAsset && assetContentUrl && !imageFailed ? (
         <div className="mt-3 overflow-hidden rounded-[1.25rem] border border-white/80 bg-white/90 p-3 shadow-[0_20px_50px_-28px_rgba(15,23,42,0.45)]">
-          <div className="relative overflow-hidden rounded-[1rem] border border-slate-200/80 bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.14),_rgba(255,255,255,0.96)_48%,_rgba(241,245,249,1)_100%)]">
+          <div className="relative overflow-hidden rounded-[1rem] border border-slate-200/80 bg-slate-50">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={assetContentUrl}
@@ -414,7 +488,7 @@ function AssetPreviewCard({
               className={`block w-full bg-transparent object-contain ${embedded ? 'max-h-[300px]' : 'max-h-[420px]'}`}
               onError={() => setImageState({ assetId: currentAssetId, failed: true })}
             />
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-slate-950/10 to-transparent" />
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-slate-50/85" />
           </div>
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -457,6 +531,14 @@ function AssetPreviewCard({
         </div>
       )}
       {asset?.reason ? <p className="mt-3 text-xs font-medium text-slate-600">命中原因：{asset.reason}</p> : null}
+      {breakdownSummary ? <p className="mt-2 text-[11px] text-slate-500">检索分解：{breakdownSummary}</p> : null}
+      {visualBackend || visualSource ? (
+        <p className="mt-2 text-[11px] text-slate-500">
+          视觉通道：{visualBackend || 'disabled'}
+          {visualSource ? ` / ${visualSource}` : ''}
+        </p>
+      ) : null}
+      {assetTraceText ? <p className="mt-2 text-[11px] text-slate-500 line-clamp-3">{assetTraceText}</p> : null}
     </div>
   );
 }
@@ -535,9 +617,21 @@ export function SectionBlock({
   const assetCount = section.recommended_assets?.length || 0;
   const generationDetails = getGenerationDetails(section);
   const reuseTrace = getReuseTrace(section);
+  const queryIntents = reuseTrace?.query_intents;
+  const sectionCandidates = reuseTrace?.section_candidates || [];
   const selectedSections = generationDetails?.selected_sections || reuseTrace?.scoped_sections || [];
   const selectedBlocks = generationDetails?.selected_blocks || [];
+  const selectionReason = generationDetails?.selection_reason;
   const tokenBudget = generationDetails?.token_budget;
+  const knowledgeWikiTerms = reuseTrace?.knowledge_wiki_terms || [];
+  const knowledgeWikiProductCards = reuseTrace?.knowledge_wiki_product_cards || [];
+  const knowledgeWikiModuleCards = reuseTrace?.knowledge_wiki_module_cards || [];
+  const knowledgeWikiPriorSummary = generationDetails?.knowledge_wiki_prior_summary;
+  const hasKnowledgeWikiSignals =
+    knowledgeWikiTerms.length > 0 ||
+    knowledgeWikiProductCards.length > 0 ||
+    knowledgeWikiModuleCards.length > 0 ||
+    Boolean(knowledgeWikiPriorSummary?.prior_hit_block_count);
   const previewSegments = useMemo(() => buildPreviewSegments(content), [content]);
   const assetLookup = useMemo(
     () =>
@@ -648,7 +742,7 @@ export function SectionBlock({
   return (
     <>
       <Card className="mb-8 overflow-hidden border-slate-200 shadow-sm">
-        <div className="border-b bg-[linear-gradient(135deg,rgba(248,250,252,0.96),rgba(239,246,255,0.88))] px-5 py-4">
+        <div className="border-b bg-slate-50 px-5 py-4">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2">
@@ -730,7 +824,7 @@ export function SectionBlock({
 
               <TabsContent value="preview" className="p-5">
                 {content.trim() ? (
-                  <div className="rounded-3xl border border-slate-200 bg-[linear-gradient(180deg,#ffffff,rgba(248,250,252,0.9))] p-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]">
+                  <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]">
                     <div className="space-y-6">
                       {previewSegments.map((segment, index) => {
                         if (segment.kind === 'markdown') {
@@ -821,7 +915,7 @@ export function SectionBlock({
             </Tabs>
           </div>
 
-          <div className="space-y-6 bg-[linear-gradient(180deg,rgba(248,250,252,0.9),rgba(255,255,255,0.95))] p-5">
+          <div className="space-y-6 bg-slate-50 p-5">
             <div className="rounded-2xl border border-slate-200 bg-white p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
@@ -839,11 +933,12 @@ export function SectionBlock({
                 <div className="space-y-3">
                   {section.citation_refs.map((citation, index) => {
                     const citationId = citation.evidence_id || `citation-${index}`;
+                    const citationKey = `${citationId}-${index}`;
                     const isSelected = selectedCitationIds.includes(citationId);
                     const sourceContent = resolveCitationSourceContent(section, citation, evidenceMap);
                     return (
                       <div
-                        key={citationId}
+                        key={citationKey}
                         className={`rounded-2xl border p-3 transition-colors ${
                           isSelected
                             ? 'border-blue-300 bg-blue-50 shadow-sm'
@@ -933,6 +1028,127 @@ export function SectionBlock({
                   </div>
                 ) : null}
 
+                {queryIntents ? (
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Query Intents</p>
+                    <div className="space-y-2">
+                      {(['title_text', 'detail_text', 'context_text'] as const).map((key) =>
+                        queryIntents[key] ? (
+                          <div key={key} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                              {formatIntentLabel(key)}
+                            </p>
+                            <p className="mt-1 text-sm leading-6 text-slate-700">{queryIntents[key]}</p>
+                          </div>
+                        ) : null,
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
+                {hasKnowledgeWikiSignals ? (
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">AI Wiki Priors</p>
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3">
+                      <div className="flex flex-wrap gap-2">
+                        {knowledgeWikiTerms.map((item, index) => (
+                          <Badge key={`term-${item}-${index}`} variant="outline" className="border-emerald-200 bg-white text-emerald-700">
+                            {item}
+                          </Badge>
+                        ))}
+                        {knowledgeWikiProductCards.map((item, index) => (
+                          <Badge key={`product-${item}-${index}`} variant="secondary" className="bg-emerald-100 text-emerald-800">
+                            产品族 {item}
+                          </Badge>
+                        ))}
+                        {knowledgeWikiModuleCards.map((item, index) => (
+                          <Badge key={`module-${item}-${index}`} variant="secondary" className="bg-teal-100 text-teal-800">
+                            模块 {item}
+                          </Badge>
+                        ))}
+                      </div>
+                      {knowledgeWikiPriorSummary ? (
+                        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                          <div className="rounded-xl border border-emerald-200 bg-white p-3">
+                            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Prior Hit Blocks</p>
+                            <p className="mt-1 text-sm font-semibold text-slate-900">
+                              {knowledgeWikiPriorSummary.prior_hit_block_count ?? 0} / {knowledgeWikiPriorSummary.selected_block_count ?? 0}
+                            </p>
+                          </div>
+                          <div className="rounded-xl border border-emerald-200 bg-white p-3">
+                            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Total Boost</p>
+                            <p className="mt-1 text-sm font-semibold text-slate-900">
+                              {formatTraceMetric(knowledgeWikiPriorSummary.total_prior_boost)}
+                            </p>
+                          </div>
+                          <div className="rounded-xl border border-emerald-200 bg-white p-3">
+                            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Max Boost</p>
+                            <p className="mt-1 text-sm font-semibold text-slate-900">
+                              {formatTraceMetric(knowledgeWikiPriorSummary.max_prior_boost)}
+                            </p>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
+                {selectionReason ? (
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Decision</p>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {selectionReason.mode ? <Badge variant="outline">{selectionReason.mode}</Badge> : null}
+                        {selectionReason.top_section_id ? (
+                          <Badge variant="secondary" className="bg-slate-100 text-slate-700">
+                            top {selectionReason.top_section_id}
+                          </Badge>
+                        ) : null}
+                        {selectionReason.full_section_within_budget !== undefined ? (
+                          <Badge variant={selectionReason.full_section_within_budget ? 'success' : 'warning'}>
+                            {selectionReason.full_section_within_budget ? 'full-section in budget' : 'full-section over budget'}
+                          </Badge>
+                        ) : null}
+                      </div>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        <div className="rounded-xl border border-slate-200 bg-white p-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Top Score</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-900">
+                            {formatTraceMetric(selectionReason.top_section_score)}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 bg-white p-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Lead</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-900">
+                            {formatTraceMetric(selectionReason.lead_score)}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 bg-white p-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Runner Up</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-900">
+                            {formatTraceMetric(selectionReason.runner_up_score)}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 bg-white p-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Aligned Blocks</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-900">
+                            {selectionReason.full_section_block_count ?? 0}
+                          </p>
+                        </div>
+                      </div>
+                      {selectionReason.reasons?.length ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {selectionReason.reasons.map((item, index) => (
+                            <Badge key={`${item}-${index}`} variant="outline" className="bg-white text-slate-600">
+                              {formatSelectionReason(item)}
+                            </Badge>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
                 {tokenBudget ? (
                   <div className="grid gap-3 sm:grid-cols-2">
                     <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
@@ -946,11 +1162,16 @@ export function SectionBlock({
                   </div>
                 ) : null}
 
-                {selectedSections.length > 0 ? (
+                {sectionCandidates.length > 0 ? (
                   <div className="space-y-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Selected Sections</p>
-                    {selectedSections.map((item, index) => (
-                      <div key={`${item.section_id || item.section_path || 'section'}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Section Candidates</p>
+                    {sectionCandidates.map((item, index) => (
+                      <div key={`${item.section_id || item.section_path || 'candidate'}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        {(() => {
+                          const breakdownText = buildSectionCandidateBreakdownText(item.score_breakdown);
+                          const traceText = item.reason_trace?.slice(0, 3).join(' / ') || '';
+                          return (
+                            <>
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <p className="text-sm font-semibold text-slate-900">{item.file_name || item.source_heading || '历史章节'}</p>
@@ -960,7 +1181,42 @@ export function SectionBlock({
                             <Badge variant="outline">{item.score.toFixed(2)}</Badge>
                           ) : null}
                         </div>
+                        {breakdownText ? <p className="mt-2 text-[11px] text-slate-500">{breakdownText}</p> : null}
                         {item.reason ? <p className="mt-2 text-xs text-slate-600">{item.reason}</p> : null}
+                        {traceText ? <p className="mt-2 text-[11px] text-slate-500 line-clamp-3">{traceText}</p> : null}
+                            </>
+                          );
+                        })()}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {selectedSections.length > 0 ? (
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Selected Sections</p>
+                    {selectedSections.map((item, index) => (
+                      <div key={`${item.section_id || item.section_path || 'section'}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                        {(() => {
+                          const breakdownText = buildSectionCandidateBreakdownText(item.score_breakdown);
+                          const traceText = item.reason_trace?.slice(0, 3).join(' / ') || '';
+                          return (
+                            <>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-slate-900">{item.file_name || item.source_heading || '历史章节'}</p>
+                            <p className="mt-1 text-xs leading-5 text-slate-500">{item.section_path || '未标注章节路径'}</p>
+                          </div>
+                          {typeof item.score === 'number' ? (
+                            <Badge variant="outline">{item.score.toFixed(2)}</Badge>
+                          ) : null}
+                        </div>
+                        {breakdownText ? <p className="mt-2 text-[11px] text-slate-500">{breakdownText}</p> : null}
+                        {item.reason ? <p className="mt-2 text-xs text-slate-600">{item.reason}</p> : null}
+                        {traceText ? <p className="mt-2 text-[11px] text-slate-500 line-clamp-3">{traceText}</p> : null}
+                            </>
+                          );
+                        })()}
                       </div>
                     ))}
                   </div>
@@ -973,22 +1229,31 @@ export function SectionBlock({
                 {selectedBlocks.length > 0 ? (
                   <div className="space-y-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Prompt Blocks</p>
-                    {selectedBlocks.map((item, index) => (
-                      <div key={`${item.block_id || item.section_path || 'block'}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="text-sm font-semibold text-slate-900">{item.source_title || '复用块'}</p>
-                            <p className="mt-1 text-xs leading-5 text-slate-500">{item.section_path || normalizeHeadingPath(item.heading_path)}</p>
+                    {selectedBlocks.map((item, index) => {
+                      const knowledgeWikiPriorText = buildKnowledgeWikiPriorBreakdownText(item.selection_score_breakdown);
+                      const retrievalBreakdownText = buildBlockRetrievalBreakdownText(item.retrieval_score_breakdown);
+                      const retrievalTraceText = item.retrieval_reason_trace?.slice(0, 3).join(' / ') || '';
+                      return (
+                        <div key={`${item.block_id || item.section_path || 'block'}-${index}`} className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-sm font-semibold text-slate-900">{item.source_title || '复用块'}</p>
+                              <p className="mt-1 text-xs leading-5 text-slate-500">{item.section_path || normalizeHeadingPath(item.heading_path)}</p>
+                            </div>
+                            {typeof item.selection_score === 'number' ? (
+                              <Badge variant="outline">{item.selection_score.toFixed(2)}</Badge>
+                            ) : null}
                           </div>
-                          {typeof item.selection_score === 'number' ? (
-                            <Badge variant="outline">{item.selection_score.toFixed(2)}</Badge>
+                          {retrievalBreakdownText ? <p className="mt-2 text-[11px] text-slate-500">{retrievalBreakdownText}</p> : null}
+                          {item.retrieval_reason ? <p className="mt-2 text-xs text-slate-600">{item.retrieval_reason}</p> : null}
+                          {retrievalTraceText ? <p className="mt-2 text-[11px] text-slate-500 line-clamp-3">{retrievalTraceText}</p> : null}
+                          {item.selection_reasons?.length ? (
+                            <p className="mt-2 text-xs text-slate-600">{item.selection_reasons.join(' / ')}</p>
                           ) : null}
+                          {knowledgeWikiPriorText ? <p className="mt-2 text-xs text-emerald-700">{knowledgeWikiPriorText}</p> : null}
                         </div>
-                        {item.selection_reasons?.length ? (
-                          <p className="mt-2 text-xs text-slate-600">{item.selection_reasons.join(' / ')}</p>
-                        ) : null}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : null}
               </div>

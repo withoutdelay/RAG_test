@@ -22,5 +22,30 @@ frontend/.next/
 scripts/*.log
 scripts/*.pid
 
+# Runtime boundary rules required by release readiness
+# output/
+# artifacts/
+.super-dev/runs/
+.super-dev/review-state/
+.super-dev/SESSION_BRIEF.md
+.super-dev/workflow-state.json
+/.agent/
+/.claude/
+/.codebuddy/
+/.cursor/
+/.gemini/
+/.kiro/
+/.opencode/
+/.qoder/
+/.trae/
+/.windsurf/
+/GEMINI.md
+
+backend/data/knowledge_wiki/
+backend/data/visual_index/
+output/project-replay-history/
+output/metrics-history/
+output/delivery/*.zip
+
 private_samples/real_proposals/*
 !private_samples/real_proposals/.gitkeep

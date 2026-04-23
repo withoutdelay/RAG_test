@@ -1,0 +1,166 @@
+{
+  "project_name": "RAG_test",
+  "project_path": "/Volumes/thunder/code/RAG_test",
+  "summary": "This repository is a `unknown` codebase built primarily with `unknown` and `unknown`. The repo map highlights the most likely entry points, the highest-signal modules, integration surfaces, and the current risk hotspots before implementation or bugfix work begins.",
+  "tech_stack": {
+    "category": "unknown",
+    "language": "unknown",
+    "framework": "unknown",
+    "ui_library": "",
+    "state_management": "",
+    "build_tool": "",
+    "testing_framework": "",
+    "dependencies": []
+  },
+  "entry_points": [],
+  "top_modules": [
+    {
+      "name": "backend",
+      "path": "backend",
+      "summary": "Top-level module with 153 code files detected",
+      "score": 153,
+      "details": {}
+    },
+    {
+      "name": "frontend",
+      "path": "frontend",
+      "summary": "Top-level module with 40 code files detected",
+      "score": 40,
+      "details": {}
+    },
+    {
+      "name": "gateway",
+      "path": "gateway",
+      "summary": "Top-level module with 16 code files detected",
+      "score": 16,
+      "details": {}
+    },
+    {
+      "name": "output",
+      "path": "output",
+      "summary": "Top-level module with 0 code files detected",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "name": "scripts",
+      "path": "scripts",
+      "summary": "Top-level module with 0 code files detected",
+      "score": 0,
+      "details": {}
+    },
+    {
+      "name": "private_samples",
+      "path": "private_samples",
+      "summary": "Top-level module with 0 code files detected",
+      "score": 0,
+      "details": {}
+    }
+  ],
+  "integration_surfaces": [
+    {
+      "name": "stores",
+      "path": "frontend/src/stores",
+      "summary": "State layer",
+      "score": 3,
+      "details": {}
+    },
+    {
+      "name": "components",
+      "path": "frontend/src/components",
+      "summary": "UI component layer",
+      "score": 3,
+      "details": {}
+    },
+    {
+      "name": "models",
+      "path": "backend/app/models",
+      "summary": "Domain model layer",
+      "score": 3,
+      "details": {}
+    },
+    {
+      "name": "api",
+      "path": "backend/app/api",
+      "summary": "API boundary",
+      "score": 3,
+      "details": {}
+    },
+    {
+      "name": "services",
+      "path": "backend/app/services",
+      "summary": "Service layer",
+      "score": 3,
+      "details": {}
+    }
+  ],
+  "key_dependencies": [],
+  "design_patterns": [],
+  "risk_points": [
+    {
+      "name": "entrypoint-gap",
+      "path": ".",
+      "summary": "No obvious application entry point was detected; the host may need manual guidance before implementation.",
+      "score": 90,
+      "details": {}
+    },
+    {
+      "name": "implicit-architecture",
+      "path": ".",
+      "summary": "Large codebase with no clear design patterns detected; architecture intent may be implicit rather than documented.",
+      "score": 80,
+      "details": {}
+    },
+    {
+      "name": "test-coverage-visibility",
+      "path": "tests/",
+      "summary": "No obvious test entry surface detected; bugfix and refactor work should verify regression coverage first.",
+      "score": 75,
+      "details": {}
+    }
+  ],
+  "recommended_reading_order": [
+    {
+      "name": "backend",
+      "path": "backend",
+      "summary": "Read early: Top-level module with 153 code files detected",
+      "score": 153,
+      "details": {}
+    },
+    {
+      "name": "frontend",
+      "path": "frontend",
+      "summary": "Read early: Top-level module with 40 code files detected",
+      "score": 40,
+      "details": {}
+    },
+    {
+      "name": "gateway",
+      "path": "gateway",
+      "summary": "Read early: Top-level module with 16 code files detected",
+      "score": 16,
+      "details": {}
+    },
+    {
+      "name": "stores",
+      "path": "frontend/src/stores",
+      "summary": "Read early: State layer",
+      "score": 3,
+      "details": {}
+    },
+    {
+      "name": "components",
+      "path": "frontend/src/components",
+      "summary": "Read early: UI component layer",
+      "score": 3,
+      "details": {}
+    },
+    {
+      "name": "models",
+      "path": "backend/app/models",
+      "summary": "Read early: Domain model layer",
+      "score": 3,
+      "details": {}
+    }
+  ]
+}

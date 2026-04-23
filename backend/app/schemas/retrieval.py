@@ -30,12 +30,31 @@ class RetrievalResult(BaseModel):
     chunk_type: str
     content: str
     score: float
+    reason: str | None = None
+    reason_trace: list[str] = Field(default_factory=list)
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
     metadata: dict
+
+
+class RetrievalSearchTrace(BaseModel):
+    search_mode: Literal["vector", "keyword", "hybrid"]
+    dense_search_limit: int
+    dense_hit_count: int
+    sparse_search_limit: int = 0
+    sparse_hit_count: int = 0
+    dense_candidate_count: int = 0
+    sparse_candidate_count: int = 0
+    candidate_count: int
+    ranked_count: int
+    returned_count: int
+    reranker_enabled: bool
+    reranker_backend: str
 
 
 class RetrievalSearchResponse(BaseModel):
     results: list[RetrievalResult]
     total: int
+    search_trace: RetrievalSearchTrace | None = None
 
 
 class AssetSearchRequest(BaseModel):
@@ -67,10 +86,29 @@ class AssetSearchResult(BaseModel):
     asset_uri: str
     preview_text: str
     reason: str
+    reason_trace: list[str] = Field(default_factory=list)
     score: float
+    score_breakdown: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any]
+
+
+class AssetSearchTrace(BaseModel):
+    visual_branch_enabled: bool = False
+    visual_backend: str = "disabled"
+    candidate_count: int = 0
+    returned_count: int = 0
+    requested_asset_types: list[str] = Field(default_factory=list)
+    expected_evidence_types: list[str] = Field(default_factory=list)
+    visual_collection_available: bool = False
+    visual_candidate_count: int = 0
+    image_collection_hits: int = 0
+    text_proxy_collection_hits: int = 0
+    direct_visual_fallback: bool = False
+    result_source_breakdown: dict[str, int] = Field(default_factory=dict)
+    result_branch_breakdown: dict[str, int] = Field(default_factory=dict)
 
 
 class AssetSearchResponse(BaseModel):
     results: list[AssetSearchResult]
     total: int
+    search_trace: AssetSearchTrace | None = None

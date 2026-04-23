@@ -249,6 +249,15 @@ def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             evidence_type = "figure"
         metadata = result.get("metadata") or {}
         raw_content = str(result.get("content") or "")
+        retrieval_reason = str(result.get("reason") or result.get("recommended_use") or "").strip()
+        reason_trace = [str(item) for item in (result.get("reason_trace") or []) if str(item or "").strip()]
+        retrieval_score_breakdown = (
+            result.get("score_breakdown")
+            if isinstance(result.get("score_breakdown"), dict)
+            else metadata.get("hybrid_score_breakdown")
+            if isinstance(metadata.get("hybrid_score_breakdown"), dict)
+            else {}
+        )
         items.append(
             {
                 "evidence_id": f"ev_{index:03d}",
@@ -263,6 +272,9 @@ def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "raw_content": raw_content,
                 "relevance_score": float(result.get("score") or 0),
                 "reusability_score": _compute_reusability_score(result),
+                "retrieval_reason": retrieval_reason,
+                "reason_trace": reason_trace,
+                "retrieval_score_breakdown": retrieval_score_breakdown,
                 "recommended_use": f"可用于 {result.get('chunk_type', '章节')} 相关内容起草",
                 "risk_note": None,
                 "section_type": metadata.get("section_type") or "unknown",
@@ -402,6 +414,7 @@ class EvidenceBundleService:
                     "raw_result_count": len(raw_results),
                     "filtered_result_count": len(results),
                     "filters": filters.model_dump(exclude_none=True),
+                    "search_trace": response.search_trace.model_dump(mode="json") if response.search_trace is not None else None,
                 }
             )
             retrieval_strategy = strategy_name

@@ -13,6 +13,39 @@ import api, { getApiErrorMessage, isNotFoundError } from '@/lib/api';
 import { CaseCandidate, EvidenceBundle } from '@/lib/types';
 import { toast } from 'sonner';
 
+function buildCaseCandidateBreakdownText(candidate: CaseCandidate): string {
+  const breakdown = candidate.score_breakdown ?? {};
+  const parts: string[] = [];
+  if (typeof breakdown.base === 'number' && breakdown.base > 0) {
+    parts.push(`base ${(breakdown.base * 100).toFixed(0)}%`);
+  }
+  if (typeof breakdown.hybrid_rrf === 'number' && breakdown.hybrid_rrf > 0) {
+    parts.push(`rrf +${(breakdown.hybrid_rrf * 100).toFixed(0)}%`);
+  }
+  if (typeof breakdown.hybrid_rerank === 'number' && breakdown.hybrid_rerank > 0) {
+    parts.push(`rerank +${(breakdown.hybrid_rerank * 100).toFixed(0)}%`);
+  }
+  return parts.join(' / ');
+}
+
+function buildEvidenceBreakdownText(evidence: EvidenceBundle['content']['results'][number]): string {
+  const breakdown = evidence.retrieval_score_breakdown ?? {};
+  const parts: string[] = [];
+  if (typeof breakdown.semantic === 'number' && breakdown.semantic > 0) {
+    parts.push(`semantic ${(breakdown.semantic * 100).toFixed(0)}%`);
+  }
+  if (typeof breakdown.sparse === 'number' && breakdown.sparse > 0) {
+    parts.push(`sparse ${(breakdown.sparse * 100).toFixed(0)}%`);
+  }
+  if (typeof breakdown.rerank === 'number' && breakdown.rerank > 0) {
+    parts.push(`rerank ${(breakdown.rerank * 100).toFixed(0)}%`);
+  }
+  if (typeof breakdown.final === 'number' && breakdown.final > 0) {
+    parts.push(`final ${(breakdown.final * 100).toFixed(0)}%`);
+  }
+  return parts.join(' / ');
+}
+
 export default function EvidencePage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -147,8 +180,18 @@ export default function EvidencePage() {
                         <div className="font-medium leading-snug">{candidate.file_name}</div>
                         <Badge variant="outline">{(candidate.score * 100).toFixed(0)}%</Badge>
                       </div>
+                      {buildCaseCandidateBreakdownText(candidate) && (
+                        <p className="mt-2 text-[11px] text-muted-foreground">
+                          {buildCaseCandidateBreakdownText(candidate)}
+                        </p>
+                      )}
                       {candidate.reason && (
                         <p className="mt-2 text-xs text-muted-foreground">{candidate.reason}</p>
+                      )}
+                      {candidate.reason_trace && candidate.reason_trace.length > 0 && (
+                        <p className="mt-2 text-[11px] text-muted-foreground line-clamp-3">
+                          {candidate.reason_trace.slice(0, 3).join(' / ')}
+                        </p>
                       )}
                       {candidate.top_level_titles && candidate.top_level_titles.length > 0 && (
                         <p className="mt-2 text-xs text-muted-foreground line-clamp-3">
@@ -174,7 +217,7 @@ export default function EvidencePage() {
                 <Accordion className="w-full">
                   {evidenceItems.map((evidence, index) => (
                     <AccordionItem
-                      key={evidence.evidence_id || index}
+                      key={`${evidence.evidence_id || 'evidence'}-${index}`}
                       value={`item-${index}`}
                       className="border bg-card mb-4 rounded-lg px-4 shadow-sm"
                     >
@@ -196,6 +239,16 @@ export default function EvidencePage() {
                       </AccordionTrigger>
                       <AccordionContent className="pt-2 pb-4 border-t text-sm leading-relaxed text-slate-700">
                         {evidence.summary}
+                        {buildEvidenceBreakdownText(evidence) && (
+                          <p className="mt-3 text-[11px] text-muted-foreground">
+                            {buildEvidenceBreakdownText(evidence)}
+                          </p>
+                        )}
+                        {evidence.reason_trace && evidence.reason_trace.length > 0 && (
+                          <p className="mt-2 text-[11px] text-muted-foreground line-clamp-3">
+                            {evidence.reason_trace.slice(0, 4).join(' / ')}
+                          </p>
+                        )}
                       </AccordionContent>
                     </AccordionItem>
                   ))}

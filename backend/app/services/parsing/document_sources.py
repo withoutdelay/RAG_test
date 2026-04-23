@@ -67,10 +67,15 @@ def build_direct_source_entry(
     payload["library_track"] = resolved_track
     payload["track"] = resolved_track
     payload["source"] = source
+    payload["parse_gate_status"] = str(metadata.get("parse_gate_status") or "").strip() or None
+    payload["parse_gate_reason"] = str(metadata.get("parse_gate_reason") or "").strip() or None
     return payload
 
 
 def is_library_ready_entry(entry: dict[str, Any]) -> bool:
+    parse_gate_status = str(entry.get("parse_gate_status") or "").strip().lower()
+    if parse_gate_status == "insufficient":
+        return False
     recommendation = str(entry.get("ingestion_recommendation") or "").strip()
     if not recommendation:
         return True

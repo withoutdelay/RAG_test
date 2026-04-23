@@ -9,7 +9,7 @@ from qdrant_client.models import Distance, FieldCondition, Filter, MatchAny, Mat
 
 from app.config import get_settings
 
-_CLIENT_CACHE: dict[tuple[str | None, str | None, int, str], QdrantClient] = {}
+_CLIENT_CACHE: dict[tuple[str | None, str | None, int], QdrantClient] = {}
 
 
 @dataclass
@@ -20,14 +20,14 @@ class QdrantSearchHit:
 
 
 class QdrantService:
-    def __init__(self) -> None:
+    def __init__(self, *, collection_name: str | None = None, dimension: int | None = None) -> None:
         settings = get_settings()
-        self.collection_name = settings.qdrant_collection
-        self.dimension = settings.embedding_dimension
+        self.collection_name = str(collection_name or settings.qdrant_collection).strip() or settings.qdrant_collection
+        self.dimension = int(dimension or settings.embedding_dimension)
         location = settings.qdrant_location
         host = settings.qdrant_host
         port = settings.qdrant_port
-        cache_key = (location, host, port, self.collection_name)
+        cache_key = (location, host, port)
 
         if cache_key not in _CLIENT_CACHE:
             if location:
@@ -41,7 +41,13 @@ class QdrantService:
 
     def ensure_collection(self) -> None:
         try:
-            self.client.get_collection(self.collection_name)
+            collection = self.client.get_collection(self.collection_name)
+            current_vectors = getattr(getattr(collection, "config", None), "params", None)
+            current_vector_params = getattr(current_vectors, "vectors", None)
+            current_size = getattr(current_vector_params, "size", None)
+            if current_size and int(current_size) != self.dimension:
+                self.client.delete_collection(self.collection_name)
+                raise ValueError("collection dimension mismatch")
         except (UnexpectedResponse, ValueError):
             self.client.create_collection(
                 collection_name=self.collection_name,
@@ -55,11 +61,30 @@ class QdrantService:
                 vectors_config=VectorParams(size=self.dimension, distance=Distance.COSINE),
             )
 
+    def recreate_collection(self) -> None:
+        try:
+            self.client.delete_collection(self.collection_name)
+        except Exception:
+            pass
+        self.client.create_collection(
+            collection_name=self.collection_name,
+            vectors_config=VectorParams(size=self.dimension, distance=Distance.COSINE),
+        )
+
     def upsert_chunk(self, *, point_id: uuid.UUID, vector: list[float], payload: dict) -> None:
         self.ensure_collection()
         self.client.upsert(
             collection_name=self.collection_name,
             points=[PointStruct(id=str(point_id), vector=vector, payload=payload)],
+        )
+
+    def upsert_points(self, *, points: list[PointStruct]) -> None:
+        if not points:
+            return
+        self.ensure_collection()
+        self.client.upsert(
+            collection_name=self.collection_name,
+            points=points,
         )
 
     def delete_points(self, point_ids: list[str]) -> None:
@@ -110,4 +135,12 @@ class QdrantService:
             must.append(FieldCondition(key="doc_type", match=MatchValue(value=doc_type)))
         if document_names := filters.get("document_names"):
             must.append(FieldCondition(key="document_name", match=MatchAny(any=document_names)))
+        if asset_type := filters.get("asset_type"):
+            must.append(FieldCondition(key="asset_type", match=MatchValue(value=asset_type)))
+        if asset_types := filters.get("asset_types"):
+            must.append(FieldCondition(key="asset_type", match=MatchAny(any=asset_types)))
+        if asset_id := filters.get("asset_id"):
+            must.append(FieldCondition(key="asset_id", match=MatchValue(value=asset_id)))
+        if asset_ids := filters.get("asset_ids"):
+            must.append(FieldCondition(key="asset_id", match=MatchAny(any=asset_ids)))
         return Filter(must=must) if must else None

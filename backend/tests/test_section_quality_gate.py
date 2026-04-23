@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
 
@@ -10,6 +12,7 @@ from app.services.composition.section_quality import (
     analyze_section_content_quality,
     analyze_section_heading_quality,
 )
+from app.services.knowledge.wiki_context import KnowledgeWikiContextProvider
 from app.services.llm.prompts.section_quality import build_section_quality_prompts
 
 
@@ -46,6 +49,24 @@ class _StubExecutor:
     async def rewrite_section(self, *, task_id, section_context, selected_text, instruction, global_params):
         rewritten = selected_text.replace("### A. 概述", "### 系统组成与控制分工")
         rewritten = rewritten.replace("### 建议插入图表\n\n", "")
+        return SimpleNamespace(content=rewritten)
+
+
+class _CaptureExecutor:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+
+    async def rewrite_section(self, *, task_id, section_context, selected_text, instruction, global_params):
+        self.calls.append(
+            {
+                "task_id": task_id,
+                "section_context": section_context,
+                "instruction": instruction,
+                "selected_text": selected_text,
+            }
+        )
+        rewritten = selected_text.replace("我公司", "本方案")
+        rewritten = rewritten.replace("VFD", "变频器")
         return SimpleNamespace(content=rewritten)
 
 
@@ -1277,6 +1298,115 @@ class SectionQualityGateTests(unittest.TestCase):
         self.assertIn("<review_contract>", user_prompt)
         self.assertIn("<section_markdown>", user_prompt)
         self.assertIn("标签区中的 metadata", user_prompt)
+
+    def test_build_section_quality_prompts_includes_ai_wiki_constraints_when_provided(self) -> None:
+        _system_prompt, user_prompt = build_section_quality_prompts(
+            section={"title": "主回路方案", "purpose": "说明主回路结构。", "keywords": ["主回路"]},
+            outline_title="测试项目技术方案",
+            global_params={"project_name": "测试项目"},
+            content_md="## 主回路方案\n\n正文。",
+            recommended_assets=[],
+            quality_constraints="AI Wiki 质检约束\n- 优先使用“变频器”",
+        )
+
+        self.assertIn("<ai_wiki_review_constraints>", user_prompt)
+        self.assertIn("优先使用“变频器”", user_prompt)
+
+    def test_review_flags_ai_wiki_forbidden_phrases_and_term_mixing_when_provider_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            provider = self._build_quality_wiki_provider(Path(temp_dir))
+            service = SectionQualityGateService(
+                llm_client=_StubLLMClient(),
+                executor=_StubExecutor(),
+                knowledge_wiki=provider,
+            )
+
+            review = self._run(
+                service.review(
+                    task_id="quality-ai-wiki-review",
+                    section={"title": "VFD 主回路方案", "purpose": "说明变频器主回路结构。", "keywords": ["VFD", "变频器"]},
+                    outline_title="测试项目技术方案",
+                    global_params={"project_name": "测试项目"},
+                    content_md=(
+                        "## VFD 主回路方案\n\n"
+                        "我公司推荐本次改造采用 VFD 方案，后续变频器主回路按旁路切换方式配置。"
+                        "该 VFD 与变频器控制单元协同工作。\n"
+                    ),
+                    recommended_assets=[],
+                )
+            )
+
+        self.assertFalse(review.passed)
+        self.assertIn("KW001", {item.code for item in review.issues})
+        self.assertIn("KW010", {item.code for item in review.issues})
+
+    def test_review_and_repair_passes_ai_wiki_constraints_into_rewrite_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            provider = self._build_quality_wiki_provider(Path(temp_dir))
+            executor = _CaptureExecutor()
+            service = SectionQualityGateService(
+                llm_client=_StubLLMClient(),
+                executor=executor,
+                knowledge_wiki=provider,
+            )
+
+            content, status, meta = self._run(
+                service.review_and_repair(
+                    task_id="quality-ai-wiki-rewrite",
+                    section={"title": "VFD 主回路方案", "purpose": "说明变频器主回路结构。", "keywords": ["VFD", "变频器"]},
+                    outline_title="测试项目技术方案",
+                    global_params={"project_name": "测试项目"},
+                    content_md=(
+                        "## VFD 主回路方案\n\n"
+                        "我公司推荐本次改造采用 VFD 方案，后续变频器主回路按旁路切换方式配置。"
+                        "该 VFD 与变频器控制单元协同工作。\n"
+                    ),
+                    recommended_assets=[],
+                    allow_rewrite=True,
+                )
+            )
+
+        self.assertEqual(status, "generated")
+        self.assertEqual(meta["status"], "passed")
+        self.assertTrue(meta["rewrite_attempted"])
+        self.assertTrue(meta["rewrite_applied"])
+        self.assertGreater(meta["knowledge_review_context_chars"], 0)
+        self.assertEqual(len(executor.calls), 1)
+        self.assertIn("AI Wiki 约束", executor.calls[0]["section_context"])
+        self.assertIn("统一术语", executor.calls[0]["section_context"])
+        self.assertIn("禁用表述", executor.calls[0]["section_context"])
+        self.assertNotIn("我公司", content)
+        self.assertNotIn(" VFD ", f" {content} ")
+
+    def _build_quality_wiki_provider(self, root: Path) -> KnowledgeWikiContextProvider:
+        (root / "manifest.json").write_text(json.dumps({"generated_at": "2026-04-20T00:00:00Z"}), encoding="utf-8")
+        (root / "glossary.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "primary_term": "vfd",
+                        "display_primary_term": "变频器",
+                        "aliases": ["VFD", "变频柜"],
+                        "display_aliases": ["VFD", "变频柜"],
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        (root / "equipment_cards.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+        (root / "interface_cards.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+        (root / "section_templates.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+        (root / "forbidden_phrases.json").write_text(
+            json.dumps(
+                [
+                    {"phrase": "我公司", "preferred": "本方案 / 本系统 / 本装置"},
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return KnowledgeWikiContextProvider(root)
 
     def _run(self, coroutine):
         import asyncio

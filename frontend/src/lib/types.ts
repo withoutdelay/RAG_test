@@ -33,9 +33,32 @@ export interface Document {
   file_type: string;
   file_size_bytes?: number;
   doc_type: string;
-  parse_status: 'pending' | 'parsing' | 'done' | 'failed';
+  parse_status: 'pending' | 'parsing' | 'done' | 'failed' | 'parse_insufficient';
   metadata?: Record<string, unknown>;
   created_at?: string;
+}
+
+export interface HistoryLibraryRefreshStatus {
+  status: 'idle' | 'queued' | 'running' | 'succeeded' | 'failed' | string;
+  requested_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  last_success_at?: string | null;
+  pending: boolean;
+  error?: string | null;
+  stats?: Record<string, unknown>;
+  pipelines?: Record<string, HistoryLibraryRefreshPipelineStatus>;
+}
+
+export interface HistoryLibraryRefreshPipelineStatus {
+  status: 'idle' | 'queued' | 'running' | 'succeeded' | 'failed' | string;
+  requested_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  last_success_at?: string | null;
+  pending?: boolean;
+  error?: string | null;
+  duration_seconds?: number | null;
 }
 
 export interface Chunk {
@@ -79,6 +102,9 @@ export interface EvidenceCard {
   summary: string;
   raw_content?: string;
   relevance_score: number;
+  retrieval_reason?: string;
+  reason_trace?: string[];
+  retrieval_score_breakdown?: Record<string, number>;
   recommended_use?: string;
   risk_note?: string | null;
   metadata?: Record<string, unknown>;
@@ -89,8 +115,10 @@ export interface CaseCandidate {
   file_name: string;
   score: number;
   reason?: string;
+  reason_trace?: string[];
   profile?: string;
   library_track?: string;
+  score_breakdown?: Record<string, number>;
   top_level_titles?: string[];
 }
 
@@ -167,6 +195,8 @@ export interface RecommendedAsset {
   visual_role?: string | null;
   asset_uri?: string;
   score?: number;
+  reason_trace?: string[];
+  score_breakdown?: Record<string, number | string>;
   metadata?: Record<string, unknown>;
 }
 
@@ -179,6 +209,8 @@ export interface RetrievalSectionTrace {
   level?: number;
   score?: number;
   reason?: string;
+  reason_trace?: string[];
+  score_breakdown?: Record<string, number>;
 }
 
 export interface RetrievalBlockTrace {
@@ -189,12 +221,36 @@ export interface RetrievalBlockTrace {
   heading_path?: string[];
   selection_score?: number;
   selection_reasons?: string[];
+  retrieval_reason?: string;
+  retrieval_reason_trace?: string[];
+  retrieval_score_breakdown?: Record<string, number>;
+  selection_score_breakdown?: Record<string, number>;
+}
+
+export interface KnowledgeWikiPriorSummary {
+  selected_block_count?: number;
+  prior_hit_block_count?: number;
+  prior_hit_ratio?: number;
+  total_prior_boost?: number;
+  max_prior_boost?: number;
+  reason_hits?: Record<string, number>;
 }
 
 export interface RetrievalTokenBudget {
   section_material_tokens?: number;
   asset_tokens?: number;
   within_budget?: boolean;
+}
+
+export interface RetrievalSelectionReason {
+  mode?: string;
+  top_section_id?: string;
+  top_section_score?: number;
+  runner_up_score?: number;
+  lead_score?: number;
+  full_section_block_count?: number;
+  full_section_within_budget?: boolean;
+  reasons?: string[];
 }
 
 export interface RetrievalQueryIntents {
@@ -209,6 +265,9 @@ export interface RetrievalQueryIntents {
 export interface ReuseRetrievalTrace {
   query?: string;
   query_intents?: RetrievalQueryIntents;
+  knowledge_wiki_terms?: string[];
+  knowledge_wiki_product_cards?: string[];
+  knowledge_wiki_module_cards?: string[];
   section_candidates?: RetrievalSectionTrace[];
   scoped_sections?: RetrievalSectionTrace[];
 }
@@ -222,6 +281,9 @@ export interface ReuseBlockLike {
   section_path?: string;
   heading_path?: string[] | string;
   content_md?: string;
+  retrieval_reason?: string;
+  retrieval_reason_trace?: string[];
+  retrieval_score_breakdown?: Record<string, number>;
 }
 
 export interface ReusePack {
@@ -243,6 +305,8 @@ export interface SectionGenerationDetails {
   retrieval_mode?: 'baseline_fallback' | 'section_pack' | 'full_section' | string;
   selected_sections?: RetrievalSectionTrace[];
   selected_blocks?: RetrievalBlockTrace[];
+  knowledge_wiki_prior_summary?: KnowledgeWikiPriorSummary;
+  selection_reason?: RetrievalSelectionReason;
   token_budget?: RetrievalTokenBudget;
   refinement_status?: string;
   refinement_fallback_reason?: string | null;

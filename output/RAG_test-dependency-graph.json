@@ -1,0 +1,43 @@
+{
+  "project_name": "RAG_test",
+  "project_path": "/Volumes/thunder/code/RAG_test",
+  "summary": "The dependency graph highlights `209` source nodes and `2` internal import edges. Use the critical nodes and paths first when you need to understand blast radius, debug high-risk flows, or decide where to place regression coverage.",
+  "node_count": 209,
+  "edge_count": 2,
+  "critical_nodes": [
+    {
+      "path": "frontend/src/components/layout/AppLayout.tsx",
+      "inbound": 0,
+      "outbound": 2,
+      "score": 4,
+      "role": "internal"
+    },
+    {
+      "path": "frontend/src/components/layout/Header.tsx",
+      "inbound": 1,
+      "outbound": 0,
+      "score": 3,
+      "role": "internal"
+    },
+    {
+      "path": "frontend/src/components/layout/Sidebar.tsx",
+      "inbound": 1,
+      "outbound": 0,
+      "score": 3,
+      "role": "internal"
+    }
+  ],
+  "critical_paths": [],
+  "edges": [
+    {
+      "source": "frontend/src/components/layout/AppLayout.tsx",
+      "target": "frontend/src/components/layout/Header.tsx",
+      "kind": "module-import"
+    },
+    {
+      "source": "frontend/src/components/layout/AppLayout.tsx",
+      "target": "frontend/src/components/layout/Sidebar.tsx",
+      "kind": "module-import"
+    }
+  ]
+}

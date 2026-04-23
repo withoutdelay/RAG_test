@@ -3,11 +3,29 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.services.domain.synonyms import text_contains_domain_term
 from app.services.parsing.formula_candidates import has_garbled_formula_text, is_formula_like_text
 
 
 _SECTION_TYPE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("commercial_manual_only", ("商务", "报价", "合同", "法务", "授权", "保密")),
+    (
+        "commercial_manual_only",
+        (
+            "商务",
+            "报价",
+            "合同",
+            "法务",
+            "授权",
+            "保密",
+            "资料提供",
+            "提交资料",
+            "交付资料",
+            "随机资料",
+            "技术资料",
+            "文档清单",
+            "交付文档",
+        ),
+    ),
     ("company_profile", ("公司简介", "企业简介", "企业介绍", "公司概况")),
     ("bom_or_supply_list", ("供货清单", "设备清单", "主要设备清单", "配置清单", "物料清单", "bom")),
     ("supply_scope", ("供货范围", "供货内容", "供货界面")),
@@ -203,6 +221,12 @@ def infer_target_taxonomy(section: dict[str, Any]) -> dict[str, Any]:
         front_matter=False,
         needs_asset_lookup=bool(section.get("asset_required")),
     )
+    explicit_section_type = str(section.get("target_section_type") or "").strip().lower()
+    explicit_equipment_type = str(section.get("target_equipment_type") or "").strip().lower()
+    if explicit_section_type:
+        taxonomy["section_type"] = explicit_section_type
+    if explicit_equipment_type:
+        taxonomy["equipment_type"] = explicit_equipment_type
     hint_text = f"{title}\n{purpose}\n{keywords}".casefold()
     if prefer_table and taxonomy["section_type"] == "supply_scope":
         if any(keyword.casefold() in hint_text for keyword in ("清单", "设备", "bom", "物料")):
@@ -229,11 +253,11 @@ def infer_target_taxonomy(section: dict[str, Any]) -> dict[str, Any]:
 
 
 def extract_taxonomy_hints(*texts: str) -> list[str]:
-    haystack = "\n".join(str(text or "") for text in texts).casefold()
+    haystack = "\n".join(str(text or "") for text in texts)
     hints: list[str] = []
     for _, keywords in (*_SECTION_TYPE_RULES, *_EQUIPMENT_TYPE_RULES):
         for keyword in keywords:
-            if keyword.casefold() in haystack and keyword not in hints:
+            if text_contains_domain_term(haystack, keyword) and keyword not in hints:
                 hints.append(keyword)
     return hints
 
@@ -256,13 +280,13 @@ def heading_focus_adjustment(*, target_section_type: str, heading_text: str) -> 
     score = 0.0
     reasons: list[str] = []
     if any(
-        term.casefold() in haystack or term.casefold().replace(" ", "") in compact_haystack
+        text_contains_domain_term(haystack, term) or term.casefold().replace(" ", "") in compact_haystack
         for term in _HEADING_FOCUS_TERMS.get(normalized_type, ())
     ):
         score += 0.14
         reasons.append("heading_focus_match")
     if any(
-        term.casefold() in haystack or term.casefold().replace(" ", "") in compact_haystack
+        text_contains_domain_term(haystack, term) or term.casefold().replace(" ", "") in compact_haystack
         for term in _HEADING_NOISE_TERMS.get(normalized_type, ())
     ):
         score -= 0.22
@@ -310,14 +334,12 @@ def _match_weighted_rules(
     rules: tuple[tuple[str, tuple[str, ...]], ...],
     default: str,
 ) -> str:
-    heading_lower = heading_text.casefold()
-    content_lower = content_text.casefold()
     best_label = default
     best_score = 0
 
     for label, keywords in rules:
-        heading_match = any(keyword.casefold() in heading_lower for keyword in keywords)
-        content_match = any(keyword.casefold() in content_lower for keyword in keywords)
+        heading_match = any(text_contains_domain_term(heading_text, keyword) for keyword in keywords)
+        content_match = any(text_contains_domain_term(content_text, keyword) for keyword in keywords)
         score = 0
         if heading_match:
             score += 5
@@ -340,26 +362,26 @@ def _classify_content_form(
 ) -> str:
     if front_matter:
         return "page_furniture"
-    if any(keyword.casefold() in haystack for keyword in _CERTIFICATE_TERMS):
+    if any(text_contains_domain_term(haystack, keyword) for keyword in _CERTIFICATE_TERMS):
         return "certificate"
     if str(chunk_type or "").upper() == "TABLE":
         if str(section_type or "").lower() == "communication_interface" and any(
-            keyword.casefold() in haystack for keyword in _INTERFACE_TERMS
+            text_contains_domain_term(haystack, keyword) for keyword in _INTERFACE_TERMS
         ):
             return "interface_table"
-        if any(keyword.casefold() in haystack for keyword in _BOM_TERMS):
+        if any(text_contains_domain_term(haystack, keyword) for keyword in _BOM_TERMS):
             return "bom_table"
-        if any(keyword.casefold() in haystack for keyword in _INTERFACE_TERMS):
+        if any(text_contains_domain_term(haystack, keyword) for keyword in _INTERFACE_TERMS):
             return "interface_table"
-        if any(keyword.casefold() in haystack for keyword in _PROTECTION_TERMS):
+        if any(text_contains_domain_term(haystack, keyword) for keyword in _PROTECTION_TERMS):
             return "protection_table"
         return "parameter_table"
     if str(section_type or "").lower() == "communication_interface" and any(
-        keyword.casefold() in haystack for keyword in _INTERFACE_TERMS
+        text_contains_domain_term(haystack, keyword) for keyword in _INTERFACE_TERMS
     ):
         return "narrative"
     if has_garbled_formula_text(content_text) or is_formula_like_text(content_text):
         return "formula"
-    if needs_asset_lookup and any(keyword.casefold() in haystack for keyword in _FIGURE_TERMS):
+    if needs_asset_lookup and any(text_contains_domain_term(haystack, keyword) for keyword in _FIGURE_TERMS):
         return "figure"
     return "narrative"

@@ -1,0 +1,179 @@
+{
+  "summary": {
+    "total_snapshots": 9,
+    "eligible_healthy_snapshots": 9,
+    "trace_metric_samples": 0,
+    "retrieval_final_metric_samples": 0,
+    "retrieval_semantic_metric_samples": 0,
+    "retrieval_rerank_metric_samples": 0,
+    "retrieval_mode_counts": {
+      "baseline_fallback": 9,
+      "full_section": 9,
+      "section_pack": 45
+    }
+  },
+  "recommendations": {
+    "min_trace_sections": null,
+    "min_avg_retrieval_final": null,
+    "min_avg_retrieval_semantic": null,
+    "min_avg_retrieval_rerank": null
+  },
+  "basis": {
+    "quantile": 0.2,
+    "score_safety_margin": 0.02,
+    "min_samples": 3
+  },
+  "notes": [
+    "insufficient healthy snapshot samples for trace-section threshold: 0 < 3",
+    "insufficient healthy snapshot samples for retrieval final score threshold: 0 < 3",
+    "insufficient healthy snapshot samples for retrieval semantic score threshold: 0 < 3",
+    "insufficient healthy snapshot samples for retrieval rerank score threshold: 0 < 3",
+    "9 healthy replay snapshots still use legacy retrieval telemetry; rerun evaluate_project_snapshot.py to refresh history with structured retrieval metrics"
+  ],
+  "snapshots": [
+    {
+      "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+      "generated_at": "2026-04-20T14:01:11.171159+00:00",
+      "health": "healthy",
+      "total_sections": 7,
+      "trace_sections": 0,
+      "selected_blocks": 0,
+      "average_retrieval_final_score": null,
+      "average_retrieval_semantic_score": null,
+      "average_retrieval_rerank_score": null,
+      "retrieval_mode_counts": {
+        "baseline_fallback": 1,
+        "full_section": 1,
+        "section_pack": 5
+      }
+    },
+    {
+      "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+      "generated_at": "2026-04-20T14:01:21.042584+00:00",
+      "health": "healthy",
+      "total_sections": 7,
+      "trace_sections": 0,
+      "selected_blocks": 0,
+      "average_retrieval_final_score": null,
+      "average_retrieval_semantic_score": null,
+      "average_retrieval_rerank_score": null,
+      "retrieval_mode_counts": {
+        "baseline_fallback": 1,
+        "full_section": 1,
+        "section_pack": 5
+      }
+    },
+    {
+      "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+      "generated_at": "2026-04-20T14:07:11.119466+00:00",
+      "health": "healthy",
+      "total_sections": 7,
+      "trace_sections": 0,
+      "selected_blocks": 0,
+      "average_retrieval_final_score": null,
+      "average_retrieval_semantic_score": null,
+      "average_retrieval_rerank_score": null,
+      "retrieval_mode_counts": {
+        "baseline_fallback": 1,
+        "full_section": 1,
+        "section_pack": 5
+      }
+    },
+    {
+      "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+      "generated_at": "2026-04-20T14:10:59.052485+00:00",
+      "health": "healthy",
+      "total_sections": 7,
+      "trace_sections": 0,
+      "selected_blocks": 0,
+      "average_retrieval_final_score": null,
+      "average_retrieval_semantic_score": null,
+      "average_retrieval_rerank_score": null,
+      "retrieval_mode_counts": {
+        "baseline_fallback": 1,
+        "full_section": 1,
+        "section_pack": 5
+      }
+    },
+    {
+      "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+      "generated_at": "2026-04-20T14:11:12.272541+00:00",
+      "health": "healthy",
+      "total_sections": 7,
+      "trace_sections": 0,
+      "selected_blocks": 0,
+      "average_retrieval_final_score": null,
+      "average_retrieval_semantic_score": null,
+      "average_retrieval_rerank_score": null,
+      "retrieval_mode_counts": {
+        "baseline_fallback": 1,
+        "full_section": 1,
+        "section_pack": 5
+      }
+    },
+    {
+      "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+      "generated_at": "2026-04-20T14:11:45.690271+00:00",
+      "health": "healthy",
+      "total_sections": 7,
+      "trace_sections": 0,
+      "selected_blocks": 0,
+      "average_retrieval_final_score": null,
+      "average_retrieval_semantic_score": null,
+      "average_retrieval_rerank_score": null,
+      "retrieval_mode_counts": {
+        "baseline_fallback": 1,
+        "full_section": 1,
+        "section_pack": 5
+      }
+    },
+    {
+      "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+      "generated_at": "2026-04-20T14:20:43.899282+00:00",
+      "health": "healthy",
+      "total_sections": 7,
+      "trace_sections": 0,
+      "selected_blocks": 0,
+      "average_retrieval_final_score": null,
+      "average_retrieval_semantic_score": null,
+      "average_retrieval_rerank_score": null,
+      "retrieval_mode_counts": {
+        "baseline_fallback": 1,
+        "full_section": 1,
+        "section_pack": 5
+      }
+    },
+    {
+      "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+      "generated_at": "2026-04-20T14:26:01.981806+00:00",
+      "health": "healthy",
+      "total_sections": 7,
+      "trace_sections": 0,
+      "selected_blocks": 0,
+      "average_retrieval_final_score": null,
+      "average_retrieval_semantic_score": null,
+      "average_retrieval_rerank_score": null,
+      "retrieval_mode_counts": {
+        "baseline_fallback": 1,
+        "full_section": 1,
+        "section_pack": 5
+      }
+    },
+    {
+      "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+      "generated_at": "2026-04-20T14:28:02.542025+00:00",
+      "health": "healthy",
+      "total_sections": 7,
+      "trace_sections": 0,
+      "selected_blocks": 0,
+      "average_retrieval_final_score": null,
+      "average_retrieval_semantic_score": null,
+      "average_retrieval_rerank_score": null,
+      "retrieval_mode_counts": {
+        "baseline_fallback": 1,
+        "full_section": 1,
+        "section_pack": 5
+      }
+    }
+  ]
+}

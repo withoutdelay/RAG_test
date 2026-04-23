@@ -1,0 +1,32 @@
+{
+  "base_url": "http://127.0.0.1:8000/api/v1",
+  "project_id_filter": "",
+  "generated_at": "2026-04-22T09:33:52.942714+00:00",
+  "use_recommended_thresholds": true,
+  "recommended_thresholds_json": "../output/RAG_test-project-replay-thresholds.json",
+  "summary": {
+    "discovered_projects": 1,
+    "eligible_candidates": 0,
+    "refreshed_projects": 0,
+    "failed_projects": 0,
+    "skipped_projects": 1
+  },
+  "candidates": [],
+  "refreshed": [],
+  "failures": [],
+  "skipped": [
+    {
+      "project_id": "7dba8a2a-a24c-47c9-addc-89681448e80b",
+      "name": "2026年国网变电站智能化项目",
+      "status": "CREATED",
+      "draft_version": 0,
+      "reason": "current_draft_version=0"
+    }
+  ],
+  "threshold_refresh": {
+    "exit_code": 0,
+    "markdown_path": "/Volumes/thunder/code/RAG_test/output/RAG_test-project-replay-thresholds.md",
+    "json_path": "/Volumes/thunder/code/RAG_test/output/RAG_test-project-replay-thresholds.json",
+    "notes": "Wrote markdown report to /Volumes/thunder/code/RAG_test/output/RAG_test-project-replay-thresholds.md\nWrote JSON report to /Volumes/thunder/code/RAG_test/output/RAG_test-project-replay-thresholds.json\nRecommendation summary: healthy=9 trace_samples=0 final_samples=0"
+  }
+}

@@ -15,6 +15,8 @@ try:
 except Exception:  # pragma: no cover - optional during lightweight test runs
     get_settings = None
 
+from app.services.parsing.section_catalog import build_section_catalog
+
 try:
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
@@ -78,7 +80,7 @@ class DoclingParser:
             self.docling_libreoffice_cmd = os.getenv("DOCLING_LIBREOFFICE_CMD")
         self.resolved_libreoffice_cmd = self._resolve_libreoffice_cmd()
 
-    async def parse(self, file_path: str) -> ParsedDocument:
+    async def parse(self, file_path: str, *, include_assets: bool = True) -> ParsedDocument:
         path = Path(file_path)
         suffix = path.suffix.lower()
 
@@ -113,14 +115,15 @@ class DoclingParser:
                             "docling_docx_conversion_source_format": "docx",
                             "docling_docx_conversion_target_format": "pdf",
                         }
-                converter = self._build_converter(effective_path.suffix.lower())
+                converter = self._build_converter(effective_path.suffix.lower(), include_assets=include_assets)
                 result = converter.convert(str(effective_path))
                 items = list(result.document.iterate_items())
                 markdown = result.document.export_to_markdown()
-                assets = self._extract_assets(result.document, items=items)
-                structure = self._extract_structure_hints(items)
+                normalized_markdown = self._normalize_text(markdown, path.name)
+                assets = self._extract_assets(result.document, items=items) if include_assets else []
+                structure = self._extract_structure_hints(items, markdown=normalized_markdown)
                 return ParsedDocument(
-                    markdown=self._normalize_text(markdown, path.name),
+                    markdown=normalized_markdown,
                     metadata={
                         "source_name": path.name,
                         "parser": "docling",
@@ -128,6 +131,7 @@ class DoclingParser:
                         "parser_backend_used": "docling",
                         "docling_libreoffice_cmd": self.resolved_libreoffice_cmd,
                         "docling_libreoffice_available": bool(self.resolved_libreoffice_cmd),
+                        "asset_extraction_enabled": include_assets,
                         "parser_structure_heading_count": len(structure.get("heading_hints") or []),
                         "format": suffix.lstrip("."),
                         **conversion_note,
@@ -155,6 +159,7 @@ class DoclingParser:
                 "parser_backend_used": "fallback",
                 "docling_libreoffice_cmd": self.resolved_libreoffice_cmd,
                 "docling_libreoffice_available": bool(self.resolved_libreoffice_cmd),
+                "asset_extraction_enabled": include_assets,
                 "format": suffix.lstrip("."),
             },
             structure={},
@@ -226,16 +231,16 @@ class DoclingParser:
                 return str(path.resolve())
         return None
 
-    def _build_converter(self, suffix: str) -> DocumentConverter:
+    def _build_converter(self, suffix: str, *, include_assets: bool = True) -> DocumentConverter:
         if suffix != ".pdf" or InputFormat is None or PdfPipelineOptions is None or PdfFormatOption is None:
             return DocumentConverter()
 
         pipeline_options = PdfPipelineOptions()
-        pipeline_options.generate_page_images = True
-        pipeline_options.generate_picture_images = True
-        pipeline_options.images_scale = 2.0
+        pipeline_options.generate_page_images = bool(include_assets)
+        pipeline_options.generate_picture_images = bool(include_assets)
+        pipeline_options.images_scale = 2.0 if include_assets else 1.0
         if hasattr(pipeline_options, "generate_table_images"):
-            pipeline_options.generate_table_images = True
+            pipeline_options.generate_table_images = bool(include_assets)
         return DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
@@ -323,7 +328,7 @@ class DoclingParser:
 
         return assets
 
-    def _extract_structure_hints(self, items: list[tuple[Any, int]]) -> dict[str, Any]:
+    def _extract_structure_hints(self, items: list[tuple[Any, int]], *, markdown: str = "") -> dict[str, Any]:
         if not DOC_LING_HEADING_TYPES:
             return {}
 
@@ -345,9 +350,17 @@ class DoclingParser:
                     "source_ref": str(getattr(element, "self_ref", "") or ""),
                 }
             )
-        return {
+        structure = {
             "heading_hints": heading_hints,
         }
+        normalized_markdown = str(markdown or "").strip()
+        if normalized_markdown:
+            catalog = build_section_catalog(normalized_markdown, structure_hints=structure)
+            sections = catalog.get("sections") or []
+            if sections:
+                structure["document_title"] = catalog.get("document_title")
+                structure["section_catalog"] = sections
+        return structure
 
     def _extract_text(self, element: Any) -> str | None:
         text = getattr(element, "text", None)

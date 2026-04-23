@@ -1,0 +1,163 @@
+{
+  "project_name": "某钢铁集团高炉鼓风机 LCI 软起动改造项目",
+  "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+  "generated_at": "2026-04-22T17:42:13.013079+00:00",
+  "status": "passed",
+  "passed": true,
+  "failure_reason": "",
+  "summary": {
+    "step_count": 2,
+    "passed_step_count": 1,
+    "skipped_step_count": 1,
+    "failed_step_count": 0,
+    "quality_smoke_test_count": 5
+  },
+  "project_replay_summary": {
+    "project_name": "某钢铁集团高炉鼓风机 LCI 软起动改造项目",
+    "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+    "draft_version": 3,
+    "health": "healthy",
+    "generated_sections": 7,
+    "passed_sections": 7,
+    "total_sections": 7,
+    "regression_count": 0,
+    "changed_section_count": 0,
+    "baseline_path": "/Volumes/thunder/code/RAG_test/output/project-replay-history/359acbab-0acd-4c19-aa31-7f6d50512a12-v3-20260420142601.json",
+    "generated_at": "2026-04-20T14:28:02.542025+00:00",
+    "used_recommended_thresholds": false,
+    "recommended_thresholds_available": false,
+    "recommended_thresholds_path": "",
+    "threshold_source": "",
+    "gate_min_trace_sections": null,
+    "gate_min_average_retrieval_final_score": null
+  },
+  "project_replay_import_summary": {
+    "generated_at": "2026-04-22T10:02:50.373227+00:00",
+    "use_recommended_thresholds": true,
+    "recommended_thresholds_json": "../output/RAG_test-project-replay-thresholds.json",
+    "input_files": 1,
+    "loaded_snapshots": 1,
+    "imported_snapshots": 0,
+    "backfilled_snapshots": 1,
+    "structured_imported_snapshots": 0,
+    "legacy_imported_snapshots": 0,
+    "gate_threshold_annotations": 0,
+    "gate_threshold_backfills": 1,
+    "threshold_source_counts": {
+      "recommended_unavailable": 1
+    },
+    "skipped_snapshots": 0,
+    "invalid_inputs": 0,
+    "skip_reason_counts": {}
+  },
+  "project_replay_refresh_summary": {
+    "generated_at": "2026-04-22T09:33:52.942714+00:00",
+    "base_url": "http://127.0.0.1:8000/api/v1",
+    "use_recommended_thresholds": true,
+    "recommended_thresholds_json": "../output/RAG_test-project-replay-thresholds.json",
+    "discovered_projects": 1,
+    "eligible_candidates": 0,
+    "refreshed_projects": 0,
+    "failed_projects": 0,
+    "skipped_projects": 1,
+    "skip_reason_counts": {
+      "current_draft_version=0": 1
+    },
+    "threshold_refresh_exit_code": 0,
+    "threshold_refresh_json_path": "/Volumes/thunder/code/RAG_test/output/RAG_test-project-replay-thresholds.json"
+  },
+  "project_replay_threshold_summary": {
+    "total_snapshots": 9,
+    "eligible_healthy_snapshots": 9,
+    "trace_metric_samples": 0,
+    "retrieval_final_metric_samples": 0,
+    "retrieval_semantic_metric_samples": 0,
+    "retrieval_rerank_metric_samples": 0,
+    "recommendations_available": false,
+    "available_recommendation_count": 0,
+    "available_recommendations": {},
+    "top_note": "9 healthy replay snapshots still use legacy retrieval telemetry; rerun evaluate_project_snapshot.py to refresh history with structured retrieval metrics",
+    "notes": [
+      "insufficient healthy snapshot samples for trace-section threshold: 0 < 3",
+      "insufficient healthy snapshot samples for retrieval final score threshold: 0 < 3",
+      "insufficient healthy snapshot samples for retrieval semantic score threshold: 0 < 3",
+      "insufficient healthy snapshot samples for retrieval rerank score threshold: 0 < 3",
+      "9 healthy replay snapshots still use legacy retrieval telemetry; rerun evaluate_project_snapshot.py to refresh history with structured retrieval metrics"
+    ]
+  },
+  "knowledge_wiki_prior_summary": {
+    "total_sections": 16,
+    "sections_with_case_candidates": 16,
+    "sections_with_equipment_target": 16,
+    "prior_hit_sections": 11,
+    "prior_hit_block_count": 29,
+    "total_prior_boost": 3.55,
+    "baseline_top1_section_type_match": 9,
+    "with_prior_top1_section_type_match": 9,
+    "baseline_top1_equipment_type_match": 8,
+    "with_prior_top1_equipment_type_match": 8,
+    "section_match_rank_improved": 0,
+    "section_match_rank_worsened": 0,
+    "equipment_match_rank_improved": 0,
+    "equipment_match_rank_worsened": 0,
+    "top1_changed": 1,
+    "top1_section_type_match_gained": 0,
+    "top1_section_type_match_lost": 0,
+    "evaluation_mode": "fast_heuristic_only",
+    "docx_fast_extract_enabled": true,
+    "skipped_documents": 0,
+    "stable_for_release": true,
+    "summary_note": "holdout eval produced no regression signal; AI Wiki priors remain conservative"
+  },
+  "quality_smoke_tests": [
+    "test_ai_wiki_prior_governance_artifacts_are_wired",
+    "test_core_reuse_first_artifacts_exist",
+    "test_project_replay_governance_artifacts_are_wired",
+    "test_project_replay_regression_guard_is_healthy",
+    "test_runtime_contract_artifacts_exist"
+  ],
+  "steps": [
+    {
+      "name": "Project Replay Gate",
+      "status": "skipped",
+      "passed": false,
+      "detail": "skipped by flag",
+      "path": "/Volumes/thunder/code/RAG_test/output/RAG_test-project-replay-eval.json",
+      "details": {
+        "project_name": "某钢铁集团高炉鼓风机 LCI 软起动改造项目",
+        "project_id": "359acbab-0acd-4c19-aa31-7f6d50512a12",
+        "draft_version": 3,
+        "health": "healthy",
+        "generated_sections": 7,
+        "passed_sections": 7,
+        "total_sections": 7,
+        "regression_count": 0,
+        "changed_section_count": 0,
+        "baseline_path": "/Volumes/thunder/code/RAG_test/output/project-replay-history/359acbab-0acd-4c19-aa31-7f6d50512a12-v3-20260420142601.json",
+        "generated_at": "2026-04-20T14:28:02.542025+00:00",
+        "used_recommended_thresholds": false,
+        "recommended_thresholds_available": false,
+        "recommended_thresholds_path": "",
+        "threshold_source": "",
+        "gate_min_trace_sections": null,
+        "gate_min_average_retrieval_final_score": null
+      }
+    },
+    {
+      "name": "Quality Smoke",
+      "status": "passed",
+      "passed": true,
+      "detail": "ran 5 smoke tests",
+      "path": "/Volumes/thunder/code/RAG_test/tests/test_quality_smoke.py",
+      "details": {
+        "tests": [
+          "test_ai_wiki_prior_governance_artifacts_are_wired",
+          "test_core_reuse_first_artifacts_exist",
+          "test_project_replay_governance_artifacts_are_wired",
+          "test_project_replay_regression_guard_is_healthy",
+          "test_runtime_contract_artifacts_exist"
+        ]
+      }
+    }
+  ]
+}

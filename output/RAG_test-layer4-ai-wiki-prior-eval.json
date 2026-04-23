@@ -1,0 +1,1425 @@
+{
+  "summary": {
+    "total_sections": 16,
+    "sections_with_case_candidates": 16,
+    "sections_with_equipment_target": 16,
+    "baseline": {
+      "top1_section_type_match": 9,
+      "top3_section_type_hit": 10,
+      "top1_equipment_type_match": 8,
+      "top3_equipment_type_hit": 9
+    },
+    "with_prior": {
+      "top1_section_type_match": 9,
+      "top3_section_type_hit": 10,
+      "prior_hit_sections": 11,
+      "prior_hit_block_count": 29,
+      "top1_equipment_type_match": 8,
+      "top3_equipment_type_hit": 9,
+      "total_prior_boost": 3.55
+    },
+    "deltas": {
+      "section_match_rank_unchanged": 10,
+      "equipment_match_rank_unchanged": 9,
+      "top1_changed": 1
+    },
+    "evaluation_mode": "fast_heuristic_only",
+    "docx_fast_extract_enabled": true,
+    "skipped_documents": 0
+  },
+  "records": [
+    {
+      "sample_id": "vera-46268861",
+      "document_name": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+      "section_id": "6.1.1",
+      "section_title": "5.1.1 变频器系统示意图",
+      "section_path": "5 变频器技术数据 > 5.1 变频器配置 > 5.1.1 变频器系统示意图",
+      "target_section_type": "vfd_spec",
+      "target_equipment_type": "vfd",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.79,
+          "reason": "query_overlap=变频器系统示意图,变频器,变频器技术数据,变频器配置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.79,
+          "reason": "query_overlap=变频器,高压变频器,高压变频,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.51,
+          "reason": "query_overlap=变频器,变频装置; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "永磁电机变频改造方案族",
+        "永磁",
+        "永磁电机",
+        "节能改造",
+        "变频改造",
+        "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "高压变频器方案族",
+        "高压变频器",
+        "中压变频器",
+        "变频装置",
+        "变频柜",
+        "VFD"
+      ],
+      "knowledge_wiki_product_cards": [
+        "永磁电机变频改造方案族",
+        "高压变频器方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "功率单元",
+        "IGBT",
+        "变压器柜"
+      ],
+      "baseline": {
+        "target_section_type": "vfd_spec",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "top1_section_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.2高压变频器主回路方案说明",
+        "top1_score": 1.2,
+        "top1_section_type": "main_circuit_scheme",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "vfd_spec",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "top1_section_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.2高压变频器主回路方案说明",
+        "top1_score": 1.2,
+        "top1_section_type": "main_circuit_scheme",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 3,
+        "total_prior_boost": 0.36,
+        "top1_prior_boost": 0.1
+      }
+    },
+    {
+      "sample_id": "vera-46268861",
+      "document_name": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+      "section_id": "26.1",
+      "section_title": "12.1 供货范围( TBD ,由上电供应商确定)",
+      "section_path": "12 电机润滑油站系统( TBD ,由上电供应商确定) > 12.1 供货范围( TBD ,由上电供应商确定)",
+      "target_section_type": "supply_scope",
+      "target_equipment_type": "motor",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.51,
+          "reason": "query_overlap=供货范围,同步; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "2025-sdq-2a461dfa",
+          "file_name": "2025-SDQ技术方案.docx",
+          "score": 0.32,
+          "reason": "query_overlap=供货范围; top_level_title_match"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.19,
+          "reason": "query_overlap=同步; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [],
+      "knowledge_wiki_product_cards": [
+        "水电阻起动柜方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "晶闸管"
+      ],
+      "baseline": {
+        "target_section_type": "supply_scope",
+        "target_equipment_type": "motor",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "2 供货范围 Scopes of supply",
+        "top1_score": 1.2,
+        "top1_section_type": "supply_scope",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "supply_scope",
+        "target_equipment_type": "motor",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "2 供货范围 Scopes of supply",
+        "top1_score": 1.2,
+        "top1_section_type": "supply_scope",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 3,
+        "total_prior_boost": 0.33,
+        "top1_prior_boost": 0.1
+      }
+    },
+    {
+      "sample_id": "vera-46268861",
+      "document_name": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+      "section_id": "5.2",
+      "section_title": "4.3 本地控制单元 PLC 对电机辅助设备监控功能描述",
+      "section_path": "4 LCI 变频软起系统方案 > 4.3 本地控制单元 PLC 对电机辅助设备监控功能描述",
+      "target_section_type": "communication_interface",
+      "target_equipment_type": "lci",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.93,
+          "reason": "query_overlap=变频软起,软起,启动,start-up,系统方案,pt; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.51,
+          "reason": "query_overlap=启动,dcs; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "2025-sdq-2a461dfa",
+          "file_name": "2025-SDQ技术方案.docx",
+          "score": 0.46,
+          "reason": "query_overlap=起动,高压柜; top_level_title_match"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "LCI 变频软起方案族",
+        "LCI",
+        "LCI 软起",
+        "变频软起",
+        "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "永磁电机变频改造方案族",
+        "永磁",
+        "永磁电机",
+        "节能改造",
+        "变频改造",
+        "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "控制柜"
+      ],
+      "knowledge_wiki_product_cards": [
+        "LCI 变频软起方案族",
+        "永磁电机变频改造方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "控制柜",
+        "晶闸管",
+        "功率单元"
+      ],
+      "baseline": {
+        "target_section_type": "communication_interface",
+        "target_equipment_type": "lci",
+        "top_block_count": 3,
+        "top1_source_title": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+        "top1_section_path": "5. 变频启动装置与上位机的接口 > 5.1 变频器提供给DCS的开关量: > 5.1.2 调速装置的状态信息:待机状态、正常运行状态、故障状态等;",
+        "top1_score": 1.2,
+        "top1_section_type": "communication_interface",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "communication_interface",
+        "target_equipment_type": "lci",
+        "top_block_count": 3,
+        "top1_source_title": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+        "top1_section_path": "5. 变频启动装置与上位机的接口 > 5.1 变频器提供给DCS的开关量: > 5.1.2 调速装置的状态信息:待机状态、正常运行状态、故障状态等;",
+        "top1_score": 1.2,
+        "top1_section_type": "communication_interface",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 3,
+        "total_prior_boost": 0.39,
+        "top1_prior_boost": 0.13
+      }
+    },
+    {
+      "sample_id": "vera-46268861",
+      "document_name": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+      "section_id": "5.1",
+      "section_title": "4.2 启动和同步过程描述",
+      "section_path": "4 LCI 变频软起系统方案 > 4.2 启动和同步过程描述",
+      "target_section_type": "motor_spec",
+      "target_equipment_type": "lci",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.93,
+          "reason": "query_overlap=4.2,启动,同步,变频器,变频装置,控制; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.93,
+          "reason": "query_overlap=启动和同步过程描述,启动,start-up,同步,变频软起,软起; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.93,
+          "reason": "query_overlap=系统方案,变频器,高压变频器,高压变频,变频装置,控制; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "LCI 变频软起方案族",
+        "LCI",
+        "LCI 软起",
+        "变频软起",
+        "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "晶闸管",
+        "控制柜",
+        "控制单元",
+        "PLC柜"
+      ],
+      "knowledge_wiki_product_cards": [
+        "LCI 变频软起方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "晶闸管",
+        "控制柜"
+      ],
+      "baseline": {
+        "target_section_type": "motor_spec",
+        "target_equipment_type": "lci",
+        "top_block_count": 3,
+        "top1_source_title": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+        "top1_section_path": "5. 变频启动装置与上位机的接口 > 5.4 DCS提供给变频器模拟量: > 5.5.3 中压柜旁路合闸指令:实现同步切换;",
+        "top1_score": 1.1493,
+        "top1_section_type": "communication_interface",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "motor_spec",
+        "target_equipment_type": "lci",
+        "top_block_count": 3,
+        "top1_source_title": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+        "top1_section_path": "5. 变频启动装置与上位机的接口 > 5.4 DCS提供给变频器模拟量: > 5.5.3 中压柜旁路合闸指令:实现同步切换;",
+        "top1_score": 1.1432,
+        "top1_section_type": "communication_interface",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      }
+    },
+    {
+      "sample_id": "vera-46268861",
+      "document_name": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+      "section_id": "33",
+      "section_title": "19 培训",
+      "section_path": "19 培训",
+      "target_section_type": "service_support",
+      "target_equipment_type": "vfd",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.93,
+          "reason": "query_overlap=19,变频器,高压变频器,高压变频,变频装置,电机; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.51,
+          "reason": "query_overlap=变频器,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.51,
+          "reason": "query_overlap=培训,变频器; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "运维巡检方案族",
+        "维保",
+        "巡检",
+        "检修",
+        "维护",
+        "赞比亚-恩多拉机场-成套设备维保巡检方案.docx",
+        "高压变频器方案族",
+        "高压变频器",
+        "中压变频器",
+        "变频装置",
+        "变频柜",
+        "VFD"
+      ],
+      "knowledge_wiki_product_cards": [
+        "运维巡检方案族",
+        "高压变频器方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "功率单元",
+        "IGBT",
+        "冷却风机"
+      ],
+      "baseline": {
+        "target_section_type": "service_support",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "11 培训",
+        "top1_score": 1.2,
+        "top1_section_type": "service_support",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "service_support",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "11 培训",
+        "top1_score": 1.2,
+        "top1_section_type": "service_support",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 3,
+        "total_prior_boost": 0.39,
+        "top1_prior_boost": 0.13
+      }
+    },
+    {
+      "sample_id": "vera-46268861",
+      "document_name": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+      "section_id": "1",
+      "section_title": "电机及软起动成套装置技术方案",
+      "section_path": "电机及软起动成套装置技术方案",
+      "target_section_type": "starter_spec",
+      "target_equipment_type": "soft_starter",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.93,
+          "reason": "query_overlap=软起,启动,start-up,start,up; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.37,
+          "reason": "query_overlap=启动; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "2025-sdq-2a461dfa",
+          "file_name": "2025-SDQ技术方案.docx",
+          "score": 0.32,
+          "reason": "query_overlap=起动; top_level_title_match"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "水电阻起动柜方案族",
+        "水电阻柜",
+        "水电阻起动柜",
+        "2025-SDQ技术方案.docx",
+        "高压变频器方案族",
+        "高压变频器",
+        "中压变频器",
+        "变频装置",
+        "变频柜",
+        "VFD",
+        "中压变频器采购技术协议",
+        "晶闸管"
+      ],
+      "knowledge_wiki_product_cards": [
+        "水电阻起动柜方案族",
+        "高压变频器方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "水电阻柜",
+        "晶闸管"
+      ],
+      "baseline": {
+        "target_section_type": "starter_spec",
+        "target_equipment_type": "soft_starter",
+        "top_block_count": 3,
+        "top1_source_title": "2025-SDQ技术方案.docx",
+        "top1_section_path": "1. 水电阻起动柜技术要求 > 1.2. 技术设计与结构要求",
+        "top1_score": 1.2,
+        "top1_section_type": "starter_spec",
+        "top1_equipment_type": "soft_starter",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "starter_spec",
+        "target_equipment_type": "soft_starter",
+        "top_block_count": 3,
+        "top1_source_title": "2025-SDQ技术方案.docx",
+        "top1_section_path": "1. 水电阻起动柜技术要求 > 1.2. 技术设计与结构要求",
+        "top1_score": 1.2,
+        "top1_section_type": "starter_spec",
+        "top1_equipment_type": "soft_starter",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 3,
+        "total_prior_boost": 0.35,
+        "top1_prior_boost": 0.09
+      }
+    },
+    {
+      "sample_id": "vera-46268861",
+      "document_name": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+      "section_id": "7.1",
+      "section_title": "6.1 输入变压器技术规范",
+      "section_path": "6 变压器技术规范 > 6.1 输入变压器技术规范",
+      "target_section_type": "transformer_spec",
+      "target_equipment_type": "transformer",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.19,
+          "reason": "query_overlap=变压器; rich_outline_structure"
+        },
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.05,
+          "reason": "rich_outline_structure"
+        },
+        {
+          "sample_id": "sample-e60f34f7",
+          "file_name": "赞比亚-恩多拉机场-成套设备维保巡检方案.docx",
+          "score": 0.05,
+          "reason": "rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "功率单元",
+        "功率模块",
+        "逆变单元",
+        "整流单元",
+        "H桥",
+        "变压器柜",
+        "隔离变压器",
+        "整流变压器",
+        "移相变压器"
+      ],
+      "knowledge_wiki_product_cards": [],
+      "knowledge_wiki_module_cards": [
+        "功率单元",
+        "变压器柜"
+      ],
+      "baseline": {
+        "target_section_type": "transformer_spec",
+        "target_equipment_type": "transformer",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "2 供货范围 Scopes of supply",
+        "top1_score": 0.0,
+        "top1_section_type": "supply_scope",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "transformer_spec",
+        "target_equipment_type": "transformer",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "2 供货范围 Scopes of supply",
+        "top1_score": 0.0,
+        "top1_section_type": "supply_scope",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      }
+    },
+    {
+      "sample_id": "vera-46268861",
+      "document_name": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+      "section_id": "31",
+      "section_title": "17 调试",
+      "section_path": "17 调试",
+      "target_section_type": "commissioning_acceptance",
+      "target_equipment_type": "vfd",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.79,
+          "reason": "query_overlap=变频器,高压变频器,高压变频,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.51,
+          "reason": "query_overlap=变频器,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.51,
+          "reason": "query_overlap=调试,变频器; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "永磁电机变频改造方案族",
+        "永磁",
+        "永磁电机",
+        "节能改造",
+        "变频改造",
+        "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "高压变频器方案族",
+        "高压变频器",
+        "中压变频器",
+        "变频装置",
+        "变频柜",
+        "VFD"
+      ],
+      "knowledge_wiki_product_cards": [
+        "永磁电机变频改造方案族",
+        "高压变频器方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "功率单元",
+        "IGBT",
+        "冷却风机"
+      ],
+      "baseline": {
+        "target_section_type": "commissioning_acceptance",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "9 调试",
+        "top1_score": 1.2,
+        "top1_section_type": "commissioning_acceptance",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "commissioning_acceptance",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "9 调试",
+        "top1_score": 1.2,
+        "top1_section_type": "commissioning_acceptance",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 3,
+        "total_prior_boost": 0.39,
+        "top1_prior_boost": 0.13
+      }
+    },
+    {
+      "sample_id": "9-24-3755408c",
+      "document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+      "section_id": "4.1.5",
+      "section_title": "4.1.5 变频器外形图 Converter Typical Outline Drawing",
+      "section_path": "4 变频器技术数据 Component Technical Data > 4.1 变频器配置Converter Configuration > 4.1.5 变频器外形图 Converter Typical Outline Drawing",
+      "target_section_type": "vfd_spec",
+      "target_equipment_type": "vfd",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.93,
+          "reason": "query_overlap=4.1.5,变频器外形图,变频器,converter,typical,outline; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.79,
+          "reason": "query_overlap=变频器,高压变频器,高压变频,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.51,
+          "reason": "query_overlap=变频器,变频装置; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "永磁电机变频改造方案族",
+        "永磁",
+        "永磁电机",
+        "节能改造",
+        "变频改造",
+        "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "高压变频器方案族",
+        "高压变频器",
+        "中压变频器",
+        "变频装置",
+        "变频柜",
+        "VFD"
+      ],
+      "knowledge_wiki_product_cards": [
+        "永磁电机变频改造方案族",
+        "高压变频器方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "功率单元",
+        "IGBT",
+        "变压器柜"
+      ],
+      "baseline": {
+        "target_section_type": "vfd_spec",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "4. 变频器技术数据 COMPONENT TECHNICAL DATA > 4.1. 变频器配置 CONVERTER CONFIGURATION > 4.1.1. 变频器系统示意图 Converter System Overview",
+        "top1_score": 1.2,
+        "top1_section_type": "vfd_spec",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "vfd_spec",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "top1_section_path": "第四章 GBT-MV高压变频器综述 > 4 开关频率调 整 （ 可 选）",
+        "top1_score": 1.2,
+        "top1_section_type": "vfd_spec",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 3,
+        "total_prior_boost": 0.39,
+        "top1_prior_boost": 0.13
+      }
+    },
+    {
+      "sample_id": "9-24-3755408c",
+      "document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+      "section_id": "5.1",
+      "section_title": "5.1 输入变压器技术规范Input Transformer Specification",
+      "section_path": "5 输入/输出变压器技术规范Transformer Specification > 5.1 输入变压器技术规范Input Transformer Specification",
+      "target_section_type": "transformer_spec",
+      "target_equipment_type": "transformer",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.79,
+          "reason": "query_overlap=变频器,高压变频器,高压变频,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.65,
+          "reason": "query_overlap=5.1,变频器,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.37,
+          "reason": "query_overlap=变频器; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "高压变频器方案族",
+        "高压变频器",
+        "中压变频器",
+        "变频装置",
+        "变频柜",
+        "VFD",
+        "中压变频器采购技术协议",
+        "晶闸管",
+        "功率单元",
+        "功率模块",
+        "逆变单元",
+        "整流单元"
+      ],
+      "knowledge_wiki_product_cards": [
+        "高压变频器方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "晶闸管",
+        "功率单元",
+        "变压器柜"
+      ],
+      "baseline": {
+        "target_section_type": "transformer_spec",
+        "target_equipment_type": "transformer",
+        "top_block_count": 3,
+        "top1_source_title": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "top1_section_path": "第三章 系统及方案介绍 > 2 ．移 相变压器原理",
+        "top1_score": 1.2,
+        "top1_section_type": "transformer_spec",
+        "top1_equipment_type": "transformer",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "transformer_spec",
+        "target_equipment_type": "transformer",
+        "top_block_count": 3,
+        "top1_source_title": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "top1_section_path": "第三章 系统及方案介绍 > 2 ．移 相变压器原理",
+        "top1_score": 1.2,
+        "top1_section_type": "transformer_spec",
+        "top1_equipment_type": "transformer",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 1,
+        "total_prior_boost": 0.07,
+        "top1_prior_boost": 0.07
+      }
+    },
+    {
+      "sample_id": "9-24-3755408c",
+      "document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+      "section_id": "15",
+      "section_title": "1 Surge Arrestor",
+      "section_path": "1 Surge Arrestor",
+      "target_section_type": "protection_interlock",
+      "target_equipment_type": "motor",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.93,
+          "reason": "query_overlap=启动,start-up,start,up,变频器,and; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.79,
+          "reason": "query_overlap=变频器,高压变频器,高压变频,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.65,
+          "reason": "query_overlap=启动,变频器,变频装置; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "永磁电机变频改造方案族",
+        "永磁",
+        "永磁电机",
+        "节能改造",
+        "变频改造",
+        "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "运维巡检方案族",
+        "维保",
+        "巡检",
+        "检修",
+        "维护",
+        "赞比亚-恩多拉机场-成套设备维保巡检方案.docx"
+      ],
+      "knowledge_wiki_product_cards": [
+        "永磁电机变频改造方案族",
+        "运维巡检方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "晶闸管",
+        "IGBT",
+        "功率单元"
+      ],
+      "baseline": {
+        "target_section_type": "protection_interlock",
+        "target_equipment_type": "motor",
+        "top_block_count": 3,
+        "top1_source_title": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+        "top1_section_path": "4. 变频器性能要求 > 4.21 变频装置应设以下保护:",
+        "top1_score": 1.2,
+        "top1_section_type": "vfd_spec",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "protection_interlock",
+        "target_equipment_type": "motor",
+        "top_block_count": 3,
+        "top1_source_title": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+        "top1_section_path": "4. 变频器性能要求 > 4.21 变频装置应设以下保护:",
+        "top1_score": 1.2,
+        "top1_section_type": "vfd_spec",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      }
+    },
+    {
+      "sample_id": "9-24-3755408c",
+      "document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+      "section_id": "7",
+      "section_title": "7 电机控制盘Motor Control Panel",
+      "section_path": "7 电机控制盘Motor Control Panel",
+      "target_section_type": "commercial_manual_only",
+      "target_equipment_type": "motor",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.93,
+          "reason": "query_overlap=同步,启动,start-up,start,up; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.51,
+          "reason": "query_overlap=同步,启动; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "2025-sdq-2a461dfa",
+          "file_name": "2025-SDQ技术方案.docx",
+          "score": 0.32,
+          "reason": "query_overlap=起动; top_level_title_match"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "LCI 变频软起方案族",
+        "LCI",
+        "LCI 软起",
+        "变频软起",
+        "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "晶闸管",
+        "控制柜",
+        "控制单元",
+        "PLC柜"
+      ],
+      "knowledge_wiki_product_cards": [
+        "LCI 变频软起方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "晶闸管",
+        "控制柜"
+      ],
+      "baseline": {
+        "target_section_type": "commercial_manual_only",
+        "target_equipment_type": "motor",
+        "top_block_count": 3,
+        "top1_source_title": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+        "top1_section_path": "5. 变频启动装置与上位机的接口 > 5.4 DCS提供给变频器模拟量:",
+        "top1_score": 1.1624,
+        "top1_section_type": "communication_interface",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "commercial_manual_only",
+        "target_equipment_type": "motor",
+        "top_block_count": 3,
+        "top1_source_title": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+        "top1_section_path": "5. 变频启动装置与上位机的接口 > 5.4 DCS提供给变频器模拟量:",
+        "top1_score": 1.2,
+        "top1_section_type": "communication_interface",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      }
+    },
+    {
+      "sample_id": "9-24-3755408c",
+      "document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+      "section_id": "2",
+      "section_title": "2 供货范围 Scopes of supply",
+      "section_path": "2 供货范围 Scopes of supply",
+      "target_section_type": "supply_scope",
+      "target_equipment_type": "lci",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.93,
+          "reason": "query_overlap=供货范围,scopes,of,supply,变频器,component; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.79,
+          "reason": "query_overlap=变频器,高压变频器,高压变频,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.65,
+          "reason": "query_overlap=变频器,变频装置,设备; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [],
+      "knowledge_wiki_product_cards": [
+        "高压变频器方案族",
+        "LCI 变频软起方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "晶闸管",
+        "水电阻柜",
+        "冷却风机"
+      ],
+      "baseline": {
+        "target_section_type": "supply_scope",
+        "target_equipment_type": "lci",
+        "top_block_count": 3,
+        "top1_source_title": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "top1_section_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.4控制信号接口说明",
+        "top1_score": 1.2,
+        "top1_section_type": "communication_interface",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 3,
+        "first_equipment_type_match_rank": 3,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "supply_scope",
+        "target_equipment_type": "lci",
+        "top_block_count": 3,
+        "top1_source_title": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "top1_section_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.4控制信号接口说明",
+        "top1_score": 1.2,
+        "top1_section_type": "communication_interface",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 3,
+        "first_equipment_type_match_rank": 3,
+        "prior_hit_block_count": 1,
+        "total_prior_boost": 0.1,
+        "top1_prior_boost": 0.0
+      }
+    },
+    {
+      "sample_id": "9-24-3755408c",
+      "document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+      "section_id": "11",
+      "section_title": "11 调试",
+      "section_path": "11 调试",
+      "target_section_type": "commissioning_acceptance",
+      "target_equipment_type": "vfd",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.79,
+          "reason": "query_overlap=变频器,高压变频器,高压变频,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.65,
+          "reason": "query_overlap=11,变频器,变频装置; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.65,
+          "reason": "query_overlap=11,调试,变频器; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "永磁电机变频改造方案族",
+        "永磁",
+        "永磁电机",
+        "节能改造",
+        "变频改造",
+        "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+        "高压变频器方案族",
+        "高压变频器",
+        "中压变频器",
+        "变频装置",
+        "变频柜",
+        "VFD"
+      ],
+      "knowledge_wiki_product_cards": [
+        "永磁电机变频改造方案族",
+        "高压变频器方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "功率单元",
+        "IGBT",
+        "冷却风机"
+      ],
+      "baseline": {
+        "target_section_type": "commissioning_acceptance",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "9 调试",
+        "top1_score": 1.2,
+        "top1_section_type": "commissioning_acceptance",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "commissioning_acceptance",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "9 调试",
+        "top1_score": 1.2,
+        "top1_section_type": "commissioning_acceptance",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": true,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": true,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": 1,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 3,
+        "total_prior_boost": 0.39,
+        "top1_prior_boost": 0.13
+      }
+    },
+    {
+      "sample_id": "9-24-3755408c",
+      "document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+      "section_id": "3.2",
+      "section_title": "3.2 启动和同步过程描述 Description of Start and Sychronization",
+      "section_path": "3 系统方案System Solution > 3.2 启动和同步过程描述 Description of Start and Sychronization",
+      "target_section_type": "motor_spec",
+      "target_equipment_type": "soft_starter",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.93,
+          "reason": "query_overlap=3.2,启动,同步,变频器,变频装置,控制; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.93,
+          "reason": "query_overlap=3.2,启动和同步过程描述,启动,start-up,同步,description; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.93,
+          "reason": "query_overlap=3.2,变频器,高压变频器,高压变频,变频装置,控制; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "晶闸管"
+      ],
+      "knowledge_wiki_product_cards": [],
+      "knowledge_wiki_module_cards": [
+        "晶闸管"
+      ],
+      "baseline": {
+        "target_section_type": "motor_spec",
+        "target_equipment_type": "soft_starter",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "3. 系统方案 SYSTEM SOLUTION > 3.3. LCI 变频启动特性 LCI START-UP CHARACTERISTIC > 3.3.2. 变频启动曲线 Start curve by SFC",
+        "top1_score": 1.2,
+        "top1_section_type": "vfd_spec",
+        "top1_equipment_type": "lci",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "motor_spec",
+        "target_equipment_type": "soft_starter",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "3. 系统方案 SYSTEM SOLUTION > 3.3. LCI 变频启动特性 LCI START-UP CHARACTERISTIC > 3.3.2. 变频启动曲线 Start curve by SFC",
+        "top1_score": 1.2,
+        "top1_section_type": "vfd_spec",
+        "top1_equipment_type": "lci",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": false,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": false,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": null,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      }
+    },
+    {
+      "sample_id": "9-24-3755408c",
+      "document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+      "section_id": "1.1",
+      "section_title": "1.1 自然环境 Environment",
+      "section_path": "1 工厂设计环境 Plant design data > 1.1 自然环境 Environment",
+      "target_section_type": "site_conditions",
+      "target_equipment_type": "vfd",
+      "case_candidate_count": 3,
+      "case_candidates": [
+        {
+          "sample_id": "lci-bf49f75e",
+          "file_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+          "score": 0.93,
+          "reason": "query_overlap=1.1,自然环境,environment,变频器,converter; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "20240319-1-a22549a6",
+          "file_name": "乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案20240319(1).docx",
+          "score": 0.93,
+          "reason": "query_overlap=1.1,变频器,高压变频器,高压变频,变频装置,40; top_level_title_match; rich_outline_structure"
+        },
+        {
+          "sample_id": "099-230101-001-20e2c4ea",
+          "file_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+          "score": 0.65,
+          "reason": "query_overlap=1.1,变频器,变频装置; top_level_title_match; rich_outline_structure"
+        }
+      ],
+      "knowledge_wiki_terms": [
+        "高压变频器方案族",
+        "高压变频器",
+        "中压变频器",
+        "变频装置",
+        "变频柜",
+        "VFD",
+        "中压变频器采购技术协议",
+        "LCI 变频软起方案族",
+        "LCI",
+        "LCI 软起",
+        "变频软起",
+        "宝山钢铁股份有限公司三鼓风LCI改造方案.docx"
+      ],
+      "knowledge_wiki_product_cards": [
+        "高压变频器方案族",
+        "LCI 变频软起方案族"
+      ],
+      "knowledge_wiki_module_cards": [
+        "功率单元",
+        "IGBT",
+        "冷却风机"
+      ],
+      "baseline": {
+        "target_section_type": "site_conditions",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "4. 变频器技术数据 COMPONENT TECHNICAL DATA > 4.1. 变频器配置 CONVERTER CONFIGURATION > 4.1.5. 变频器外形图 Converter Typical Outline Drawing",
+        "top1_score": 1.2,
+        "top1_section_type": "vfd_spec",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 0,
+        "total_prior_boost": 0.0,
+        "top1_prior_boost": 0.0
+      },
+      "with_prior": {
+        "target_section_type": "site_conditions",
+        "target_equipment_type": "vfd",
+        "top_block_count": 3,
+        "top1_source_title": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+        "top1_section_path": "4. 变频器技术数据 COMPONENT TECHNICAL DATA > 4.1. 变频器配置 CONVERTER CONFIGURATION > 4.1.5. 变频器外形图 Converter Typical Outline Drawing",
+        "top1_score": 1.2,
+        "top1_section_type": "vfd_spec",
+        "top1_equipment_type": "vfd",
+        "top1_section_type_match": false,
+        "top1_equipment_type_match": true,
+        "top3_section_type_hit": false,
+        "top3_equipment_type_hit": true,
+        "first_section_type_match_rank": null,
+        "first_equipment_type_match_rank": 1,
+        "prior_hit_block_count": 3,
+        "total_prior_boost": 0.39,
+        "top1_prior_boost": 0.13
+      }
+    }
+  ],
+  "skipped_documents": []
+}

@@ -135,7 +135,142 @@ class Phase2ApiTests(unittest.TestCase):
             self.assertEqual(search_response.status_code, 200)
             payload = search_response.json()["data"]
             self.assertGreaterEqual(payload["total"], 1)
+            self.assertIn("search_trace", payload)
+            self.assertEqual(payload["search_trace"]["search_mode"], "hybrid")
+            self.assertGreaterEqual(payload["search_trace"]["candidate_count"], 1)
             self.assertTrue(any("ABB ACS880" in result["content"] for result in payload["results"]))
+            top_result = payload["results"][0]
+            self.assertIn("reason_trace", top_result)
+            self.assertGreater(len(top_result["reason_trace"]), 0)
+            self.assertIn("score_breakdown", top_result)
+            self.assertIn("final", top_result["score_breakdown"])
+            self.assertIn("semantic", top_result["score_breakdown"])
+
+    def test_historical_document_upload_marks_parse_insufficient_and_skips_indexing(self) -> None:
+        with self._make_client() as client:
+            project_response = client.post(
+                "/api/v1/projects",
+                json={"name": "历史方案 parse gate", "industry": "电气", "description": "Phase 2 parse gate"},
+            )
+            project_id = project_response.json()["data"]["id"]
+
+            parsed_document = ParsedDocument(
+                markdown="解析残片",
+                metadata={
+                    "parser_backend_used": "fallback",
+                    "format": "pdf",
+                    "parse_gate_status": "insufficient",
+                    "parse_gate_reason": "fallback_binary_parser",
+                },
+                assets=[],
+            )
+
+            with tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False) as handle:
+                handle.write(b"%PDF-1.4 mock")
+                upload_path = Path(handle.name)
+
+            try:
+                with (
+                    upload_path.open("rb") as file_handle,
+                    patch("app.api.documents.ParserService.parse_document", AsyncMock(return_value=parsed_document)),
+                ):
+                    upload_response = client.post(
+                        f"/api/v1/projects/{project_id}/documents/upload",
+                        files={"file": ("sample.pdf", file_handle, "application/pdf")},
+                        data={"doc_type": "historical_proposal", "metadata": '{"industry":"电气"}'},
+                    )
+            finally:
+                upload_path.unlink(missing_ok=True)
+
+            self.assertEqual(upload_response.status_code, 202)
+            self.assertEqual(upload_response.json()["data"]["parse_status"], "parse_insufficient")
+            self.assertIn("解析质量不足", upload_response.json()["data"]["message"])
+            document_id = upload_response.json()["data"]["id"]
+
+            document_response = client.get(f"/api/v1/documents/{document_id}")
+            self.assertEqual(document_response.status_code, 200)
+            document_payload = document_response.json()["data"]
+            self.assertEqual(document_payload["parse_status"], "parse_insufficient")
+            self.assertEqual(document_payload["metadata"]["chunk_count"], 0)
+            self.assertEqual(document_payload["metadata"]["indexed_chunk_count"], 0)
+            self.assertIsNone(document_payload["metadata"]["raw_document_id"])
+
+            chunks_response = client.get(f"/api/v1/documents/{document_id}/chunks")
+            self.assertEqual(chunks_response.status_code, 200)
+            self.assertEqual(chunks_response.json()["data"], [])
+
+            table_assets_response = client.get(f"/api/v1/documents/{document_id}/table-assets")
+            self.assertEqual(table_assets_response.status_code, 200)
+            self.assertEqual(table_assets_response.json()["data"], [])
+
+            search_response = client.post(
+                "/api/v1/retrieval/search",
+                json={
+                    "query": "解析残片",
+                    "project_id": project_id,
+                    "top_k": 5,
+                    "filters": {"industry": "电气", "chunk_type": ["PLAIN"], "doc_type": "historical_proposal"},
+                    "search_mode": "hybrid",
+                },
+            )
+            self.assertEqual(search_response.status_code, 200)
+            self.assertEqual(search_response.json()["data"]["total"], 0)
+
+    def test_historical_document_reparse_can_purge_existing_index_when_parse_becomes_insufficient(self) -> None:
+        with self._make_client() as client:
+            project_response = client.post(
+                "/api/v1/projects",
+                json={"name": "历史方案重解析 gate", "industry": "电气", "description": "Phase 2 reparse gate"},
+            )
+            project_id = project_response.json()["data"]["id"]
+
+            with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
+                handle.write("# 系统说明\n\n系统采用 PLC 与 DCS 联动控制。")
+                upload_path = Path(handle.name)
+
+            try:
+                with upload_path.open("rb") as file_handle:
+                    upload_response = client.post(
+                        f"/api/v1/projects/{project_id}/documents/upload",
+                        files={"file": ("sample.md", file_handle, "text/markdown")},
+                        data={"doc_type": "historical_proposal", "metadata": '{"industry":"电气"}'},
+                    )
+            finally:
+                upload_path.unlink(missing_ok=True)
+
+            self.assertEqual(upload_response.status_code, 202)
+            document_id = upload_response.json()["data"]["id"]
+
+            chunks_response = client.get(f"/api/v1/documents/{document_id}/chunks")
+            self.assertEqual(chunks_response.status_code, 200)
+            self.assertGreater(len(chunks_response.json()["data"]), 0)
+
+            parsed_document = ParsedDocument(
+                markdown="退化后的解析结果",
+                metadata={
+                    "parser_backend_used": "fallback",
+                    "format": "pdf",
+                    "parse_gate_status": "insufficient",
+                    "parse_gate_reason": "fallback_binary_parser",
+                },
+                assets=[],
+            )
+            with patch("app.api.documents.ParserService.parse_document", AsyncMock(return_value=parsed_document)):
+                reparse_response = client.post(f"/api/v1/documents/{document_id}/reparse")
+
+            self.assertEqual(reparse_response.status_code, 200)
+            self.assertEqual(reparse_response.json()["data"]["parse_status"], "parse_insufficient")
+
+            refreshed_document_response = client.get(f"/api/v1/documents/{document_id}")
+            self.assertEqual(refreshed_document_response.status_code, 200)
+            refreshed_document = refreshed_document_response.json()["data"]
+            self.assertEqual(refreshed_document["parse_status"], "parse_insufficient")
+            self.assertEqual(refreshed_document["metadata"]["chunk_count"], 0)
+            self.assertIsNone(refreshed_document["metadata"]["raw_document_id"])
+
+            refreshed_chunks_response = client.get(f"/api/v1/documents/{document_id}/chunks")
+            self.assertEqual(refreshed_chunks_response.status_code, 200)
+            self.assertEqual(refreshed_chunks_response.json()["data"], [])
 
     def test_document_upload_applies_safe_ingestion_filter(self) -> None:
         with self._make_client() as client:
@@ -355,7 +490,7 @@ class Phase2ApiTests(unittest.TestCase):
             project_id = project_response.json()["data"]["id"]
 
             parsed_document = ParsedDocument(
-                markdown="# 图纸说明\n\n正文内容。",
+                markdown="# 图纸说明\n\n## 5.1.1 变频器系统示意图\n\n正文内容。",
                 metadata={"parser_backend_used": "mock-docling", "format": "pdf"},
                 assets=[
                     ParsedAsset(
@@ -373,6 +508,21 @@ class Phase2ApiTests(unittest.TestCase):
                         meta={"width": 320, "height": 240},
                     )
                 ],
+                structure={
+                    "section_catalog": [
+                        {
+                            "section_id": "5.1.1",
+                            "title": "5.1.1 变频器系统示意图",
+                            "source_heading": "5.1.1 变频器系统示意图",
+                            "normalized_heading": "变频器系统示意图",
+                            "heading_aliases": ["变频器系统示意图"],
+                            "level": 1,
+                            "section_path": "5.1.1 变频器系统示意图",
+                            "normalized_section_path": "变频器系统示意图",
+                            "children": [],
+                        }
+                    ]
+                },
             )
 
             with tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False) as handle:
@@ -405,6 +555,8 @@ class Phase2ApiTests(unittest.TestCase):
             self.assertEqual(figure_assets[0]["title"], "系统一次原理图")
             self.assertEqual(figure_assets[0]["metadata"]["heading_path"], "5.1.1 变频器系统示意图")
             self.assertEqual(figure_assets[0]["metadata"]["context_before"], "本系统一次原理图如下：")
+            self.assertEqual(figure_assets[0]["metadata"]["source_section_id"], "5.1.1")
+            self.assertEqual(figure_assets[0]["metadata"]["section_path"], "5.1.1 变频器系统示意图")
 
             asset_content_response = client.get(f"/api/v1/assets/{figure_assets[0]['id']}/content")
             self.assertEqual(asset_content_response.status_code, 200)
@@ -426,10 +578,22 @@ class Phase2ApiTests(unittest.TestCase):
             self.assertEqual(asset_search_response.status_code, 200)
             asset_search_payload = asset_search_response.json()["data"]
             self.assertEqual(asset_search_payload["total"], 1)
+            self.assertIn("search_trace", asset_search_payload)
+            self.assertTrue(asset_search_payload["search_trace"]["visual_branch_enabled"])
             self.assertEqual(asset_search_payload["results"][0]["title"], "系统一次原理图")
             self.assertEqual(asset_search_payload["results"][0]["visual_role"], "engineering_figure")
             self.assertTrue(asset_search_payload["results"][0]["review_required"])
             self.assertIn("技术架构", asset_search_payload["results"][0]["reason"])
+            self.assertGreater(len(asset_search_payload["results"][0]["reason_trace"]), 0)
+            self.assertEqual(
+                asset_search_payload["results"][0]["score_breakdown"]["branch"],
+                "textual+visual",
+            )
+            self.assertIn("retrieval_score_breakdown", asset_search_payload["results"][0]["metadata"])
+            self.assertEqual(
+                asset_search_payload["results"][0]["metadata"]["retrieval_score_breakdown"]["branch"],
+                "textual+visual",
+            )
 
 
 if __name__ == "__main__":

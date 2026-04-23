@@ -4,27 +4,39 @@ from collections import defaultdict
 import re
 from typing import Any
 
+from app.services.parsing.section_heading import (
+    ARABIC_COMPACT_CJK_HEADING_PATTERN,
+    ARABIC_DOTTED_HEADING_PATTERN,
+    ARABIC_SIMPLE_HEADING_PATTERN,
+    ARTICLE_HEADING_PATTERN,
+    CHAPTER_HEADING_PATTERN,
+    CHINESE_NUMERIC_HEADING_PATTERN,
+    PAREN_HEADING_PATTERN,
+    SECTION_HEADING_PATTERN,
+    build_heading_aliases,
+    document_title_compare_key as _document_title_compare_key,
+    is_valid_ordinal_parent as _is_valid_ordinal_parent,
+    normalize_section_heading,
+    ordinal_prefix_match_length as _ordinal_prefix_match_length,
+    parse_ordinal_tokens as _parse_ordinal_tokens,
+    parse_single_ordinal_token as _parse_single_ordinal_token,
+    section_parent_quality_score as _section_parent_quality_score,
+)
 from app.services.vectorstore.block_taxonomy import heading_looks_like_document_title
 
 
 MARKDOWN_HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-TOC_TITLE_PATTERN = re.compile(r"^(?:#\s*)?目\s*录$")
+LIST_HEADING_PATTERN = re.compile(r"^(?:[-*+]\s+)(?P<title>.+?)\s*$")
+TOC_TITLE_PATTERN = re.compile(r"^(?:目\s*录(?:\s+index)?|index)$", re.IGNORECASE)
 TOC_DOTTED_ENTRY_PATTERN = re.compile(r"^(?P<title>.+?)(?:[.。·…]{2,}|\s{2,})\s*(?P<page>\d{1,4})\s*$")
-CHAPTER_HEADING_PATTERN = re.compile(r"^(?P<ordinal>第[一二三四五六七八九十百零〇0-9]+章)\s*(?P<title>.+?)\s*$")
-SECTION_HEADING_PATTERN = re.compile(r"^(?P<ordinal>第[一二三四五六七八九十百零〇0-9]+节)\s*(?P<title>.+?)\s*$")
-ARTICLE_HEADING_PATTERN = re.compile(r"^(?P<ordinal>第[一二三四五六七八九十百零〇0-9]+条)\s*(?P<title>.+?)\s*$")
-CHINESE_NUMERIC_HEADING_PATTERN = re.compile(r"^(?P<ordinal>[一二三四五六七八九十]+)[、.．]\s*(?P<title>.+?)\s*$")
-PAREN_HEADING_PATTERN = re.compile(r"^[（(](?P<ordinal>[一二三四五六七八九十0-9]+)[)）]\s*(?P<title>.+?)\s*$")
-ARABIC_DOTTED_HEADING_PATTERN = re.compile(r"^(?P<ordinal>[0-9]+\.[0-9]+(?:\.[0-9]+){0,2})(?:[、.．])?\s*(?P<title>.+?)\s*$")
-ARABIC_SIMPLE_HEADING_PATTERN = re.compile(r"^(?P<ordinal>[0-9]{1,2})(?:[、.．]|\s+)\s*(?P<title>.+?)\s*$")
-ARABIC_COMPACT_CJK_HEADING_PATTERN = re.compile(r"^(?P<ordinal>[0-9]{1,2})(?P<title>[\u4e00-\u9fff].+?)\s*$")
+TOC_LIST_ENTRY_PATTERN = re.compile(r"^(?:[-*+]\s+)?(?P<title>.+?)\s+(?P<page>\d{1,4})\s*$")
 FILE_NAME_PATTERN = re.compile(r"\.(?:doc|docx|pdf|ppt|pptx|xls|xlsx)\b", re.IGNORECASE)
 PAGE_NUMBER_ONLY_PATTERN = re.compile(r"^\d{1,4}$")
 TABLE_ROW_PATTERN = re.compile(r"^\|.*\|$")
-TOC_FILLER_PATTERN = re.compile(r"[.。·…]{2,}")
-HEADING_WHITESPACE_PATTERN = re.compile(r"\s+")
-PUNCT_NORMALIZE_PATTERN = re.compile(r"[：:+（）()【】\[\]、,.，。;；/\\\-]+")
 PARSER_TRAILING_PAGE_PATTERN = re.compile(r"^(?P<title>.+?)\s+(?P<page>\d{1,4})$")
+HEADING_MULTI_WHITESPACE_PATTERN = re.compile(r"[ \t\u3000]+")
+LEADING_CHINESE_ENUM_SPACE_PATTERN = re.compile(r"^([一二三四五六七八九十]+[、.．])\s+")
+LEADING_PAREN_ENUM_SPACE_PATTERN = re.compile(r"^([（(][一二三四五六七八九十0-9]+[)）])\s+")
 FRONT_MATTER_HEADING_TERMS = {
     "方案名称",
     "项目名称",
@@ -96,60 +108,53 @@ LOW_VALUE_HEADING_TOKENS = (
     "服务",
     "备品",
 )
-
-
-def _strip_heading_ordinal_prefix(text: str) -> str:
-    stripped = str(text or "").strip()
-    if not stripped:
-        return ""
-    for pattern in (
-        CHAPTER_HEADING_PATTERN,
-        SECTION_HEADING_PATTERN,
-        ARTICLE_HEADING_PATTERN,
-        CHINESE_NUMERIC_HEADING_PATTERN,
-        PAREN_HEADING_PATTERN,
-        ARABIC_DOTTED_HEADING_PATTERN,
-        ARABIC_SIMPLE_HEADING_PATTERN,
-        ARABIC_COMPACT_CJK_HEADING_PATTERN,
-    ):
-        match = pattern.match(stripped)
-        if match:
-            return str(match.group("title") or "").strip()
-    return stripped
-
-
-def normalize_section_heading(text: str) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        return ""
-    raw = _strip_heading_ordinal_prefix(raw)
-    raw = TOC_FILLER_PATTERN.sub(" ", raw)
-    raw = PUNCT_NORMALIZE_PATTERN.sub(" ", raw)
-    raw = HEADING_WHITESPACE_PATTERN.sub(" ", raw).strip()
-    return raw
-
-
-def build_heading_aliases(text: str) -> tuple[str, ...]:
-    normalized = normalize_section_heading(text)
-    if not normalized:
-        return ()
-    aliases = [normalized]
-    compact = normalized.replace(" ", "")
-    if compact != normalized and compact not in aliases:
-        aliases.append(compact)
-    collapsed = compact.replace("及", "")
-    if collapsed and collapsed not in aliases:
-        aliases.append(collapsed)
-    if normalized.startswith("系统") and len(normalized) > 4:
-        alias = normalized.removeprefix("系统").strip()
-        if alias and alias not in aliases:
-            aliases.append(alias)
-    if normalized.startswith("总体") and len(normalized) > 4:
-        alias = f"系统{normalized}"
-        if alias not in aliases:
-            aliases.append(alias)
-    return tuple(aliases)
-
+SENTENCE_LIKE_HEADING_PUNCTUATION = ("，", ",", "；", ";", "。", "！", "？")
+SENTENCE_LIKE_HEADING_CLAUSE_DELIMITERS = ("，", ",", "；", ";")
+SENTENCE_LIKE_HEADING_MIN_LENGTH = 32
+PARAMETER_CLAUSE_VALUE_PATTERN = re.compile(
+    r"(?:[<>≤≥~～±])|(?:\d+\s*(?:%|％|℃|°|K|kV|KV|V|kW|KW|W|MW|A|mA|Hz|s|ms|mm|m|次|级)\b)|(?:AC\s*\d)|(?:DC\s*\d)|(?:IP\s*\d+)|(?:\b[Ii][eqt]\b)"
+)
+PARAMETER_CLAUSE_TERMINAL_PATTERN = re.compile(r"[；;。:]$")
+PARAMETER_CLAUSE_KEYWORDS = (
+    "环境温度",
+    "海拔高度",
+    "相对湿度",
+    "污染等级",
+    "配用电机功率",
+    "额定电流",
+    "起动电流",
+    "起动转矩",
+    "额定起动时间",
+    "单次起动温升",
+    "连续起动次数",
+    "起动控制时间",
+    "控制电源",
+    "不大于",
+    "不超过",
+    "不少于",
+    "不低于",
+)
+LEAD_IN_LABEL_PATTERNS = (
+    re.compile(r"见下面.*(?:图|表)"),
+    re.compile(r"图中.*供货范围"),
+    re.compile(r"下列.*(?:条件|要求).*(?:正常工作|如下)"),
+)
+STATUS_OR_REQUIREMENT_CLAUSE_PATTERNS = (
+    re.compile(r"^每一种.+需要提供"),
+    re.compile(r"^(?:卖方|买方).+(?:免费保修服务|技术服务热线|提供免费咨询服务|负责|保证|到达业主现场)"),
+    re.compile(r".+具备.+条件$"),
+    re.compile(r"^全部电缆已经"),
+    re.compile(r"^电机及附件已安装"),
+    re.compile(r"^电源已准备好"),
+    re.compile(r"^可得到.+参数$"),
+    re.compile(r"^安装应该符合"),
+)
+EMBEDDED_FIGURE_LABEL_PATTERNS = (
+    re.compile(r"总布置图.*generalarrangementdrawing"),
+    re.compile(r"外形图.*outlinedrawing"),
+    re.compile(r"单线图.*singlelinediagram"),
+)
+FIGURE_CAPTION_HEADING_PATTERN = re.compile(r"^图\d+.*(?:示意图|结构图|布置图|原理图|图)$")
 
 def build_section_catalog(markdown: str, *, structure_hints: dict[str, Any] | None = None) -> dict[str, Any]:
     lines = markdown.splitlines()
@@ -204,7 +209,7 @@ def promote_body_headings(markdown: str, *, structure_hints: dict[str, Any] | No
         document_title=document_title,
     )
     body_candidates = _merge_body_and_parser_candidates(body_candidates, parser_candidates)
-    promoted_levels: dict[int, int] = {}
+    promoted_lines_by_index: dict[int, tuple[int, str]] = {}
     has_document_title = bool(document_title)
     for candidate in body_candidates:
         if candidate.get("signal") == "markdown_heading":
@@ -214,14 +219,18 @@ def promote_body_headings(markdown: str, *, structure_hints: dict[str, Any] | No
             continue
         logical_level = int(candidate.get("level") or 1)
         markdown_level = min(6, logical_level + (1 if has_document_title else 0))
-        promoted_levels[int(line_index)] = markdown_level
+        promoted_lines_by_index[int(line_index)] = (
+            markdown_level,
+            str(candidate.get("title") or "").strip(),
+        )
 
     promoted_lines: list[str] = []
     for index, line in enumerate(lines):
-        level = promoted_levels.get(index)
+        promotion = promoted_lines_by_index.get(index)
         stripped = line.strip()
-        if level and stripped and not MARKDOWN_HEADING_PATTERN.match(stripped):
-            promoted_lines.append(f"{'#' * level} {stripped}")
+        if promotion and stripped and not MARKDOWN_HEADING_PATTERN.match(stripped):
+            level, title = promotion
+            promoted_lines.append(f"{'#' * level} {title or stripped}")
         else:
             promoted_lines.append(line)
     return "\n".join(promoted_lines)
@@ -235,7 +244,7 @@ def _extract_document_title(lines: list[str]) -> str | None:
         match = MARKDOWN_HEADING_PATTERN.match(stripped)
         if not match:
             return None
-        title = match.group(2).strip()
+        title = _sanitize_heading_title(match.group(2))
         if not title or TOC_TITLE_PATTERN.match(title):
             return None
         normalized = normalize_section_heading(title)
@@ -303,7 +312,7 @@ def _extract_parser_heading_candidates(
     for order_index, hint in enumerate(hints):
         if not isinstance(hint, dict):
             continue
-        raw_text = str(hint.get("text") or "").strip()
+        raw_text = _sanitize_heading_title(hint.get("text"))
         if not raw_text:
             continue
         title, page_no = _split_parser_heading_text(raw_text, page_no=hint.get("page_no"))
@@ -312,6 +321,24 @@ def _extract_parser_heading_candidates(
         if _looks_like_front_matter_heading(title):
             continue
         inferred = _infer_heading_level(title)
+        if _looks_like_lead_in_label_heading(title):
+            continue
+        if _looks_like_figure_caption_heading(title):
+            continue
+        if _looks_like_short_person_name_heading(title):
+            continue
+        if _looks_like_code_like_heading(title):
+            continue
+        if _looks_like_parameter_clause_heading(title, inferred=inferred):
+            continue
+        if inferred is not None and (
+            _looks_like_sentence_like_heading(title)
+            or _looks_like_embedded_figure_label_heading(title, inferred=inferred)
+            or _looks_like_status_or_requirement_clause(title)
+        ):
+            continue
+        if inferred is None and _looks_like_status_or_requirement_clause(title):
+            continue
         parser_level = hint.get("parser_level")
         item_type = str(hint.get("item_type") or "")
         if inferred is None and item_type != "SectionHeaderItem":
@@ -348,22 +375,37 @@ def _parse_toc_line(stripped: str) -> dict[str, Any] | None:
         if len(cell) < 3 or PAGE_NUMBER_ONLY_PATTERN.fullmatch(cell):
             continue
         match = TOC_DOTTED_ENTRY_PATTERN.match(cell)
-        if not match:
-            continue
-        title = match.group("title").strip()
-        page_no = int(match.group("page"))
-        if _looks_like_noise_heading(title):
-            continue
-        inferred = _infer_heading_level(title)
-        if inferred is None:
-            continue
-        return {
-            "title": title,
-            "normalized_heading": normalize_section_heading(title),
-            "level": inferred["level"],
-            "ordinal": inferred["ordinal"],
-            "page_no": page_no,
-        }
+        if match:
+            title = _sanitize_heading_title(match.group("title"))
+            page_no = int(match.group("page"))
+            if _looks_like_noise_heading(title):
+                continue
+            inferred = _infer_heading_level(title)
+            if inferred is None:
+                continue
+            return {
+                "title": title,
+                "normalized_heading": normalize_section_heading(title),
+                "level": inferred["level"],
+                "ordinal": inferred["ordinal"],
+                "page_no": page_no,
+            }
+        list_match = TOC_LIST_ENTRY_PATTERN.match(cell)
+        if list_match:
+            title = _sanitize_heading_title(list_match.group("title"))
+            page_no = int(list_match.group("page"))
+            if _looks_like_noise_heading(title):
+                continue
+            inferred = _infer_heading_level(title)
+            if inferred is None and not _is_freeform_heading_candidate(title):
+                continue
+            return {
+                "title": title,
+                "normalized_heading": normalize_section_heading(title),
+                "level": inferred["level"] if inferred else 1,
+                "ordinal": inferred["ordinal"] if inferred else None,
+                "page_no": page_no,
+            }
     return None
 
 
@@ -382,11 +424,29 @@ def _extract_body_heading_candidates(
             continue
         markdown_match = MARKDOWN_HEADING_PATTERN.match(stripped)
         if markdown_match:
-            title = markdown_match.group(2).strip()
+            title = _sanitize_heading_title(markdown_match.group(2))
             if document_title and title == document_title and index <= 3:
                 continue
             inferred = _infer_heading_level(title)
             if inferred is None and not _is_freeform_heading_candidate(title):
+                continue
+            if _looks_like_lead_in_label_heading(title):
+                continue
+            if _looks_like_figure_caption_heading(title):
+                continue
+            if _looks_like_short_person_name_heading(title):
+                continue
+            if _looks_like_code_like_heading(title):
+                continue
+            if _looks_like_parameter_clause_heading(title, inferred=inferred):
+                continue
+            if inferred is not None and (
+                _looks_like_sentence_like_heading(title)
+                or _looks_like_embedded_figure_label_heading(title, inferred=inferred)
+                or _looks_like_status_or_requirement_clause(title)
+            ):
+                continue
+            if inferred is None and _looks_like_status_or_requirement_clause(title):
                 continue
             if _looks_like_noise_heading(title):
                 continue
@@ -406,16 +466,32 @@ def _extract_body_heading_candidates(
                 }
             )
             continue
-        inferred = _infer_heading_level(stripped)
-        if not inferred or _looks_like_noise_heading(stripped):
+        list_heading_match = LIST_HEADING_PATTERN.match(stripped)
+        body_title = _sanitize_heading_title(list_heading_match.group("title")) if list_heading_match else _sanitize_heading_title(stripped)
+        inferred = _infer_heading_level(body_title)
+        if not inferred or _looks_like_noise_heading(body_title):
             continue
-        if not _is_body_heading_like(stripped):
+        if _looks_like_figure_caption_heading(body_title):
+            continue
+        if _looks_like_short_person_name_heading(body_title):
+            continue
+        if _looks_like_code_like_heading(body_title):
+            continue
+        if _looks_like_parameter_clause_heading(body_title, inferred=inferred):
+            continue
+        if (
+            _looks_like_sentence_like_heading(body_title)
+            or _looks_like_embedded_figure_label_heading(body_title, inferred=inferred)
+            or _looks_like_status_or_requirement_clause(body_title)
+        ):
+            continue
+        if not _is_body_heading_like(body_title):
             continue
         candidates.append(
             {
-                "title": stripped,
-                "normalized_heading": normalize_section_heading(stripped),
-                "heading_aliases": list(build_heading_aliases(stripped)),
+                "title": body_title,
+                "normalized_heading": normalize_section_heading(body_title),
+                "heading_aliases": list(build_heading_aliases(body_title)),
                 "level": inferred["level"],
                 "ordinal": inferred["ordinal"],
                 "line_index": index,
@@ -549,9 +625,15 @@ def _candidate_titles_match(left: dict[str, Any], right: dict[str, Any]) -> bool
     right_normalized = str(right.get("normalized_heading") or "")
     if left_normalized and left_normalized == right_normalized:
         return True
+    if left_normalized and right_normalized and left_normalized.casefold() == right_normalized.casefold():
+        return True
     left_aliases = set(str(item) for item in (left.get("heading_aliases") or []) if item)
     right_aliases = set(str(item) for item in (right.get("heading_aliases") or []) if item)
-    return bool(left_aliases & right_aliases)
+    if left_aliases & right_aliases:
+        return True
+    left_aliases_casefold = {item.casefold() for item in left_aliases}
+    right_aliases_casefold = {item.casefold() for item in right_aliases}
+    return bool(left_aliases_casefold & right_aliases_casefold)
 
 
 def _build_section_tree(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -572,7 +654,7 @@ def _build_section_tree(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
             if parent_id
             else str(counters[counter_key])
         )
-        source_heading = str(candidate.get("title") or "").strip()
+        source_heading = _sanitize_heading_title(candidate.get("title"))
         section_path = f"{parent['section_path']} > {source_heading}" if parent else source_heading
         normalized_path_items = list(parent.get("normalized_section_path_items") or []) if parent else []
         normalized_heading = str(candidate.get("normalized_heading") or "")
@@ -607,7 +689,7 @@ def _build_section_tree(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def _infer_heading_level(text: str) -> dict[str, Any] | None:
-    stripped = str(text or "").strip()
+    stripped = _sanitize_heading_title(text)
     if not stripped:
         return None
     for pattern, level in (
@@ -648,11 +730,11 @@ def _is_body_heading_like(text: str) -> bool:
 
 
 def _split_parser_heading_text(text: str, *, page_no: Any) -> tuple[str, int | None]:
-    stripped = str(text or "").strip()
+    stripped = _sanitize_heading_title(text)
     inferred_page = None
     match = PARSER_TRAILING_PAGE_PATTERN.match(stripped)
     if match:
-        candidate_title = match.group("title").strip()
+        candidate_title = _sanitize_heading_title(match.group("title"))
         candidate_page = int(match.group("page"))
         if _infer_heading_level(candidate_title) is not None or len(candidate_title) <= 40:
             stripped = candidate_title
@@ -699,14 +781,14 @@ def _looks_like_front_matter_heading(text: str) -> bool:
 
 
 def _is_unnumbered_parser_heading_candidate(text: str, *, parser_level: Any) -> bool:
-    normalized = normalize_section_heading(text)
+    normalized = normalize_section_heading(_sanitize_heading_title(text))
     if not normalized:
         return False
     try:
         level_value = int(parser_level) if parser_level is not None else None
     except (TypeError, ValueError):
         level_value = None
-    if level_value is None or level_value > 2:
+    if level_value is None or level_value > 3:
         return False
     if len(normalized) > 24:
         return False
@@ -717,13 +799,15 @@ def _is_unnumbered_parser_heading_candidate(text: str, *, parser_level: Any) -> 
     if re.search(r"\d{2,}", normalized):
         return False
     compact = normalized.replace(" ", "")
+    if _looks_like_status_or_requirement_clause(text):
+        return False
     if not any(keyword in compact for keyword in UNNUMBERED_HEADING_KEYWORDS):
         return False
     return True
 
 
 def _is_freeform_heading_candidate(text: str) -> bool:
-    normalized = normalize_section_heading(text)
+    normalized = normalize_section_heading(_sanitize_heading_title(text))
     if not normalized:
         return False
     if _looks_like_front_matter_heading(normalized):
@@ -807,12 +891,22 @@ def _prune_root_sections(roots: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _should_prune_root_section(root: dict[str, Any]) -> bool:
-    title = str(root.get("title") or "").strip()
+    title = _sanitize_heading_title(root.get("title"))
     normalized_heading = str(root.get("normalized_heading") or "")
     signals = {str(item) for item in (root.get("source_signals") or []) if item}
     if not normalized_heading:
         return True
     if _looks_like_front_matter_heading(title):
+        return True
+    if _looks_like_lead_in_label_heading(title):
+        return True
+    if _looks_like_figure_caption_heading(title):
+        return True
+    if _looks_like_short_person_name_heading(title):
+        return True
+    if _looks_like_code_like_heading(title):
+        return True
+    if _looks_like_parameter_clause_heading(title, inferred=_infer_heading_level(title)):
         return True
     if not signals.intersection({"toc", "body_heading", "markdown_heading", "parser_heading"}):
         return True
@@ -899,7 +993,7 @@ def _should_collapse_inner_section(
     parent: dict[str, Any],
     document_title: str | None,
 ) -> bool:
-    title = str(node.get("title") or "").strip()
+    title = _sanitize_heading_title(node.get("title"))
     normalized_heading = str(node.get("normalized_heading") or "")
     compact_heading = normalized_heading.replace(" ", "")
     signals = {str(item) for item in (node.get("source_signals") or []) if item}
@@ -910,6 +1004,18 @@ def _should_collapse_inner_section(
     if _looks_like_front_matter_heading(title):
         return True
     if _looks_like_noise_heading(title):
+        return True
+    if _looks_like_lead_in_label_heading(title):
+        return True
+    if _looks_like_figure_caption_heading(title):
+        return True
+    if _looks_like_short_person_name_heading(title):
+        return True
+    if _looks_like_code_like_heading(title):
+        return True
+    if inferred is not None and _looks_like_sentence_like_heading(title):
+        return True
+    if _looks_like_parameter_clause_heading(title, inferred=inferred):
         return True
     if document_title and compact_heading == normalize_section_heading(document_title).replace(" ", ""):
         return True
@@ -974,6 +1080,8 @@ def _find_reparent_target(
     for target in _iter_section_descendants_reversed([*external_targets, *siblings]):
         target_tokens = _ordinal_tokens_for_node(target)
         if not target_tokens:
+            continue
+        if len(target_tokens) >= len(child_tokens):
             continue
         prefix_length = _ordinal_prefix_match_length(target_tokens, child_tokens)
         if prefix_length <= 0 or prefix_length >= len(child_tokens):
@@ -1048,127 +1156,6 @@ def _ordinal_tokens_for_node(node: dict[str, Any]) -> tuple[int, ...]:
     return _parse_ordinal_tokens(str(node.get("title") or ""))
 
 
-def _parse_ordinal_tokens(text: str) -> tuple[int, ...]:
-    stripped = str(text or "").strip()
-    if not stripped:
-        return ()
-    if re.fullmatch(r"第[一二三四五六七八九十百零〇0-9]+[章节条]", stripped):
-        value = _parse_single_ordinal_token(stripped)
-        return (value,) if value is not None else ()
-    if re.fullmatch(r"[一二三四五六七八九十百零〇0-9]+", stripped):
-        value = _parse_single_ordinal_token(stripped)
-        return (value,) if value is not None else ()
-    if re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,3}", stripped):
-        try:
-            return tuple(int(part) for part in stripped.split(".") if part)
-        except ValueError:
-            return ()
-    chapter_match = CHAPTER_HEADING_PATTERN.match(stripped)
-    if chapter_match:
-        value = _parse_single_ordinal_token(chapter_match.group("ordinal"))
-        return (value,) if value is not None else ()
-    section_match = SECTION_HEADING_PATTERN.match(stripped)
-    if section_match:
-        value = _parse_single_ordinal_token(section_match.group("ordinal"))
-        return (value,) if value is not None else ()
-    article_match = ARTICLE_HEADING_PATTERN.match(stripped)
-    if article_match:
-        value = _parse_single_ordinal_token(article_match.group("ordinal"))
-        return (value,) if value is not None else ()
-    chinese_match = CHINESE_NUMERIC_HEADING_PATTERN.match(stripped)
-    if chinese_match:
-        value = _parse_single_ordinal_token(chinese_match.group("ordinal"))
-        return (value,) if value is not None else ()
-    paren_match = PAREN_HEADING_PATTERN.match(stripped)
-    if paren_match:
-        value = _parse_single_ordinal_token(paren_match.group("ordinal"))
-        return (value,) if value is not None else ()
-    for pattern in (ARABIC_DOTTED_HEADING_PATTERN, ARABIC_SIMPLE_HEADING_PATTERN, ARABIC_COMPACT_CJK_HEADING_PATTERN):
-        match = pattern.match(stripped)
-        if not match:
-            continue
-        ordinal = str(match.group("ordinal") or "")
-        parts = [part for part in ordinal.split(".") if part]
-        if not parts:
-            return ()
-        try:
-            return tuple(int(part) for part in parts)
-        except ValueError:
-            return ()
-    return ()
-
-
-def _parse_single_ordinal_token(token: str | None) -> int | None:
-    value = str(token or "").strip()
-    if not value:
-        return None
-    value = re.sub(r"^第|[章节条]$", "", value)
-    if value.isdigit():
-        return int(value)
-    return _parse_chinese_numeral(value)
-
-
-def _parse_chinese_numeral(text: str) -> int | None:
-    mapping = {
-        "零": 0,
-        "〇": 0,
-        "一": 1,
-        "二": 2,
-        "三": 3,
-        "四": 4,
-        "五": 5,
-        "六": 6,
-        "七": 7,
-        "八": 8,
-        "九": 9,
-    }
-    stripped = str(text or "").strip()
-    if not stripped:
-        return None
-    if stripped == "十":
-        return 10
-    if "十" not in stripped:
-        return mapping.get(stripped)
-    if stripped.startswith("十"):
-        suffix = stripped.removeprefix("十")
-        return 10 + mapping.get(suffix, 0)
-    if stripped.endswith("十"):
-        prefix = stripped.removesuffix("十")
-        return mapping.get(prefix, 0) * 10
-    prefix, suffix = stripped.split("十", maxsplit=1)
-    if prefix not in mapping or suffix not in mapping:
-        return None
-    return mapping[prefix] * 10 + mapping[suffix]
-
-
-def _ordinal_prefix_match_length(left: tuple[int, ...], right: tuple[int, ...]) -> int:
-    length = 0
-    for left_part, right_part in zip(left, right):
-        if left_part != right_part:
-            break
-        length += 1
-    return length
-
-
-def _is_valid_ordinal_parent(parent_tokens: tuple[int, ...], child_tokens: tuple[int, ...]) -> bool:
-    if not parent_tokens or len(parent_tokens) >= len(child_tokens):
-        return False
-    return tuple(child_tokens[: len(parent_tokens)]) == parent_tokens
-
-
-def _section_parent_quality_score(node: dict[str, Any]) -> int:
-    signals = {str(item) for item in (node.get("source_signals") or []) if item}
-    score = 0
-    if "toc" in signals:
-        score += 6
-    if "body_heading" in signals or "markdown_heading" in signals:
-        score += 3
-    if "parser_heading" in signals:
-        score += 2
-    score += max(0, 4 - int(node.get("level") or 0))
-    return score
-
-
 def _looks_like_document_title_repeat(text: str, *, document_title: str | None) -> bool:
     if not document_title:
         return False
@@ -1179,13 +1166,90 @@ def _looks_like_document_title_repeat(text: str, *, document_title: str | None) 
     return heading_compact in document_compact or document_compact in heading_compact
 
 
-def _document_title_compare_key(text: str) -> str:
-    compact = normalize_section_heading(text).replace(" ", "")
-    compact = re.sub(r"\.(?:doc|docx|pdf|ppt|pptx|xls|xlsx)$", "", compact, flags=re.IGNORECASE)
-    compact = re.sub(r"\d{4,}", "", compact)
-    for token in ("技术", "方案", "协议", "文档", "文件"):
-        compact = compact.replace(token, "")
-    return compact
+def _looks_like_sentence_like_heading(text: str) -> bool:
+    normalized = normalize_section_heading(_sanitize_heading_title(text))
+    if len(normalized) < SENTENCE_LIKE_HEADING_MIN_LENGTH:
+        return False
+    punctuation_hits = sum(text.count(token) for token in SENTENCE_LIKE_HEADING_PUNCTUATION)
+    has_clause_delimiter = any(token in text for token in SENTENCE_LIKE_HEADING_CLAUSE_DELIMITERS)
+    return has_clause_delimiter or punctuation_hits >= 2
+
+
+def _looks_like_parameter_clause_heading(text: str, *, inferred: dict[str, Any] | None) -> bool:
+    if not inferred:
+        return False
+    tokens = _parse_ordinal_tokens(str(inferred.get("ordinal") or text))
+    if len(tokens) != 1:
+        return False
+    stripped = _sanitize_heading_title(text)
+    normalized = normalize_section_heading(stripped)
+    if not normalized or len(normalized) > 40:
+        return False
+    has_value_marker = bool(PARAMETER_CLAUSE_VALUE_PATTERN.search(stripped))
+    has_parameter_keyword = any(keyword in normalized for keyword in PARAMETER_CLAUSE_KEYWORDS)
+    if not (has_value_marker or has_parameter_keyword):
+        return False
+    return bool(PARAMETER_CLAUSE_TERMINAL_PATTERN.search(stripped) or "：" in stripped)
+
+
+def _looks_like_lead_in_label_heading(text: str) -> bool:
+    compact = normalize_section_heading(_sanitize_heading_title(text)).replace(" ", "")
+    if not compact:
+        return False
+    return any(pattern.search(compact) for pattern in LEAD_IN_LABEL_PATTERNS)
+
+
+def _looks_like_status_or_requirement_clause(text: str) -> bool:
+    compact = normalize_section_heading(_sanitize_heading_title(text)).replace(" ", "")
+    if len(compact) < 8:
+        return False
+    return any(pattern.search(compact) for pattern in STATUS_OR_REQUIREMENT_CLAUSE_PATTERNS)
+
+
+def _looks_like_embedded_figure_label_heading(text: str, *, inferred: dict[str, Any] | None) -> bool:
+    if not inferred:
+        return False
+    tokens = _parse_ordinal_tokens(str(inferred.get("ordinal") or text))
+    if len(tokens) != 1:
+        return False
+    compact = normalize_section_heading(_sanitize_heading_title(text)).replace(" ", "").casefold()
+    return any(pattern.search(compact) for pattern in EMBEDDED_FIGURE_LABEL_PATTERNS)
+
+
+def _looks_like_figure_caption_heading(text: str) -> bool:
+    compact = normalize_section_heading(_sanitize_heading_title(text)).replace(" ", "")
+    if not compact:
+        return False
+    return bool(FIGURE_CAPTION_HEADING_PATTERN.match(compact))
+
+
+def _looks_like_short_person_name_heading(text: str) -> bool:
+    compact = normalize_section_heading(_sanitize_heading_title(text)).replace(" ", "")
+    if not compact:
+        return False
+    if any(keyword in compact for keyword in UNNUMBERED_HEADING_KEYWORDS):
+        return False
+    return bool(re.fullmatch(r"[\u4e00-\u9fff]{3}", compact))
+
+
+def _looks_like_code_like_heading(text: str) -> bool:
+    compact = normalize_section_heading(_sanitize_heading_title(text))
+    if not compact or re.search(r"[\u4e00-\u9fff]", compact):
+        return False
+    if not re.search(r"[A-Za-z]", compact) or not re.search(r"\d", compact):
+        return False
+    return len(compact.replace(" ", "")) <= 18
+
+
+def _sanitize_heading_title(text: Any) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    value = HEADING_MULTI_WHITESPACE_PATTERN.sub(" ", value)
+    value = LEADING_CHINESE_ENUM_SPACE_PATTERN.sub(r"\1", value)
+    value = LEADING_PAREN_ENUM_SPACE_PATTERN.sub(r"\1", value)
+    value = HEADING_MULTI_WHITESPACE_PATTERN.sub(" ", value)
+    return value.strip()
 
 
 def _dedupe_sibling_sections(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:

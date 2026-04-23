@@ -153,6 +153,26 @@ ChatGPT Pro 建议做 A/B 对比。这是合理的，但**不需要是当前阻�
 
 > ChatGPT Pro 的核心推荐。我同意这是收益最大的架构升级，但实现路径需要更具体。
 
+#### 当前实现状态（2026-04-22）
+
+- `Step 2a` 已完成：
+  - 在线 ingestion 已写入 `contextual_text / contextualized_block_text / semantic_retrieval_text`
+  - `semantic_retrieval_text` 已作为在线 embedding 主输入
+  - 历史方案库也已对齐 contextual retrieval text contract
+- `Step 2b` 已完成当前阶段目标：
+  - 在线 `Retriever` 已从 dense-only 升级为 `Dense shortlist + local sparse shortlist + hybrid final sort`
+  - 历史方案库已具备 sparse + semantic hybrid boost
+  - 当前在线 sparse 仍是本地 shortlist 融合，而不是 Qdrant 原生 sparse vector；这不再阻塞 Layer 2 主线验收
+- `Step 2c` 已完成当前阶段目标：
+  - 在线与历史方案库都已接入 rerank
+  - 两条链路都返回 `reason / reason_trace / score_breakdown`
+  - structured trace 已下沉到 evidence bundle、section selection、validation、project replay snapshot 和 proof-pack advisory
+
+当前仍保留的后续项：
+
+- 若后续语料规模继续扩大，可把在线 sparse shortlist 从本地实现升级为 Qdrant 原生 sparse vectors
+- replay threshold recommendation 还需要更多带 structured retrieval metrics 的 healthy snapshots 才能产出默认阈值
+
 #### 当前问题回顾
 
 - `CaseLibraryService` 全部是关键词匹配（`_tokenize` -> 词频命中）
@@ -252,6 +272,25 @@ final_score = (
 - 对无 caption/heading 但图中绘制了完整拓扑的工程图，视觉检索能把它排进 Top-5
 - 不增加文本检索已经找对的图的排序回退
 
+#### 当前实现状态（2026-04-22）
+
+- `3a`：已完成到当前仓库可落地形态
+  - visual embedding cache 现已同步到独立 Qdrant visual collections
+  - 按 embedding 空间拆成 `image` / `text_proxy` 两条 collection，而不是混放
+- `3b`：已完成
+  - `AssetRetrievalService` 已有独立 `visual_score` 支路
+  - 返回 `reason_trace / score_breakdown / search_trace`
+- `3c`：已完成
+  - 当前融合权重已经对齐为 `textual 0.6 + visual 0.3 + structural 0.1`
+- `3d`：已完成
+  - 视觉支路只在 `expected_evidence_types` 或显式 `asset_types` 包含 `figure` 时启用
+  - 表格/参数章节默认走 `textual_only`
+
+当前 Layer 3 主链可以收口。剩余项属于后续增强：
+
+- 将 CLIP / proxy provider 再升级为 ColQwen / ColPali 等重型视觉 backend
+- 对更大资产集做增量刷新和性能基线
+
 ---
 
 ### Layer 4：AI Wiki 知识编译层（P2，持续）
@@ -283,6 +322,30 @@ final_score = (
 
 - 不建议先上 qmd 等本地搜索引擎。你的 wiki 页面初期不会超过 200 页，Qdrant 或简单 JSON 就够
 - 不建议先做 GraphRAG。结构化 wiki 页面 + 混合检索已经能解决 80% 的跨文档关联需求
+
+#### 当前实现状态（2026-04-23）
+
+- 编译层已落地：
+  - `backend/data/knowledge_wiki/*` 持续产出 glossary / product / module / equipment / interface / template / policy 页面
+- 运行时已接入三条主链：
+  - 写前 prompt 约束
+  - 写后质量回扫 / rewrite
+  - reuse retrieval prior bundle
+- 导入链路已具备自动回刷：
+  - 历史方案上传 / 重解析 / 删除后，case library、AI Wiki、visual cache 会联动刷新
+  - projection cache / fallback backfill / refresh_status 也已补齐
+- 评估链已落地：
+  - `evaluate_knowledge_wiki_priors.py` 使用 `holdout_eval` 文档固定比较 `without_prior` / `with_prior`
+  - 输出 `output/RAG_test-layer4-ai-wiki-prior-eval.md/.json`
+- 治理链已收口：
+  - AI Wiki prior eval 已进入 `release-gate`、`proof-pack`、`release-readiness`
+  - 宿主侧稳定产出 `AI Wiki Prior Evaluation` artifact 和 `Governance: AI Wiki Prior Evaluation` check
+
+因此，按当前 repo scope，Layer 4 已完成这一阶段的闭环实现。后续保留项主要是：
+
+- verified wiki page 的反写与持续人工确认
+- prior boost 自动调参
+- 页面规模继续扩大后的独立索引/实体层演进
 
 ---
 

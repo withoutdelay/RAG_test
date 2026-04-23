@@ -56,6 +56,7 @@ def build_section_quality_prompts(
     global_params: dict[str, Any],
     content_md: str,
     recommended_assets: list[dict[str, Any]] | None = None,
+    quality_constraints: str = "",
 ) -> tuple[str, str]:
     section_title = str(section.get("title") or "未命名章节").strip() or "未命名章节"
     purpose = str(section.get("purpose") or section.get("description") or "").strip()
@@ -79,6 +80,7 @@ def build_section_quality_prompts(
         f"{_xml_block('section_goal', purpose or '围绕该章节主题给出正式客户稿。')}"
         f"{_xml_block('section_keywords', ', '.join(keywords) or '暂无')}"
         f"{_xml_block('recommended_assets', _format_assets(assets))}"
+        f"{_xml_block('ai_wiki_review_constraints', quality_constraints or '暂无')}"
         "<review_contract>\n"
         "1. 只审查 <section_markdown> 内的正文是否达到客户稿门槛。\n"
         "2. 标签区中的 metadata / recommended_assets / keywords 仅供理解章节目标，不应被视为正文中的内部提示语。\n"
