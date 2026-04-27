@@ -384,6 +384,63 @@ export interface CatalogMaterialReadiness {
   family_material_counts: Record<string, Record<string, number>>;
 }
 
+export interface CatalogMaterialManifestPreviewIssue {
+  issue_type: string;
+  severity: string;
+  message: string;
+  material_key?: string | null;
+  document_name?: string | null;
+}
+
+export interface CatalogMaterialManifestPreviewEntry {
+  material_key: string;
+  document_name: string;
+  family_code?: string | null;
+  material_type: string;
+  availability_status: string;
+  source_kind: string;
+  source_path?: string | null;
+  source_path_exists?: boolean | null;
+  explicit_family_code: boolean;
+  explicit_material_type: boolean;
+  explicit_availability_status: boolean;
+  existing_material: boolean;
+  duplicate_material_key: boolean;
+  non_synthetic_source: boolean;
+  counted_toward_gate: boolean;
+  issues: string[];
+}
+
+export interface CatalogMaterialManifestPreview {
+  manifest_path: string;
+  source_kind: string;
+  replace_existing: boolean;
+  import_blocked: boolean;
+  total_entry_count: number;
+  unique_material_key_count: number;
+  duplicate_material_key_count: number;
+  existing_material_count: number;
+  new_material_count: number;
+  would_import_count: number;
+  would_skip_existing_count: number;
+  would_replace_existing_count: number;
+  gate_ready_material_count: number;
+  non_synthetic_material_count: number;
+  inferred_family_count: number;
+  inferred_material_type_count: number;
+  inferred_status_count: number;
+  missing_source_path_count: number;
+  missing_source_file_count: number;
+  family_counts: Record<string, number>;
+  material_type_counts: Record<string, number>;
+  availability_status_counts: Record<string, number>;
+  source_kind_counts: Record<string, number>;
+  gate_ready_family_material_counts: Record<string, Record<string, number>>;
+  duplicate_material_keys: string[];
+  issues: CatalogMaterialManifestPreviewIssue[];
+  preview_entries: CatalogMaterialManifestPreviewEntry[];
+}
+
 export interface OutlineNode {
   section_id: string;
   title: string;

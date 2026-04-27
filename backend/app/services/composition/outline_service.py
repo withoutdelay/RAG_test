@@ -53,6 +53,8 @@ PARAMETER_SENSITIVE_HINTS = ("参数", "配置", "清单", "规格", "容量", "
 
 def _suggest_evidence_types(title: str) -> list[str]:
     lowered = title.lower()
+    if any(token in title for token in ("总体方案", "整体方案", "总体说明", "总体设计")):
+        return ["section", "figure", "parameter"]
     if "供货" in title or "清单" in title or "物料" in title:
         return ["table", "parameter", "section"]
     if "接口" in title or "通讯" in title or "通信" in title:
@@ -93,6 +95,8 @@ def _normalize_keywords(raw_keywords: Any, *, title: str, evidence_types: list[s
 
 
 def _suggest_section_class(title: str) -> str:
+    if any(token in title for token in ("总体方案", "整体方案", "总体说明", "总体设计")):
+        return "architecture"
     if "供货" in title or "清单" in title or "物料" in title:
         return "configuration"
     if "接口" in title or "通讯" in title or "通信" in title:
@@ -339,9 +343,16 @@ def build_outline_inputs(
     case_candidates = (evidence_bundle.content or {}).get("case_candidates") or []
     outline_examples = build_outline_examples(case_candidates, max_cases=3, max_titles=12)
     solution_context = render_solution_outline_context(solution_snapshot)
+    suggested_chapters_text = str(global_params.get("suggested_chapters") or "").strip()
+    has_overall_solution_hint = any(token in suggested_chapters_text for token in ("总体方案", "整体方案", "系统总体", "总体说明"))
     solution_instruction = (
         " 已确认方案快照给出了主设备、接口计划和建议章节；请优先围绕这些产品事实组织目录，可按客户口径合并或重命名。"
         if solution_context
+        else ""
+    )
+    overall_solution_instruction = (
+        " 当建议章节或产品快照已经出现“总体方案/整体方案”时，请在目录中保留一个独立的总体方案章节，用于承接系统定位、主要设备组成、接口边界和成套扩展关系，而不要把这些内容全部挤进项目概述。"
+        if has_overall_solution_hint
         else ""
     )
     instructions = (
@@ -349,6 +360,7 @@ def build_outline_inputs(
         f"项目名称：{content.get('project_name') or '未命名项目'}。"
         f"业务目标：{content.get('business_objective') or '请结合检索证据归纳'}。"
         f"{solution_instruction}"
+        f"{overall_solution_instruction}"
     )
     rfp_context = "\n\n".join(
         part

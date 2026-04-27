@@ -112,6 +112,31 @@ def _extract_detail_hints(text: str) -> list[str]:
     return hints
 
 
+def _normalize_family_codes(values: set[str] | None) -> set[str]:
+    if not values:
+        return set()
+    return {
+        str(value or "").strip()
+        for value in values
+        if str(value or "").strip()
+    }
+
+
+def _entry_matches_family_codes(entry: dict[str, Any], family_codes: set[str] | None) -> bool:
+    normalized_family_codes = _normalize_family_codes(family_codes)
+    if not normalized_family_codes:
+        return True
+    primary_family_code = str(entry.get("family_code") or "").strip()
+    if primary_family_code and primary_family_code in normalized_family_codes:
+        return True
+    secondary_family_codes = {
+        str(value or "").strip()
+        for value in normalize_string_list(entry.get("secondary_family_codes"))
+        if str(value or "").strip()
+    }
+    return bool(secondary_family_codes & normalized_family_codes)
+
+
 def _section_heading_noise_adjustment(
     *,
     section_title: str,
@@ -156,7 +181,10 @@ class CaseLibraryService:
         *,
         query: str,
         top_k: int = 3,
+        sample_ids: set[str] | None = None,
+        document_names: set[str] | None = None,
         library_tracks: set[str] | None = None,
+        family_codes: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         query_terms = _tokenize(query)
@@ -164,16 +192,27 @@ class CaseLibraryService:
             track = str(entry.get("library_track") or "pilot_main")
             if library_tracks and track not in library_tracks:
                 continue
+            if not _entry_matches_family_codes(entry, family_codes):
+                continue
+            sample_id = str(entry.get("sample_id") or "").strip()
+            file_name = str(entry.get("file_name") or "").strip()
+            if sample_ids or document_names:
+                sample_match = bool(sample_ids and sample_id in sample_ids)
+                document_match = bool(document_names and file_name in document_names)
+                if not sample_match and not document_match:
+                    continue
             retrieval_text = self._build_outline_retrieval_text(entry)
             score, reasons = self._score_case(query_terms=query_terms, entry=entry, retrieval_text=retrieval_text)
             if score <= 0:
                 continue
             candidates.append(
                 {
-                    "sample_id": entry.get("sample_id"),
-                    "file_name": entry.get("file_name"),
+                    "sample_id": sample_id,
+                    "file_name": file_name,
                     "library_track": track,
                     "profile": entry.get("profile"),
+                    "family_code": entry.get("family_code"),
+                    "secondary_family_codes": entry.get("secondary_family_codes") or [],
                     "top_level_titles": entry.get("top_level_titles") or [],
                     "outline_tree": entry.get("outline_tree") or [],
                     "score": round(score, 4),
@@ -199,6 +238,7 @@ class CaseLibraryService:
         sample_ids: set[str] | None = None,
         document_names: set[str] | None = None,
         library_tracks: set[str] | None = None,
+        family_codes: set[str] | None = None,
         section_title: str | None = None,
         section_ids: set[str] | None = None,
         section_path_prefixes: set[str] | None = None,
@@ -226,6 +266,8 @@ class CaseLibraryService:
         for entry in self._load_block_entries():
             track = str(entry.get("library_track") or "pilot_main")
             if library_tracks and track not in library_tracks:
+                continue
+            if not _entry_matches_family_codes(entry, family_codes):
                 continue
             sample_id = str(entry.get("sample_id") or "").strip()
             file_name = str(entry.get("file_name") or "").strip()
@@ -275,6 +317,7 @@ class CaseLibraryService:
         sample_ids: set[str] | None = None,
         document_names: set[str] | None = None,
         library_tracks: set[str] | None = None,
+        family_codes: set[str] | None = None,
         section_title: str | None = None,
     ) -> list[dict[str, Any]]:
         query_terms = _tokenize(query)
@@ -300,6 +343,8 @@ class CaseLibraryService:
         for outline_entry in self._load_outline_entries():
             track = str(outline_entry.get("library_track") or "pilot_main")
             if library_tracks and track not in library_tracks:
+                continue
+            if not _entry_matches_family_codes(outline_entry, family_codes):
                 continue
             sample_id = str(outline_entry.get("sample_id") or "").strip()
             file_name = str(outline_entry.get("file_name") or "").strip()

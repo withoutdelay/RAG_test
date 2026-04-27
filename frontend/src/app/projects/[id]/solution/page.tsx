@@ -19,6 +19,7 @@ import {
 import api, { getApiErrorMessage, isNotFoundError } from '@/lib/api';
 import {
   CatalogCandidateScore,
+  CatalogMaterialManifestPreview,
   CatalogMaterialReadiness,
   ProductCatalogInterface,
   CatalogVersion,
@@ -44,6 +45,8 @@ import { toast } from 'sonner';
 
 const stageItems = ['Requirement', 'Evidence', 'Solution', 'Outline', 'Drafts', 'Validation', 'Export'];
 type EditableListField = 'key_constraints' | 'open_questions' | 'suggested_chapters';
+type MaterialSourceFilter = 'gate_eligible' | 'all' | 'synthetic_only';
+type ManifestPreviewSourceKind = 'auto' | 'customer_provided' | 'synthetic_test_only';
 
 type EditableStringListProps = {
   title: string;
@@ -137,6 +140,35 @@ function getMaterialStatusVariant(status: string): 'success' | 'warning' | 'outl
   if (status === 'available') return 'success';
   if (status === 'review_needed') return 'warning';
   return 'outline';
+}
+
+function formatMaterialSourceKind(sourceKind: string): string {
+  if (sourceKind === 'private_sample') return 'Real Sample';
+  if (sourceKind === 'customer_provided') return 'Customer Material';
+  if (sourceKind === 'private_customer') return 'Customer Material';
+  if (sourceKind === 'synthetic_test_only') return 'Synthetic Test Only';
+  return sourceKind || 'Unknown Source';
+}
+
+function formatManifestIssueType(issueType: string): string {
+  if (issueType === 'duplicate_material_key') return 'Duplicate material_key';
+  if (issueType === 'missing_source_path') return 'Missing source_path';
+  if (issueType === 'missing_source_file') return 'Missing source file';
+  if (issueType === 'inferred_family_code') return 'Inferred family_code';
+  if (issueType === 'inferred_material_type') return 'Inferred material_type';
+  if (issueType === 'inferred_availability_status') return 'Inferred availability_status';
+  if (issueType === 'non_gate_source_kind') return 'Non-gate source kind';
+  return issueType;
+}
+
+function getMaterialSourceVariant(sourceKind: string): 'success' | 'warning' | 'outline' {
+  if (sourceKind === 'synthetic_test_only') return 'warning';
+  if (sourceKind === 'customer_provided' || sourceKind === 'private_customer') return 'success';
+  return 'outline';
+}
+
+function isGateEligibleMaterial(material: ProductCatalogMaterial): boolean {
+  return material.source_kind !== 'synthetic_test_only';
 }
 
 function getCompatibilityVariant(relationType: string): 'success' | 'warning' | 'outline' {
@@ -303,7 +335,13 @@ export default function SolutionPage() {
   const [catalogModels, setCatalogModels] = useState<ProductCatalogModel[]>([]);
   const [catalogInterfaces, setCatalogInterfaces] = useState<ProductCatalogInterface[]>([]);
   const [materialReadiness, setMaterialReadiness] = useState<CatalogMaterialReadiness | null>(null);
+  const [manifestPreview, setManifestPreview] = useState<CatalogMaterialManifestPreview | null>(null);
+  const [manifestPreviewPath, setManifestPreviewPath] = useState<string>('');
+  const [manifestPreviewSourceKind, setManifestPreviewSourceKind] = useState<ManifestPreviewSourceKind>('auto');
+  const [manifestPreviewLoading, setManifestPreviewLoading] = useState(false);
+  const [manifestPreviewReplaceExisting, setManifestPreviewReplaceExisting] = useState(true);
   const [catalogFamilyFilter, setCatalogFamilyFilter] = useState<string | null>(null);
+  const [materialSourceFilter, setMaterialSourceFilter] = useState<MaterialSourceFilter>('gate_eligible');
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -348,16 +386,29 @@ export default function SolutionPage() {
       ),
     [catalogSeriesMap, solution]
   );
+  const selectedFamilyCodeList = useMemo(() => Array.from(selectedFamilyCodes).sort(), [selectedFamilyCodes]);
   const filteredCatalogSeries = useMemo(
     () => (catalogFamilyFilter ? catalogSeries.filter((series) => series.family_code === catalogFamilyFilter) : catalogSeries),
     [catalogFamilyFilter, catalogSeries]
   );
   const filteredCatalogMaterials = useMemo(
-    () =>
-      catalogFamilyFilter
+    () => {
+      const familyScoped = catalogFamilyFilter
         ? catalogMaterials.filter((item) => item.family_code === catalogFamilyFilter)
-        : catalogMaterials,
-    [catalogFamilyFilter, catalogMaterials]
+        : catalogMaterials;
+      if (materialSourceFilter === 'synthetic_only') {
+        return familyScoped.filter((item) => !isGateEligibleMaterial(item));
+      }
+      if (materialSourceFilter === 'gate_eligible') {
+        return familyScoped.filter((item) => isGateEligibleMaterial(item));
+      }
+      return familyScoped;
+    },
+    [catalogFamilyFilter, catalogMaterials, materialSourceFilter]
+  );
+  const syntheticMaterials = useMemo(
+    () => catalogMaterials.filter((item) => !isGateEligibleMaterial(item)),
+    [catalogMaterials]
   );
   const filteredSeriesCodes = useMemo(
     () => new Set(filteredCatalogSeries.map((series) => series.code)),
@@ -382,6 +433,14 @@ export default function SolutionPage() {
     const summary = new Map<string, number>();
     catalogMaterials.forEach((item) => {
       summary.set(item.availability_status, (summary.get(item.availability_status) || 0) + 1);
+    });
+    return Array.from(summary.entries()).sort((a, b) => b[1] - a[1]);
+  }, [catalogMaterials]);
+  const materialSourceSummary = useMemo(() => {
+    const summary = new Map<string, number>();
+    catalogMaterials.forEach((item) => {
+      const key = item.source_kind || 'unknown';
+      summary.set(key, (summary.get(key) || 0) + 1);
     });
     return Array.from(summary.entries()).sort((a, b) => b[1] - a[1]);
   }, [catalogMaterials]);
@@ -423,6 +482,14 @@ export default function SolutionPage() {
     const currentCodes = new Set(solution.selected_products.map((item) => item.series_code));
     return comparisonSnapshot.selected_products.filter((item) => !currentCodes.has(item.series_code));
   }, [comparisonSnapshot, solution]);
+  const manifestPreviewSourceSummary = useMemo(
+    () => Object.entries(manifestPreview?.source_kind_counts || {}).sort((a, b) => b[1] - a[1]),
+    [manifestPreview]
+  );
+  const manifestPreviewEntryPreview = useMemo(
+    () => (manifestPreview?.preview_entries || []).slice(0, 6),
+    [manifestPreview]
+  );
 
   const applySolution = (nextSolution: SolutionSnapshot) => {
     setSolution(nextSolution);
@@ -772,6 +839,12 @@ export default function SolutionPage() {
 
       try {
         setCatalogLoading(true);
+        const readinessParams = new URLSearchParams();
+        readinessParams.set('project_id', projectId);
+        selectedFamilyCodeList.forEach((familyCode) => readinessParams.append('family_code', familyCode));
+        const readinessEndpoint = readinessParams.toString()
+          ? `/catalog/material-readiness?${readinessParams.toString()}`
+          : '/catalog/material-readiness';
         const [versionsRes, familiesRes, seriesRes, materialsRes, modelsRes, interfacesRes, readinessRes] = await Promise.all([
           api.get('/catalog/versions'),
           api.get('/catalog/families', {
@@ -799,7 +872,7 @@ export default function SolutionPage() {
               catalog_version: activeCatalogVersion || undefined,
             },
           }),
-          api.get('/catalog/material-readiness'),
+          api.get(readinessEndpoint),
         ]);
         setCatalogVersions(versionsRes.data || []);
         setCatalogFamilies(familiesRes.data || []);
@@ -816,7 +889,45 @@ export default function SolutionPage() {
     };
 
     void fetchCatalogExplorer();
-  }, [activeCatalogVersion, solutionId]);
+  }, [activeCatalogVersion, projectId, selectedFamilyCodeList, solutionId]);
+
+  const runManifestPreview = useCallback(
+    async (
+      manifestPath: string,
+      options?: {
+        sourceKind?: string | null;
+        silent?: boolean;
+      }
+    ) => {
+      const normalizedPath = manifestPath.trim();
+      if (!normalizedPath) {
+        toast.error('请先填写 manifest 路径');
+        return;
+      }
+
+      setManifestPreviewLoading(true);
+      setManifestPreviewPath(normalizedPath);
+      try {
+        const payload: Record<string, unknown> = {
+          manifest_path: normalizedPath,
+          replace_existing: manifestPreviewReplaceExisting,
+        };
+        if (options?.sourceKind) {
+          payload.source_kind = options.sourceKind;
+        }
+        const res = await api.post('/catalog/materials/preview-manifest', payload);
+        setManifestPreview(res.data || null);
+        if (!options?.silent) {
+          toast.success('Manifest preview refreshed');
+        }
+      } catch (error) {
+        toast.error(getApiErrorMessage(error, 'Failed to preview material manifest'));
+      } finally {
+        setManifestPreviewLoading(false);
+      }
+    },
+    [manifestPreviewReplaceExisting]
+  );
 
   useEffect(() => {
     if (catalogFamilyFilter && !catalogFamilies.some((item) => item.code === catalogFamilyFilter)) {
@@ -1832,7 +1943,7 @@ export default function SolutionPage() {
                       <p className="text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground">Material Readiness Gate</p>
                     </div>
                     <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                      这里明确判断当前资料库是否满足进入 Phase 1 / 2 / 3 的最小门槛，不再靠口头判断继续推进。
+                      这里明确判断当前资料库是否满足进入 Phase 1 / 2 / 3 的最小门槛。当前优先按方案实际选中的产品族收口，不再只看全局口径。
                     </p>
                   </div>
                   <Badge variant={materialReadiness.gate_passed ? 'success' : 'warning'}>
@@ -1841,8 +1952,13 @@ export default function SolutionPage() {
                 </div>
 
                 <div className="mt-4 flex flex-wrap gap-2">
-                  <Badge variant="outline">{materialReadiness.available_material_count} 份 Available 资料</Badge>
+                  <Badge variant="outline">{materialReadiness.available_material_count} 份 Gate Eligible 资料</Badge>
+                  <Badge variant="outline">{catalogMaterials.length} 份 Registry 资料</Badge>
+                  <Badge variant="outline">{syntheticMaterials.length} 份 Synthetic</Badge>
                   <Badge variant="outline">Core Manuals {materialReadiness.required_core_manual_family_count}</Badge>
+                  <Badge variant={selectedFamilyCodeList.length > 0 ? 'success' : 'outline'}>
+                    {selectedFamilyCodeList.length > 0 ? 'Project Scoped' : 'Default Scope'}
+                  </Badge>
                   {materialReadiness.target_family_codes.map((familyCode) => (
                     <Badge key={`readiness-family-${familyCode}`} variant="secondary">
                       {catalogFamilyMap.get(familyCode)?.display_name || catalogFamilyMap.get(familyCode)?.name || familyCode}
@@ -1874,6 +1990,16 @@ export default function SolutionPage() {
                           ))}
                         </div>
                       )}
+                      {item.matched_document_names.length > 0 && (
+                        <div className="mt-2 space-y-1 text-xs leading-5 text-muted-foreground">
+                          {item.matched_document_names.slice(0, 3).map((documentName) => (
+                            <p key={`${item.check_key}-${documentName}`}>{documentName}</p>
+                          ))}
+                          {item.matched_document_names.length > 3 && (
+                            <p>+ {item.matched_document_names.length - 3} 份资料</p>
+                          )}
+                        </div>
+                      )}
                       {item.missing_detail && (
                         <p className="mt-2 text-sm leading-6 text-amber-700">{item.missing_detail}</p>
                       )}
@@ -1902,6 +2028,249 @@ export default function SolutionPage() {
                 )}
               </div>
             )}
+
+            <div className="rounded-md border border-border bg-[#fbfcf8] p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Database className="h-4 w-4 text-primary" />
+                    <p className="text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground">Manifest Intake Preview</p>
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                    这里直接走 `preview-manifest` dry-run。客户资料一到，可以先看可导入量、重复 key、推断字段和 gate 影响，再决定是否正式入库。
+                  </p>
+                </div>
+                {manifestPreview && (
+                  <Badge variant={manifestPreview.import_blocked ? 'warning' : 'success'}>
+                    {manifestPreview.import_blocked ? 'Preview Blocked' : 'Preview Ready'}
+                  </Badge>
+                )}
+              </div>
+
+              <div className="mt-4 space-y-3 rounded-md border border-border bg-white p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant={manifestPreviewSourceKind === 'auto' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setManifestPreviewSourceKind('auto')}
+                  >
+                    Auto Detect
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={manifestPreviewSourceKind === 'customer_provided' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setManifestPreviewSourceKind('customer_provided')}
+                  >
+                    Force Customer
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={manifestPreviewSourceKind === 'synthetic_test_only' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setManifestPreviewSourceKind('synthetic_test_only')}
+                  >
+                    Force Synthetic
+                  </Button>
+                  <span className="text-xs leading-5 text-muted-foreground">
+                    不再内置本地样本路径；直接粘贴当前要检查的 manifest 绝对路径。
+                  </span>
+                </div>
+                <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+                  <Input
+                    value={manifestPreviewPath}
+                    onChange={(event) => {
+                      setManifestPreviewPath(event.target.value);
+                    }}
+                    placeholder="/abs/path/to/customer-material-manifest.json"
+                    className="h-10"
+                  />
+                  <Button
+                    type="button"
+                    onClick={() =>
+                      void runManifestPreview(manifestPreviewPath, {
+                        sourceKind: manifestPreviewSourceKind === 'auto' ? undefined : manifestPreviewSourceKind,
+                      })
+                    }
+                    disabled={manifestPreviewLoading}
+                  >
+                    {manifestPreviewLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                    Run Preview
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant={manifestPreviewReplaceExisting ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setManifestPreviewReplaceExisting(true)}
+                  >
+                    Replace Existing
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={!manifestPreviewReplaceExisting ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setManifestPreviewReplaceExisting(false)}
+                  >
+                    Skip Existing
+                  </Button>
+                </div>
+              </div>
+
+              {manifestPreview ? (
+                <div className="mt-4 space-y-4">
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <div className="rounded-md border border-border bg-white p-3">
+                      <p className="text-xs uppercase tracking-[0.08em] text-muted-foreground">Preview Summary</p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Badge variant="outline">{manifestPreview.total_entry_count} entries</Badge>
+                        <Badge variant="outline">{manifestPreview.unique_material_key_count} unique keys</Badge>
+                        <Badge variant="outline">{manifestPreview.would_import_count} would import</Badge>
+                        <Badge variant="outline">{manifestPreview.existing_material_count} existing</Badge>
+                        <Badge variant="outline">{manifestPreview.gate_ready_material_count} gate-ready</Badge>
+                        <Badge variant="outline">{manifestPreview.non_synthetic_material_count} non-synthetic</Badge>
+                      </div>
+                      <div className="mt-3 space-y-1 text-sm leading-6 text-muted-foreground">
+                        <p className="break-all">{manifestPreview.manifest_path}</p>
+                        <p>source_kind: {formatMaterialSourceKind(manifestPreview.source_kind)}</p>
+                        <p>mode: {manifestPreview.replace_existing ? 'replace existing' : 'skip existing'}</p>
+                      </div>
+                    </div>
+                    <div className="rounded-md border border-border bg-white p-3">
+                      <p className="text-xs uppercase tracking-[0.08em] text-muted-foreground">Preview Diagnostics</p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Badge variant={manifestPreview.duplicate_material_key_count > 0 ? 'warning' : 'success'}>
+                          duplicate keys {manifestPreview.duplicate_material_key_count}
+                        </Badge>
+                        <Badge variant={manifestPreview.missing_source_path_count > 0 ? 'warning' : 'success'}>
+                          missing path {manifestPreview.missing_source_path_count}
+                        </Badge>
+                        <Badge variant={manifestPreview.missing_source_file_count > 0 ? 'warning' : 'success'}>
+                          missing file {manifestPreview.missing_source_file_count}
+                        </Badge>
+                        <Badge variant={manifestPreview.inferred_family_count > 0 ? 'warning' : 'success'}>
+                          inferred family {manifestPreview.inferred_family_count}
+                        </Badge>
+                        <Badge variant={manifestPreview.inferred_material_type_count > 0 ? 'warning' : 'success'}>
+                          inferred type {manifestPreview.inferred_material_type_count}
+                        </Badge>
+                      </div>
+                      {manifestPreview.duplicate_material_keys.length > 0 && (
+                        <div className="mt-3 space-y-1 text-xs leading-5 text-muted-foreground">
+                          {manifestPreview.duplicate_material_keys.slice(0, 4).map((materialKey) => (
+                            <p key={`duplicate-key-${materialKey}`}>{materialKey}</p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <div className="rounded-md border border-border bg-white p-3">
+                      <p className="text-xs uppercase tracking-[0.08em] text-muted-foreground">By Source</p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {manifestPreviewSourceSummary.length > 0 ? (
+                          manifestPreviewSourceSummary.map(([sourceKind, count]) => (
+                            <Badge key={`manifest-preview-source-${sourceKind}`} variant={getMaterialSourceVariant(sourceKind)}>
+                              {formatMaterialSourceKind(sourceKind)} · {count}
+                            </Badge>
+                          ))
+                        ) : (
+                          <span className="text-sm text-muted-foreground">当前 preview 还没有 source 汇总。</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="rounded-md border border-border bg-white p-3">
+                      <p className="text-xs uppercase tracking-[0.08em] text-muted-foreground">Issues</p>
+                      <div className="mt-3 space-y-2">
+                        {manifestPreview.issues.length > 0 ? (
+                          manifestPreview.issues.map((issue, index) => (
+                            <div key={`${issue.issue_type}-${index}`} className="rounded-md border border-border bg-[#fbfcf8] px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <Badge variant={issue.severity === 'blocking' || issue.severity === 'warning' ? 'warning' : 'outline'}>
+                                  {issue.severity}
+                                </Badge>
+                                <p className="text-sm font-medium text-foreground">{formatManifestIssueType(issue.issue_type)}</p>
+                              </div>
+                              <p className="mt-2 text-sm leading-6 text-muted-foreground">{issue.message}</p>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="rounded-md border border-dashed border-border bg-[#fbfcf8] px-3 py-2 text-sm text-muted-foreground">
+                            当前 preview 没有发现阻断或提醒项。
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-md border border-border bg-white p-3">
+                    <p className="text-xs uppercase tracking-[0.08em] text-muted-foreground">Entry Preview</p>
+                    <div className="mt-3 space-y-3">
+                      {manifestPreviewEntryPreview.length > 0 ? (
+                        manifestPreviewEntryPreview.map((entry) => (
+                          <div key={`preview-entry-${entry.material_key}`} className="rounded-md border border-border bg-[#fbfcf8] p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <p className="text-sm font-semibold text-foreground">{entry.document_name}</p>
+                                <p className="mt-1 text-xs text-muted-foreground">{entry.material_key}</p>
+                              </div>
+                              <Badge variant={entry.counted_toward_gate ? 'success' : 'warning'}>
+                                {entry.counted_toward_gate ? 'Gate Ready' : 'Not Counted'}
+                              </Badge>
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <Badge variant="outline">{formatMaterialType(entry.material_type)}</Badge>
+                              <Badge variant="outline">
+                                {catalogFamilyMap.get(entry.family_code || '')?.display_name ||
+                                  catalogFamilyMap.get(entry.family_code || '')?.name ||
+                                  entry.family_code ||
+                                  'Unclassified'}
+                              </Badge>
+                              <Badge variant={getMaterialSourceVariant(entry.source_kind)}>
+                                {formatMaterialSourceKind(entry.source_kind)}
+                              </Badge>
+                              <Badge variant={entry.existing_material ? 'outline' : 'success'}>
+                                {entry.existing_material ? 'Existing' : 'New'}
+                              </Badge>
+                              <Badge variant={entry.duplicate_material_key ? 'warning' : 'outline'}>
+                                {entry.duplicate_material_key ? 'Duplicate Key' : 'Unique Key'}
+                              </Badge>
+                            </div>
+                            <div className="mt-3 space-y-1 text-xs leading-5 text-muted-foreground">
+                              <p>
+                                explicit fields: family={entry.explicit_family_code ? 'yes' : 'no'} / type=
+                                {entry.explicit_material_type ? 'yes' : 'no'} / status=
+                                {entry.explicit_availability_status ? 'yes' : 'no'}
+                              </p>
+                              <p>source file exists: {entry.source_path_exists === null ? '-' : entry.source_path_exists ? 'yes' : 'no'}</p>
+                              {entry.source_path && <p className="break-all">{entry.source_path}</p>}
+                            </div>
+                            {entry.issues.length > 0 && (
+                              <div className="mt-3 space-y-1 text-sm leading-6 text-amber-700">
+                                {entry.issues.map((issue) => (
+                                  <p key={`${entry.material_key}-${issue}`}>{issue}</p>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="rounded-md border border-dashed border-border bg-[#fbfcf8] px-3 py-2 text-sm text-muted-foreground">
+                          当前 preview 还没有 entry 详情。
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-4 rounded-md border border-dashed border-border bg-white px-4 py-3 text-sm text-muted-foreground">
+                  还没有 preview 结果。先选择预设 manifest，或填入客户 manifest 的绝对路径后执行预检。
+                </div>
+              )}
+            </div>
 
             <div className="rounded-md border border-border bg-[#fbfcf8] p-4">
               <p className="text-xs font-medium uppercase tracking-[0.08em] text-muted-foreground">Candidate Scores</p>
@@ -2385,11 +2754,58 @@ export default function SolutionPage() {
                     )}
                   </div>
                 </div>
+                <div className="rounded-md border border-border bg-white p-3 lg:col-span-2">
+                  <p className="text-xs uppercase tracking-[0.08em] text-muted-foreground">By Source</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {materialSourceSummary.length > 0 ? (
+                      materialSourceSummary.map(([sourceKind, count]) => (
+                        <Badge key={`material-source-${sourceKind}`} variant={getMaterialSourceVariant(sourceKind)}>
+                          {formatMaterialSourceKind(sourceKind)} · {count}
+                        </Badge>
+                      ))
+                    ) : (
+                      <span className="text-sm text-muted-foreground">当前还没有导入资料台账。</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant={materialSourceFilter === 'gate_eligible' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setMaterialSourceFilter('gate_eligible')}
+                >
+                  只看 Gate Eligible
+                </Button>
+                <Button
+                  type="button"
+                  variant={materialSourceFilter === 'all' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setMaterialSourceFilter('all')}
+                >
+                  查看全部
+                </Button>
+                <Button
+                  type="button"
+                  variant={materialSourceFilter === 'synthetic_only' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setMaterialSourceFilter('synthetic_only')}
+                >
+                  只看 Synthetic
+                </Button>
+                <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm text-muted-foreground">
+                  <span>当前显示：</span>
+                  <Badge variant="outline">{filteredCatalogMaterials.length} 份</Badge>
+                  <span>真实资料默认计入 gate，synthetic 只作研发验证。</span>
+                </div>
               </div>
 
               <div className="mt-4 grid gap-4 lg:grid-cols-2">
                 {filteredCatalogMaterials.map((material) => {
                   const family = material.family_code ? catalogFamilyMap.get(material.family_code) : null;
+                  const gateEligible = isGateEligibleMaterial(material);
                   return (
                     <div key={material.material_key} className="rounded-md border border-border bg-white p-4">
                       <div className="flex items-start justify-between gap-3">
@@ -2405,8 +2821,14 @@ export default function SolutionPage() {
                       <div className="mt-3 flex flex-wrap gap-2">
                         <Badge variant="outline">{formatMaterialType(material.material_type)}</Badge>
                         <Badge variant="outline">{family?.display_name || family?.name || material.family_code || 'Unclassified'}</Badge>
+                        <Badge variant={getMaterialSourceVariant(material.source_kind)}>
+                          {formatMaterialSourceKind(material.source_kind)}
+                        </Badge>
                         {material.file_format && <Badge variant="outline">{material.file_format}</Badge>}
                         {material.assigned_track && <Badge variant="outline">{material.assigned_track}</Badge>}
+                        <Badge variant={gateEligible ? 'success' : 'warning'}>
+                          {gateEligible ? 'Counted Toward Gate' : 'Not Counted Toward Gate'}
+                        </Badge>
                       </div>
 
                       {(material.notes || material.source_path) && (
@@ -2441,7 +2863,7 @@ export default function SolutionPage() {
 
               {!catalogLoading && catalogMaterials.length > 0 && filteredCatalogMaterials.length === 0 && (
                 <div className="mt-4 rounded-md border border-dashed border-border bg-white px-4 py-3 text-sm text-muted-foreground">
-                  当前产品族筛选下没有资料台账条目。
+                  当前筛选条件下没有资料台账条目。
                 </div>
               )}
             </div>

@@ -410,7 +410,7 @@ class SolutionService:
             )
         if catalog_material_entries:
             why_selected.append(
-                f"已绑定 {len(catalog_material_entries)} 份产品资料库材料，可按章节类型优先锚定真实样本与产品手册。"
+                f"已绑定 {len(catalog_material_entries)} 份产品资料库材料，可按章节类型优先锚定已导入材料与产品手册。"
             )
         why_selected.append("主设备、配套设备、型号、接口和章节建议已拆成结构化字段，可直接进入 Outline 与章节生成。")
 
@@ -500,6 +500,16 @@ class SolutionService:
             if str(item.family_code or item.code or "").strip()
         }
 
+        def _source_rank(source_kind: str | None) -> int:
+            normalized = str(source_kind or "").strip()
+            if normalized in {"customer_provided", "private_customer"}:
+                return 3
+            if normalized == "private_sample":
+                return 2
+            if normalized == "synthetic_test_only":
+                return 0
+            return 1
+
         def _score(row: ProductMaterial) -> tuple[float, float, str]:
             family_code = str(row.family_code or "").strip()
             score = MATERIAL_TYPE_PRIORITY.get(str(row.material_type or "").strip(), 1.0)
@@ -515,9 +525,12 @@ class SolutionService:
                 score += 0.5
             elif quality_tier == "medium":
                 score += 0.25
-            assigned_track = str(row.assigned_track or "").strip()
-            if assigned_track == "pilot_main":
-                score += 0.3
+            source_kind = str(row.source_kind or "").strip()
+            rank = _source_rank(source_kind)
+            if rank >= 3:
+                score += 0.8
+            elif rank == 2:
+                score += 0.2
             return (score, float(row.file_size_bytes or 0), str(row.document_name or ""))
 
         relevant_rows = [
@@ -527,8 +540,24 @@ class SolutionService:
             and str(row.family_code or "").strip() in {primary_family_code, *secondary_family_codes}
         ]
         prioritized_rows = sorted(relevant_rows, key=_score, reverse=True)
+        best_rank_by_bucket: dict[tuple[str, str], int] = {}
+        for row in prioritized_rows:
+            bucket = (
+                str(row.family_code or "").strip(),
+                str(row.material_type or "").strip(),
+            )
+            best_rank_by_bucket[bucket] = max(best_rank_by_bucket.get(bucket, 0), _source_rank(row.source_kind))
         payloads: list[dict[str, Any]] = []
-        for row in prioritized_rows[:limit]:
+        for row in prioritized_rows:
+            if len(payloads) >= limit:
+                break
+            bucket = (
+                str(row.family_code or "").strip(),
+                str(row.material_type or "").strip(),
+            )
+            source_rank = _source_rank(row.source_kind)
+            if source_rank < best_rank_by_bucket.get(bucket, source_rank):
+                continue
             details = row.details if isinstance(row.details, dict) else {}
             payloads.append(
                 {
@@ -536,11 +565,15 @@ class SolutionService:
                     "document_name": row.document_name,
                     "family_code": row.family_code,
                     "material_type": row.material_type,
+                    "source_kind": row.source_kind,
+                    "source_path": row.source_path,
+                    "file_format": row.file_format,
                     "availability_status": row.availability_status,
                     "assigned_track": row.assigned_track,
                     "priority_tier": row.priority_tier,
                     "solution_family": str(details.get("solution_family") or "").strip() or None,
                     "quality_tier": str(details.get("quality_tier") or "").strip() or None,
+                    "synthetic_test_only": bool(details.get("synthetic_test_only")),
                     "key_equipment": [str(item).strip() for item in (details.get("key_equipment") or []) if str(item).strip()],
                     "preferred_section_types": list(
                         MATERIAL_SECTION_TYPE_MAP.get(str(row.material_type or "").strip(), MATERIAL_SECTION_TYPE_MAP["proposal_sample"])

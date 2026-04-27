@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,18 +18,22 @@ from app.services.composition.section_service import (
     _build_composition_retrieval_trace,
     _build_evidence_retrieval_trace,
     _build_generation_summary,
+    _build_snapshot_primary_section_content,
     _compute_next_section_draft_version,
     _build_preceding_context,
     _build_preceding_context_from_existing_drafts,
+    _should_use_snapshot_primary_section,
     _should_skip_optional_asset_search,
     _new_inter_section_state,
     _record_inter_section_context,
     _select_customer_body_reuse_blocks,
+    _select_catalog_material_entries_for_section,
     SectionDraftService,
     _filter_reuse_blocks_for_assembly,
     _normalize_invalid_asset_placeholders,
     _build_asset_search_context,
     _normalize_technical_spacing,
+    _extract_catalog_material_markdown_sections,
     _select_section_scope_candidates,
     build_extractive_reuse_section_content,
     build_manual_only_section_content,
@@ -162,6 +167,25 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(section["section_class"], "architecture")
         self.assertEqual(section["customer_specificity"], "low")
         self.assertEqual(section["generation_mode"], "reuse_first")
+        self.assertIn("parameter", section["expected_evidence_types"])
+
+    def test_normalize_outline_payload_routes_overall_solution_to_architecture_reuse_first(self) -> None:
+        payload = {
+            "title": "测试项目技术方案",
+            "sections": [
+                {
+                    "title": "总体方案",
+                    "description": "说明系统总体方案与主要设备构成。",
+                }
+            ],
+        }
+
+        normalized = normalize_outline_payload(payload, project_name="测试项目")
+        section = normalized["sections"][0]
+
+        self.assertEqual(section["section_class"], "architecture")
+        self.assertEqual(section["generation_mode"], "reuse_first")
+        self.assertIn("figure", section["expected_evidence_types"])
         self.assertIn("parameter", section["expected_evidence_types"])
 
     def test_build_section_context_filters_by_expected_types(self) -> None:
@@ -381,6 +405,7 @@ class CompositionHelperTests(unittest.TestCase):
         )
 
         self.assertIn("已确认方案快照", instructions)
+        self.assertIn("保留一个独立的总体方案章节", instructions)
         self.assertEqual(global_params["primary_product"], "LCI 同步电机变频软起动系统")
         self.assertEqual(global_params["primary_product_family"], "LCI / 同步电机变频软起动系统")
         self.assertEqual(global_params["primary_model_number"], "GBT.LCI.SO-A0606-211N465")
@@ -556,6 +581,11 @@ class CompositionHelperTests(unittest.TestCase):
                 "key_parameters": {"voltage_level": "10kV"},
             },
             solution_snapshot=solution_snapshot,
+            outline_sections=[
+                {"section_id": "1", "title": "项目概述"},
+                {"section_id": "2", "title": "总体方案"},
+                {"section_id": "3", "title": "需求分析"},
+            ],
         )
 
         self.assertEqual(params["primary_product"], "LCI 同步电机变频软起动系统")
@@ -570,6 +600,8 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("现场安装前需完成一次接口边界确认。", params["solution_constraints"])
         self.assertIn("待确认调试窗口。", params["solution_open_questions"])
         self.assertEqual(params["voltage_level"], "10kV")
+        self.assertTrue(params["has_overall_solution_section"])
+        self.assertIn("总体方案", params["outline_section_titles"])
 
     def test_build_section_context_includes_solution_snapshot_tables(self) -> None:
         bundle = SimpleNamespace(content={"results": []})
@@ -915,6 +947,269 @@ class CompositionHelperTests(unittest.TestCase):
                 for block in demand_blocks
             )
         )
+
+    def test_build_snapshot_primary_section_content_embeds_catalog_materials_in_overview(self) -> None:
+        content = _build_snapshot_primary_section_content(
+            section={"title": "项目概述", "section_class": "overview"},
+            global_params={
+                "industry": "钢铁",
+                "business_objective": "某钢铁集团计划对现有高炉鼓风机驱动系统实施升级改造。",
+                "primary_product": "LCI 同步电机变频软起动系统",
+                "selected_products": "主驱动系统（LCI 同步电机变频软起动系统） 1 套、整流变压器 1 套",
+                "primary_model_number": "GBT.LCI.SO-A0606-211N465",
+            },
+            customer_body_blocks=[
+                {
+                    "source_section_id": "summary",
+                    "content_md": "本项目方案围绕 LCI 同步电机变频软起动系统组织主回路、接口与供货配置。",
+                    "metadata": {"source_type": "solution_snapshot"},
+                },
+                {
+                    "source_section_id": "products",
+                    "content_md": "| 角色 | 产品 |\n| --- | --- |\n| 主驱动 | LCI 同步电机变频软起动系统 |",
+                    "metadata": {"source_type": "solution_snapshot"},
+                },
+                {
+                    "source_title": "LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                    "content_md": "### 产品定位\n\n- 适用场景：同步切换, 工频旁路\n- 适用负载：鼓风机, 压缩机\n- 电压等级：6kV, 10kV\n- 拓扑/原理：负载换流型\n\n### 型号基线\n\n| 型号 | 电压等级 |\n| --- | --- |\n| GBT.LCI.SO-A0606-211N465 | 10kV |",
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_direct": True,
+                        "catalog_material_display_title": "LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                        "catalog_material_type": "product_manual",
+                        "content_form": "narrative",
+                    },
+                },
+                {
+                    "source_title": "LCI / 同步电机变频软起动系统 测试开发用标准 BOM",
+                    "content_md": "### 标准配置矩阵\n\n| 配置名称 | 角色 | 设备/系列 |\n| --- | --- | --- |\n| 标准配置 | 主设备 | LCI 同步电机变频软起动系统 |\n| 标准配置 | 整流变压器 | 整流变压器 |\n| 旁路配置 | 旁路柜 | 旁路切换柜 |",
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_direct": True,
+                        "catalog_material_display_title": "LCI / 同步电机变频软起动系统 测试开发用标准 BOM",
+                        "catalog_material_type": "standard_bom",
+                        "content_form": "bom_table",
+                    },
+                },
+            ],
+        )
+
+        self.assertIn("### 方案构成与适配基线", content)
+        self.assertIn("当前总体方案以LCI 同步电机变频软起动系统为主驱动核心", content)
+        self.assertIn("目录型号基线为GBT.LCI.SO-A0606-211N465", content)
+        self.assertIn("标准成套配置包含LCI 同步电机变频软起动系统、整流变压器", content)
+        self.assertIn("### 产品资料库补充基线", content)
+        self.assertIn("#### LCI / 同步电机变频软起动系统 标准 BOM", content)
+        self.assertIn("#### LCI / 同步电机变频软起动系统 产品手册", content)
+        self.assertIn("#### 产品定位", content)
+        self.assertIn("#### 标准配置矩阵", content)
+        self.assertNotIn("测试开发用", content)
+        self.assertLess(
+            content.index("#### LCI / 同步电机变频软起动系统 产品手册"),
+            content.index("#### LCI / 同步电机变频软起动系统 标准 BOM"),
+        )
+
+    def test_build_snapshot_primary_section_content_keeps_overview_lean_when_overall_solution_exists(self) -> None:
+        content = _build_snapshot_primary_section_content(
+            section={"title": "项目概述", "section_class": "overview"},
+            global_params={
+                "industry": "钢铁",
+                "business_objective": "某钢铁集团计划对现有高炉鼓风机驱动系统实施升级改造。",
+                "selected_products": "主驱动系统（LCI 同步电机变频软起动系统） 1 套、整流变压器 1 套",
+                "primary_model_number": "GBT.LCI.SO-A0606-211N465",
+                "catalog_interface_summary": "LCI 同步电机变频软起动系统的通讯接口采用 Profibus-DP，配置现场总线适配器",
+                "solution_open_questions": "待确认 DCS 标准通讯协议 / 待确认电机额定功率",
+                "has_overall_solution_section": True,
+            },
+            customer_body_blocks=[
+                {
+                    "source_section_id": "summary",
+                    "content_md": "本项目方案围绕 LCI 同步电机变频软起动系统组织主回路、接口与供货配置。",
+                    "metadata": {"source_type": "solution_snapshot"},
+                },
+                {
+                    "source_section_id": "products",
+                    "content_md": "| 角色 | 产品 |\n| --- | --- |\n| 主驱动 | LCI 同步电机变频软起动系统 |",
+                    "metadata": {"source_type": "solution_snapshot"},
+                },
+                {
+                    "source_title": "LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                    "content_md": "### 产品定位\n\n- 适用场景：同步切换, 工频旁路\n- 适用负载：鼓风机, 压缩机\n- 电压等级：6kV, 10kV\n- 拓扑/原理：负载换流型",
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_direct": True,
+                        "catalog_material_display_title": "LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                        "catalog_material_type": "product_manual",
+                        "content_form": "narrative",
+                    },
+                },
+            ],
+        )
+
+        self.assertIn("### 建设范围与交付对象", content)
+        self.assertIn("### 当前实施前提", content)
+        self.assertNotIn("### 方案构成与适配基线", content)
+        self.assertNotIn("### 产品资料库补充基线", content)
+        self.assertNotIn("| 角色 | 产品 |", content)
+        self.assertNotIn("GBT.LCI.SO-A0606-211N465", content)
+        self.assertNotIn("Profibus-DP", content)
+
+    def test_build_snapshot_primary_section_content_synthesizes_requirement_materials(self) -> None:
+        content = _build_snapshot_primary_section_content(
+            section={"title": "需求分析", "section_class": "requirement"},
+            global_params={
+                "business_objective": "某钢铁集团计划对现有高炉鼓风机驱动系统实施升级改造。",
+            },
+            customer_body_blocks=[
+                {
+                    "source_section_id": "demand",
+                    "content_md": "- 主驱动场景为 LCI 同步电机变频软起动系统，适配 10kV，当前按标准配置组织供货与切换边界。",
+                    "metadata": {"source_type": "solution_snapshot"},
+                },
+                {
+                    "source_title": "LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                    "content_md": "### 产品定位\n\n- 适用负载：鼓风机, 压缩机\n- 适用电机：同步电机\n- 电压等级：6kV, 10kV",
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_direct": True,
+                        "catalog_material_display_title": "LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                        "catalog_material_type": "product_manual",
+                        "content_form": "narrative",
+                    },
+                },
+                {
+                    "source_title": "LCI / 同步电机变频软起动系统 测试开发用选型规则",
+                    "content_md": "### 规则清单\n\n| 规则类型 | 触发条件 | 动作/要求 | 严重级别 |\n| --- | --- | --- | --- |\n| electrical | 同步电机 | 必须配套励磁控制柜。 | blocking |\n| control | 要求工频旁路或不停机切换 | 应选用旁路配置并明确切换闭锁逻辑。 | warning |",
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_direct": True,
+                        "catalog_material_display_title": "LCI / 同步电机变频软起动系统 测试开发用选型规则",
+                        "catalog_material_type": "selection_rule",
+                        "content_form": "rule_table",
+                    },
+                },
+            ],
+        )
+
+        self.assertIn("### 目录适配与配置约束", content)
+        self.assertIn("当前目录基线覆盖6kV, 10kV电压等级", content)
+        self.assertIn("必须满足：在“同步电机”条件下，必须配套励磁控制柜。", content)
+        self.assertIn("约束条件：在“要求工频旁路或不停机切换”条件下，应选用旁路配置并明确切换闭锁逻辑。", content)
+        self.assertIn("### 产品资料库补充基线", content)
+        self.assertIn("#### LCI / 同步电机变频软起动系统 选型规则", content)
+        self.assertNotIn("测试开发用", content)
+
+    def test_should_use_snapshot_primary_section_for_overall_solution_title_even_if_custom(self) -> None:
+        self.assertTrue(
+            _should_use_snapshot_primary_section(
+                section={"title": "总体方案", "section_class": "custom"},
+                customer_body_blocks=[
+                    {
+                        "source_section_id": "summary",
+                        "metadata": {"source_type": "solution_snapshot"},
+                    },
+                    {
+                        "source_section_id": "products",
+                        "metadata": {"source_type": "solution_snapshot"},
+                    },
+                ],
+            )
+        )
+
+    def test_build_snapshot_primary_section_content_builds_overall_solution_for_custom_section(self) -> None:
+        content = _build_snapshot_primary_section_content(
+            section={"title": "总体方案", "section_class": "custom"},
+            global_params={
+                "primary_product": "LCI 同步电机变频软起动系统",
+                "selected_products": "主驱动系统（LCI 同步电机变频软起动系统） 1 套、整流变压器 1 套、励磁控制柜 1 套",
+                "primary_model_number": "GBT.LCI.SO-A0606-211N465",
+                "catalog_interface_summary": "LCI 同步电机变频软起动系统的通讯接口采用 Profibus-DP，配置现场总线适配器",
+                "compatibility_summary": "成套配套设备：已覆盖整流变压器、励磁控制柜；可选配置包括旁路柜。",
+                "solution_open_questions": "待确认 DCS 标准通讯协议 / 待确认电机额定功率",
+            },
+            customer_body_blocks=[
+                {
+                    "source_section_id": "summary",
+                    "content_md": "本项目方案围绕 LCI 同步电机变频软起动系统组织主回路、接口与供货配置。",
+                    "metadata": {"source_type": "solution_snapshot"},
+                },
+                {
+                    "source_section_id": "products",
+                    "content_md": "| 角色 | 产品 |\n| --- | --- |\n| 主驱动 | LCI 同步电机变频软起动系统 |\n| 整流变压器 | 整流变压器 |",
+                    "metadata": {"source_type": "solution_snapshot"},
+                },
+                {
+                    "source_title": "LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                    "content_md": "### 产品定位\n\n- 适用场景：同步切换, 工频旁路\n- 适用负载：鼓风机, 压缩机\n- 电压等级：6kV, 10kV\n- 拓扑/原理：负载换流型",
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_direct": True,
+                        "catalog_material_display_title": "LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                        "catalog_material_type": "product_manual",
+                        "content_form": "narrative",
+                    },
+                },
+                {
+                    "source_title": "LCI / 同步电机变频软起动系统 测试开发用标准 BOM",
+                    "content_md": "### 标准配置矩阵\n\n| 配置名称 | 角色 | 设备/系列 |\n| --- | --- | --- |\n| 标准配置 | 主设备 | LCI 同步电机变频软起动系统 |\n| 标准配置 | 整流变压器 | 整流变压器 |\n| 标准配置 | 励磁控制柜 | 励磁控制柜 |\n| 旁路配置 | 旁路柜 | 旁路切换柜 |",
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_direct": True,
+                        "catalog_material_display_title": "LCI / 同步电机变频软起动系统 测试开发用标准 BOM",
+                        "catalog_material_type": "standard_bom",
+                        "content_form": "bom_table",
+                    },
+                },
+            ],
+        )
+
+        self.assertIn("### 总体方案定位", content)
+        self.assertIn("### 系统组成与接口边界", content)
+        self.assertIn("### 成套与扩展边界", content)
+        self.assertIn("### 主要设备组成", content)
+        self.assertIn("### 产品资料库补充基线", content)
+        self.assertIn("当前总体方案以LCI 同步电机变频软起动系统为主驱动核心", content)
+        self.assertIn("LCI 同步电机变频软起动系统的通讯接口采用 Profibus-DP", content)
+        self.assertIn("待确认事项：待确认 DCS 标准通讯协议。", content)
+        self.assertNotIn("测试开发用", content)
+
+    def test_build_snapshot_primary_section_content_keeps_overall_solution_positioning_when_manual_missing(self) -> None:
+        content = _build_snapshot_primary_section_content(
+            section={"title": "总体方案", "section_class": "custom"},
+            global_params={
+                "primary_product": "LCI 同步电机变频软起动系统",
+                "selected_products": "主驱动系统（LCI 同步电机变频软起动系统） 1 套、整流变压器 1 套",
+                "primary_model_number": "GBT.LCI.SO-A0606-211N465",
+                "catalog_interface_summary": "LCI 同步电机变频软起动系统的通讯接口采用 Profibus-DP，配置现场总线适配器",
+            },
+            customer_body_blocks=[
+                {
+                    "source_section_id": "summary",
+                    "content_md": "本项目方案围绕 LCI 同步电机变频软起动系统组织主回路、接口与供货配置。",
+                    "metadata": {"source_type": "solution_snapshot"},
+                },
+                {
+                    "source_section_id": "products",
+                    "content_md": "| 角色 | 产品 |\n| --- | --- |\n| 主驱动 | LCI 同步电机变频软起动系统 |",
+                    "metadata": {"source_type": "solution_snapshot"},
+                },
+                {
+                    "source_title": "LCI / 同步电机变频软起动系统 测试开发用标准 BOM",
+                    "content_md": "### 标准配置矩阵\n\n| 配置名称 | 角色 | 设备/系列 |\n| --- | --- | --- |\n| 标准配置 | 主设备 | LCI 同步电机变频软起动系统 |\n| 标准配置 | 整流变压器 | 整流变压器 |",
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_direct": True,
+                        "catalog_material_display_title": "LCI / 同步电机变频软起动系统 测试开发用标准 BOM",
+                        "catalog_material_type": "standard_bom",
+                        "content_form": "bom_table",
+                    },
+                },
+            ],
+        )
+
+        self.assertIn("当前总体方案以LCI 同步电机变频软起动系统为主驱动核心", content)
+        self.assertIn("目录型号基线为GBT.LCI.SO-A0606-211N465", content)
+        self.assertIn("标准成套配置包含LCI 同步电机变频软起动系统、整流变压器", content)
 
     def test_build_solution_reusable_blocks_includes_implementation_and_service_summary(self) -> None:
         solution_snapshot = SimpleNamespace(
@@ -1348,6 +1643,165 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(blocks[0]["metadata"]["source_type"], "product_material")
         self.assertEqual(blocks[0]["metadata"]["catalog_material_key"], "lci-bf49f75e")
         self.assertIn("catalog_material_anchor", blocks[0]["selection_reasons"])
+
+    def test_build_reusable_blocks_can_materialize_direct_catalog_material_block_from_markdown(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", encoding="utf-8", delete=False) as handle:
+            handle.write(
+                "\n".join(
+                    [
+                        "# LCI 测试开发用标准 BOM",
+                        "",
+                        "> 声明：本文件为 `synthetic_test_only` 测试开发材料。",
+                        "",
+                        "## 标准配置矩阵",
+                        "",
+                        "| 配置名称 | 角色 | 设备/系列 | 数量 | 说明 |",
+                        "| --- | --- | --- | --- | --- |",
+                        "| 标准配置 | 主设备 | LCI 同步电机变频软起动系统 | 1 | 主机本体 |",
+                        "| 标准配置 | 整流变压器 | 整流变压器 | 1 | 标准配置 |",
+                        "| 标准配置 | 励磁控制柜 | 励磁控制柜 | 1 | 同步电机配套 |",
+                        "",
+                        "## 使用边界",
+                        "",
+                        "- 本 BOM 仅用于测试开发。",
+                        "",
+                    ]
+                )
+            )
+            material_path = handle.name
+
+        bundle = SimpleNamespace(content={"results": []})
+        solution_snapshot = SimpleNamespace(
+            selection_reason={
+                "catalog_material_entries": [
+                    {
+                        "material_key": "synthetic-lci-bom-v1",
+                        "document_name": "LCI / 同步电机变频软起动系统 测试开发用标准 BOM",
+                        "material_type": "standard_bom",
+                        "family_code": "lci_sync_drive",
+                        "source_kind": "synthetic_test_only",
+                        "source_path": material_path,
+                        "synthetic_test_only": True,
+                        "preferred_section_types": ["bom_or_supply_list", "supply_scope"],
+                    }
+                ]
+            }
+        )
+
+        blocks = build_reusable_blocks(
+            section={"title": "供货范围与系统组成", "expected_evidence_types": ["section"]},
+            evidence_bundle=bundle,
+            global_params={"project_name": "测试项目", "product_line": "lci_sync_drive"},
+            solution_snapshot=solution_snapshot,
+        )
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["metadata"]["source_type"], "product_material")
+        self.assertTrue(blocks[0]["metadata"]["catalog_material_direct"])
+        self.assertEqual(blocks[0]["metadata"]["catalog_material_key"], "synthetic-lci-bom-v1")
+        self.assertNotIn("测试开发用", blocks[0]["source_title"])
+        self.assertIn("整流变压器", blocks[0]["content_md"])
+        self.assertNotIn("声明", blocks[0]["content_md"])
+        self.assertIn("catalog_material_direct", blocks[0]["selection_reasons"])
+
+    def test_build_reusable_blocks_allows_standard_bom_for_overview_section(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", encoding="utf-8", delete=False) as manual_handle:
+            manual_handle.write(
+                "\n".join(
+                    [
+                        "# LCI 产品手册",
+                        "",
+                        "## 产品定位",
+                        "",
+                        "- 适用场景：同步切换",
+                    ]
+                )
+            )
+            manual_path = manual_handle.name
+        with tempfile.NamedTemporaryFile("w", suffix=".md", encoding="utf-8", delete=False) as bom_handle:
+            bom_handle.write(
+                "\n".join(
+                    [
+                        "# LCI 标准 BOM",
+                        "",
+                        "## 标准配置矩阵",
+                        "",
+                        "| 配置名称 | 角色 |",
+                        "| --- | --- |",
+                        "| 标准配置 | 主设备 |",
+                    ]
+                )
+            )
+            bom_path = bom_handle.name
+
+        bundle = SimpleNamespace(content={"results": []})
+        solution_snapshot = SimpleNamespace(
+            selection_reason={
+                "catalog_material_entries": [
+                    {
+                        "material_key": "synthetic-lci-manual-v1",
+                        "document_name": "LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                        "material_type": "product_manual",
+                        "family_code": "lci_sync_drive",
+                        "source_kind": "synthetic_test_only",
+                        "source_path": manual_path,
+                        "synthetic_test_only": True,
+                        "preferred_section_types": ["overall_solution"],
+                    },
+                    {
+                        "material_key": "synthetic-lci-bom-v1",
+                        "document_name": "LCI / 同步电机变频软起动系统 测试开发用标准 BOM",
+                        "material_type": "standard_bom",
+                        "family_code": "lci_sync_drive",
+                        "source_kind": "synthetic_test_only",
+                        "source_path": bom_path,
+                        "synthetic_test_only": True,
+                        "preferred_section_types": ["bom_or_supply_list", "supply_scope"],
+                    },
+                ]
+            }
+        )
+
+        blocks = build_reusable_blocks(
+            section={"title": "项目概述", "section_class": "overview", "expected_evidence_types": ["section"]},
+            evidence_bundle=bundle,
+            global_params={"project_name": "测试项目", "product_line": "lci_sync_drive"},
+            solution_snapshot=solution_snapshot,
+        )
+
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(
+            {block["metadata"]["catalog_material_type"] for block in blocks},
+            {"product_manual", "standard_bom"},
+        )
+
+    def test_extract_catalog_material_markdown_sections_strips_internal_trace_columns(self) -> None:
+        content = _extract_catalog_material_markdown_sections(
+            raw_text="\n".join(
+                [
+                    "# LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                    "",
+                    "## 型号基线",
+                    "",
+                    "| 型号 | 电压等级 | 额定功率(kW) | 额定电流 | 来源 material_key |",
+                    "| --- | --- | --- | --- | --- |",
+                    "| GBT.LCI.SO-A0606-211N465 | 10kV | 4208 | 277.5A | vera-46268861 |",
+                    "",
+                    "## 标准配置",
+                    "",
+                    "| 配置名称 | 角色 | 设备/系列 | 数量 | 说明 |",
+                    "| --- | --- | --- | --- | --- |",
+                    "| 标准配置 | 整流变压器 | 整流变压器 | 1 | 标准配置 |",
+                    "",
+                ]
+            ),
+            material_type="product_manual",
+            target_section_type="overall_solution",
+        )
+
+        self.assertIn("| 型号 | 电压等级 | 额定功率(kW) | 额定电流 |", content)
+        self.assertNotIn("来源 material_key", content)
+        self.assertNotIn("vera-46268861", content)
 
     def test_build_reusable_blocks_strips_internal_retrieval_summary_lines(self) -> None:
         bundle = SimpleNamespace(
@@ -3026,6 +3480,137 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(selected[0]["source_title"], "方案快照 v1")
         self.assertEqual(selected[1]["source_title"], "宝山钢铁股份有限公司三鼓风LCI改造方案.docx")
 
+    def test_select_catalog_material_entries_for_overall_solution_pins_bom_and_interface(self) -> None:
+        solution_snapshot = SimpleNamespace(
+            selection_reason={
+                "catalog_material_entries": [
+                    {
+                        "document_name": "产品手册",
+                        "material_type": "product_manual",
+                        "preferred_section_types": ["overall_solution"],
+                    },
+                    {
+                        "document_name": "接口点表",
+                        "material_type": "interface_schedule",
+                        "preferred_section_types": ["communication_interface"],
+                    },
+                    {
+                        "document_name": "标准 BOM",
+                        "material_type": "standard_bom",
+                        "preferred_section_types": ["bom_or_supply_list"],
+                    },
+                    {
+                        "document_name": "选型规则",
+                        "material_type": "selection_rule",
+                        "preferred_section_types": ["design_basis", "overall_solution"],
+                    },
+                    {
+                        "document_name": "高质量样本A",
+                        "material_type": "proposal_sample",
+                        "quality_tier": "high",
+                        "preferred_section_types": ["overall_solution"],
+                    },
+                    {
+                        "document_name": "高质量样本B",
+                        "material_type": "proposal_sample",
+                        "quality_tier": "high",
+                        "preferred_section_types": ["overall_solution"],
+                    },
+                ]
+            }
+        )
+
+        selected = _select_catalog_material_entries_for_section(
+            section={"title": "总体方案", "section_class": "architecture"},
+            solution_snapshot=solution_snapshot,
+            limit=6,
+        )
+
+        selected_names = [item["document_name"] for item in selected]
+        self.assertIn("产品手册", selected_names[:3])
+        self.assertIn("标准 BOM", selected_names[:3])
+        self.assertIn("接口点表", selected_names[:3])
+
+    def test_select_customer_body_reuse_blocks_prioritizes_bom_and_interface_for_overall_solution(self) -> None:
+        selected = _select_customer_body_reuse_blocks(
+            section={
+                "title": "总体方案",
+                "purpose": "说明系统总体方案、主要设备组成、接口边界与成套扩展关系。",
+                "section_class": "architecture",
+                "customer_specificity": "high",
+                "generation_mode": "reuse_first",
+            },
+            reusable_blocks=[
+                {
+                    "source_title": "方案快照 v1",
+                    "source_heading": "方案摘要",
+                    "content_md": "LCI 方案按标准配置组织。",
+                    "metadata": {"source_type": "solution_snapshot", "content_form": "narrative"},
+                },
+                {
+                    "source_title": "方案快照 v1",
+                    "source_heading": "设备配置清单",
+                    "content_md": "| 角色 | 产品 |\n| --- | --- |\n| 主驱动 | LCI |",
+                    "metadata": {"source_type": "solution_snapshot", "content_form": "table"},
+                },
+                {
+                    "source_title": "产品手册",
+                    "source_heading": "产品定位",
+                    "content_md": "### 产品定位\n\n- 适用场景：同步切换",
+                    "selection_score": 0.81,
+                    "reusability_score": 0.81,
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_type": "product_manual",
+                        "content_form": "narrative",
+                    },
+                },
+                {
+                    "source_title": "选型规则",
+                    "source_heading": "规则清单",
+                    "content_md": "### 规则清单\n\n| 条件 | 要求 |\n| --- | --- |\n| 同步电机 | 配套励磁 |",
+                    "selection_score": 0.95,
+                    "reusability_score": 0.95,
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_type": "selection_rule",
+                        "content_form": "rule_table",
+                    },
+                },
+                {
+                    "source_title": "标准 BOM",
+                    "source_heading": "标准配置矩阵",
+                    "content_md": "### 标准配置矩阵\n\n| 配置名称 | 设备/系列 |\n| --- | --- |\n| 标准配置 | LCI |",
+                    "selection_score": 0.72,
+                    "reusability_score": 0.72,
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_type": "standard_bom",
+                        "content_form": "bom_table",
+                    },
+                },
+                {
+                    "source_title": "接口点表",
+                    "source_heading": "接口定义",
+                    "content_md": "### 接口定义\n\n| 协议 | 说明 |\n| --- | --- |\n| Profibus-DP | 主站通讯 |",
+                    "selection_score": 0.7,
+                    "reusability_score": 0.7,
+                    "metadata": {
+                        "source_type": "product_material",
+                        "catalog_material_type": "interface_schedule",
+                        "content_form": "interface_table",
+                    },
+                },
+            ],
+        )
+
+        selected_titles = [item["source_title"] for item in selected]
+        self.assertEqual(selected_titles[:2], ["方案快照 v1", "方案快照 v1"])
+        self.assertIn("产品手册", selected_titles)
+        self.assertIn("标准 BOM", selected_titles)
+        self.assertIn("接口点表", selected_titles)
+        self.assertNotIn("选型规则", selected_titles)
+
     def test_select_customer_body_reuse_blocks_keeps_historical_blocks_for_technical_sections(self) -> None:
         selected = _select_customer_body_reuse_blocks(
             section={
@@ -3976,6 +4561,81 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("### 商务收口与待确认事项", content_md)
         self.assertIn("标准 BOM 到位后锁定", content_md)
         self.assertEqual(executor.write_calls, [])
+
+    def test_generate_section_content_snapshot_primary_configuration_embeds_catalog_material_direct_block(self) -> None:
+        class _FakeExecutor:
+            def __init__(self) -> None:
+                self.write_calls: list[dict] = []
+
+            async def write_section(self, **kwargs):
+                self.write_calls.append(kwargs)
+                return SimpleNamespace(content="unexpected")
+
+        executor = _FakeExecutor()
+        service = SectionDraftService(executor=executor)
+        configuration_blocks = [
+            {
+                "source_title": "方案快照 v1",
+                "source_section_id": "products",
+                "source_heading": "设备配置清单",
+                "content_md": (
+                    "| 角色 | 产品 | 电压等级 | 功率 | 数量 | 配置 |\n"
+                    "| --- | --- | --- | --- | --- | --- |\n"
+                    "| 主驱动 | LCI 同步电机变频软起动系统 | 10kV | 功率待确认 | 1 | 标准配置 |\n"
+                ),
+                "metadata": {"source_type": "solution_snapshot", "content_form": "bom_table"},
+            },
+            {
+                "block_id": "catalog-material:synthetic-lci-bom-v1:supply_scope",
+                "source_title": "LCI / 同步电机变频软起动系统 测试开发用标准 BOM",
+                "content_md": (
+                    "### 标准配置矩阵\n\n"
+                    "| 配置名称 | 角色 | 设备/系列 | 数量 | 说明 |\n"
+                    "| --- | --- | --- | --- | --- |\n"
+                    "| 标准配置 | 整流变压器 | 整流变压器 | 1 | 标准配置 |\n"
+                ),
+                "selection_score": 0.91,
+                "reusability_score": 0.72,
+                "metadata": {
+                    "source_type": "product_material",
+                    "content_form": "bom_table",
+                    "catalog_material_direct": True,
+                },
+            },
+        ]
+
+        async def _run():
+            return await service._generate_section_content(
+                task_id="task-config-direct",
+                section={
+                    "title": "硬件配置清单",
+                    "purpose": "明确主要设备、成套配置与供货边界。",
+                    "keywords": ["硬件配置清单", "供货范围", "配置清单"],
+                    "generation_mode": "reuse_first",
+                    "section_class": "configuration",
+                },
+                outline_title="测试项目技术方案",
+                global_params={
+                    "project_name": "测试项目",
+                    "selected_products": "主驱动:LCI 同步电机变频软起动系统 x1；整流变压器:整流变压器 x1",
+                    "compatibility_summary": "成套配套设备：已覆盖整流变压器、励磁控制柜；可选配置包括旁路柜。",
+                    "solution_constraints": "现场安装前需完成一次接口边界确认。",
+                    "solution_open_questions": "待确认调试窗口。",
+                },
+                retrieved_context="",
+                citations=[],
+                recommended_assets=[],
+                reusable_blocks=configuration_blocks,
+                reuse_pack={"reusable_blocks": configuration_blocks},
+            )
+
+        content_md, draft_status, _, generation_details = asyncio.run(_run())
+
+        self.assertEqual(draft_status, "generated")
+        self.assertIn(generation_details["effective_path"], {"snapshot_primary", "extractive_reuse_llm_finalize"})
+        self.assertIn("| 配置名称 | 角色 | 设备/系列 | 数量 | 说明 |", content_md)
+        self.assertIn("整流变压器", content_md)
+        self.assertLessEqual(len(executor.write_calls), 1)
 
     def test_generate_section_content_returns_review_required_fallback_when_llm_write_fails(self) -> None:
         class _FailingExecutor:

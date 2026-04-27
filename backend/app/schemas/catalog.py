@@ -19,6 +19,12 @@ class CatalogMaterialImportRequest(BaseModel):
     source_kind: str | None = None
 
 
+class CatalogMaterialPreviewRequest(BaseModel):
+    manifest_path: str
+    replace_existing: bool = False
+    source_kind: str | None = None
+
+
 class ProductConstraintRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -203,6 +209,63 @@ class CatalogMaterialImportResultRead(BaseModel):
     imported_material_count: int
     skipped_existing_count: int
     family_counts: dict[str, int]
+
+
+class CatalogMaterialManifestPreviewIssueRead(BaseModel):
+    issue_type: str
+    severity: str
+    message: str
+    material_key: str | None = None
+    document_name: str | None = None
+
+
+class CatalogMaterialManifestPreviewEntryRead(BaseModel):
+    material_key: str
+    document_name: str
+    family_code: str | None = None
+    material_type: str
+    availability_status: str
+    source_kind: str
+    source_path: str | None = None
+    source_path_exists: bool | None = None
+    explicit_family_code: bool = False
+    explicit_material_type: bool = False
+    explicit_availability_status: bool = False
+    existing_material: bool = False
+    duplicate_material_key: bool = False
+    non_synthetic_source: bool = True
+    counted_toward_gate: bool = False
+    issues: list[str]
+
+
+class CatalogMaterialManifestPreviewRead(BaseModel):
+    manifest_path: str
+    source_kind: str
+    replace_existing: bool
+    import_blocked: bool
+    total_entry_count: int
+    unique_material_key_count: int
+    duplicate_material_key_count: int
+    existing_material_count: int
+    new_material_count: int
+    would_import_count: int
+    would_skip_existing_count: int
+    would_replace_existing_count: int
+    gate_ready_material_count: int
+    non_synthetic_material_count: int
+    inferred_family_count: int
+    inferred_material_type_count: int
+    inferred_status_count: int
+    missing_source_path_count: int
+    missing_source_file_count: int
+    family_counts: dict[str, int]
+    material_type_counts: dict[str, int]
+    availability_status_counts: dict[str, int]
+    source_kind_counts: dict[str, int]
+    gate_ready_family_material_counts: dict[str, dict[str, int]]
+    duplicate_material_keys: list[str]
+    issues: list[CatalogMaterialManifestPreviewIssueRead]
+    preview_entries: list[CatalogMaterialManifestPreviewEntryRead]
 
 
 class CatalogMaterialReadinessCheckRead(BaseModel):

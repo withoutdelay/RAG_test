@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +11,8 @@ from app.schemas.catalog import (
     CatalogImportResultRead,
     CatalogMaterialImportRequest,
     CatalogMaterialImportResultRead,
+    CatalogMaterialManifestPreviewRead,
+    CatalogMaterialPreviewRequest,
     CatalogMaterialReadinessRead,
     CatalogPublishResultRead,
     ProductFamilyRead,
@@ -158,12 +162,14 @@ async def list_catalog_materials(
 @router.get("/material-readiness", response_model=APIResponse[CatalogMaterialReadinessRead])
 async def get_catalog_material_readiness(
     family_code: list[str] | None = Query(default=None),
+    project_id: UUID | None = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
     service: ProductCatalogService = Depends(get_product_catalog_service),
 ) -> APIResponse[CatalogMaterialReadinessRead]:
     readiness = await service.get_material_readiness(
         session=session,
         target_family_codes=family_code,
+        project_id=project_id,
     )
     return APIResponse(
         code=200,
@@ -221,6 +227,26 @@ async def import_catalog_material_manifest(
     except ArtifactValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return APIResponse(code=200, message="success", data=CatalogMaterialImportResultRead.model_validate(result))
+
+
+@router.post("/materials/preview-manifest", response_model=APIResponse[CatalogMaterialManifestPreviewRead])
+async def preview_catalog_material_manifest(
+    payload: CatalogMaterialPreviewRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: ProductCatalogService = Depends(get_product_catalog_service),
+) -> APIResponse[CatalogMaterialManifestPreviewRead]:
+    try:
+        result = await service.preview_material_manifest(
+            session=session,
+            manifest_path=payload.manifest_path,
+            replace_existing=payload.replace_existing,
+            source_kind=payload.source_kind,
+        )
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ArtifactValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return APIResponse(code=200, message="success", data=CatalogMaterialManifestPreviewRead.model_validate(result))
 
 
 @router.post("/versions/{catalog_version}/publish", response_model=APIResponse[CatalogPublishResultRead])

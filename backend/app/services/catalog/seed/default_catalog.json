@@ -1,0 +1,1060 @@
+{
+  "catalog_version": "seed-20260419-v1",
+  "product_families": [
+    {
+      "code": "lci_sync_drive",
+      "name": "同步电机软起动",
+      "display_name": "LCI / 同步电机变频软起动系统",
+      "description": "适用于高压同步电机的大功率软起动、同步切换和工频旁路场景。",
+      "status": "active",
+      "sort_order": 10,
+      "aliases": [
+        "LCI",
+        "LCI 软起",
+        "LCI 改造",
+        "LCI 变频软起",
+        "同步电机软起动",
+        "同步电机变频软起系统"
+      ]
+    },
+    {
+      "code": "hv_vfd_multilevel",
+      "name": "高压变频",
+      "display_name": "高压变频器多电平驱动系统",
+      "description": "适用于风机、泵、输送机等高压调速和节能改造场景。",
+      "status": "active",
+      "sort_order": 20,
+      "aliases": [
+        "高压变频",
+        "高压变频器",
+        "高压调速",
+        "变频节能改造",
+        "高压变频软起"
+      ]
+    },
+    {
+      "code": "hv_solid_state_starter",
+      "name": "高压固态软起动",
+      "display_name": "高压固态软起动系统",
+      "description": "用于高压电机限流启动和软起场景的固态起动系统。",
+      "status": "planned",
+      "sort_order": 30,
+      "aliases": [
+        "高压固态",
+        "固态软起",
+        "高压固态软起动",
+        "高压固态起动柜",
+        "固态及变频软起动"
+      ]
+    },
+    {
+      "code": "autotransformer_starter",
+      "name": "自耦变软起动",
+      "display_name": "自耦变软起动系统",
+      "description": "用于自耦降压起动场景的产品族占位。",
+      "status": "planned",
+      "sort_order": 40,
+      "aliases": [
+        "自耦变",
+        "自耦变软起动",
+        "自耦降压起动"
+      ]
+    },
+    {
+      "code": "liquid_resistor_starter",
+      "name": "水电阻 / 液阻软起动",
+      "display_name": "水电阻 / 液阻软起动系统",
+      "description": "用于水电阻、液阻软起动场景的产品族占位。",
+      "status": "planned",
+      "sort_order": 50,
+      "aliases": [
+        "水电阻",
+        "液阻",
+        "水电阻软起动",
+        "液阻软起动"
+      ]
+    },
+    {
+      "code": "pm_motor_vfd_retrofit",
+      "name": "永磁电机 + 变频节能改造",
+      "display_name": "永磁电机 + 高压变频节能改造",
+      "description": "用于永磁电机和高压变频节能改造的相邻产品族占位。",
+      "status": "planned",
+      "sort_order": 60,
+      "aliases": [
+        "永磁电机",
+        "永磁电机+变频",
+        "变频节能改造",
+        "风机节能改造"
+      ]
+    },
+    {
+      "code": "support_equipment",
+      "name": "配套设备",
+      "display_name": "配套设备",
+      "description": "用于整流变压器、励磁柜、旁路柜等配套设备的归一产品族。",
+      "status": "active",
+      "sort_order": 90,
+      "aliases": [
+        "配套设备",
+        "整流变压器",
+        "励磁柜",
+        "旁路柜"
+      ]
+    }
+  ],
+  "product_compatibility": [
+    {
+      "source_family_code": "lci_sync_drive",
+      "target_family_code": "support_equipment",
+      "relation_type": "requires",
+      "condition": "同步电机软起及主回路成套场景",
+      "description": "LCI 主驱动通常需要整流变压器和励磁控制柜；若要求工频旁路，则追加旁路柜。",
+      "preferred_series_codes": [
+        "rectifier_transformer",
+        "excitation_cabinet"
+      ],
+      "optional_series_codes": [
+        "bypass_cabinet"
+      ],
+      "sort_order": 10
+    },
+    {
+      "source_family_code": "hv_vfd_multilevel",
+      "target_family_code": "support_equipment",
+      "relation_type": "recommended",
+      "condition": "要求工频旁路、检修不停机或改造保留原系统切换",
+      "description": "高压变频主驱动在特定改造场景下推荐配置旁路切换柜。",
+      "preferred_series_codes": [
+        "bypass_cabinet"
+      ],
+      "optional_series_codes": [],
+      "sort_order": 20
+    },
+    {
+      "source_family_code": "hv_solid_state_starter",
+      "target_family_code": "support_equipment",
+      "relation_type": "recommended",
+      "condition": "高压固态软起动需要切换柜或成套配电侧联动时",
+      "description": "高压固态软起产品族通常需要与切换柜、旁路柜一起定义成套边界。",
+      "preferred_series_codes": [
+        "bypass_cabinet"
+      ],
+      "optional_series_codes": [],
+      "sort_order": 30
+    }
+  ],
+  "product_catalog": [
+    {
+      "role_type": "primary",
+      "family": "同步电机软起动",
+      "family_code": "lci_sync_drive",
+      "series_name": "LCI 同步电机变频软起动系统",
+      "code": "lci_sync_drive",
+      "vendor": "标准产品",
+      "description": "适用于高压同步电机的大功率软起动、同步切换和工频旁路场景。",
+      "voltage_levels": [
+        "6kV",
+        "10kV"
+      ],
+      "min_power_kw": 2000,
+      "max_power_kw": 20000,
+      "topology": "负载换流型",
+      "applicable_motors": [
+        "同步电机"
+      ],
+      "applicable_loads": [
+        "鼓风机",
+        "压缩机",
+        "磨机"
+      ],
+      "communication_protocols": [
+        "Profibus-DP",
+        "Profinet",
+        "Modbus TCP"
+      ],
+      "io_allocation": {
+        "DI": 16,
+        "DO": 8,
+        "AI": 4,
+        "AO": 2
+      },
+      "protection_features": [
+        "过流",
+        "过压",
+        "欠压",
+        "同步失败",
+        "过温"
+      ],
+      "preferred_scenarios": [
+        "同步切换",
+        "工频旁路",
+        "大惯量启动"
+      ],
+      "default_chapters": [
+        "总体方案",
+        "主回路方案",
+        "启动与同步切换控制",
+        "DCS 通讯接口方案",
+        "保护联锁方案",
+        "主要设备技术参数",
+        "供货范围与配置清单",
+        "调试与验收"
+      ],
+      "standard_configs": [
+        {
+          "config_name": "标准配置",
+          "components": [
+            {
+              "role": "整流变压器",
+              "series_code": "rectifier_transformer",
+              "quantity": 1,
+              "config": "标准配置"
+            },
+            {
+              "role": "励磁控制柜",
+              "series_code": "excitation_cabinet",
+              "quantity": 1,
+              "config": "同步电机配套"
+            }
+          ],
+          "applicable_scenarios": [
+            "同步电机软起动"
+          ],
+          "description": "包含整流变压器和励磁控制的标准主驱动配置。"
+        },
+        {
+          "config_name": "旁路配置",
+          "components": [
+            {
+              "role": "整流变压器",
+              "series_code": "rectifier_transformer",
+              "quantity": 1,
+              "config": "标准配置"
+            },
+            {
+              "role": "励磁控制柜",
+              "series_code": "excitation_cabinet",
+              "quantity": 1,
+              "config": "同步电机配套"
+            },
+            {
+              "role": "旁路柜",
+              "series_code": "bypass_cabinet",
+              "quantity": 1,
+              "config": "旁路配置"
+            }
+          ],
+          "applicable_scenarios": [
+            "工频旁路运行",
+            "不停机检修",
+            "同步切换"
+          ],
+          "description": "带工频旁路切换的完整主驱动配置。"
+        }
+      ],
+      "constraints": [
+        {
+          "constraint_type": "electrical",
+          "condition": "同步电机",
+          "action": "必须配套励磁控制柜。",
+          "severity": "blocking"
+        },
+        {
+          "constraint_type": "control",
+          "condition": "要求工频旁路或不停机切换",
+          "action": "应选用旁路配置并明确切换闭锁逻辑。",
+          "severity": "warning"
+        },
+        {
+          "constraint_type": "environmental",
+          "condition": "海拔 > 1000m",
+          "action": "需校核降额和散热条件。",
+          "severity": "warning"
+        }
+      ]
+    },
+    {
+      "role_type": "primary",
+      "family": "高压变频",
+      "family_code": "hv_vfd_multilevel",
+      "series_name": "高压变频器多电平驱动系统",
+      "code": "hv_vfd_multilevel",
+      "vendor": "标准产品",
+      "description": "适用于风机、泵、输送机等高压调速改造场景。",
+      "voltage_levels": [
+        "3.3kV",
+        "6kV",
+        "10kV"
+      ],
+      "min_power_kw": 200,
+      "max_power_kw": 8000,
+      "topology": "单元串联多电平",
+      "applicable_motors": [
+        "异步电机",
+        "同步电机"
+      ],
+      "applicable_loads": [
+        "风机",
+        "泵",
+        "输送机",
+        "压缩机"
+      ],
+      "communication_protocols": [
+        "Profibus-DP",
+        "Profinet",
+        "Modbus TCP",
+        "IEC 61850"
+      ],
+      "io_allocation": {
+        "DI": 16,
+        "DO": 8,
+        "AI": 4,
+        "AO": 2
+      },
+      "protection_features": [
+        "过流",
+        "过压",
+        "欠压",
+        "单元故障",
+        "接地故障"
+      ],
+      "preferred_scenarios": [
+        "节能调速",
+        "风机",
+        "泵"
+      ],
+      "default_chapters": [
+        "总体方案",
+        "主回路方案",
+        "控制系统方案",
+        "DCS 通讯接口方案",
+        "保护与联锁",
+        "主要设备技术参数",
+        "供货范围与配置清单",
+        "安装调试要求"
+      ],
+      "standard_configs": [
+        {
+          "config_name": "标准配置",
+          "components": [],
+          "applicable_scenarios": [
+            "一般节能调速"
+          ],
+          "description": "标准高压变频系统配置。"
+        },
+        {
+          "config_name": "旁路配置",
+          "components": [
+            {
+              "role": "旁路柜",
+              "series_code": "bypass_cabinet",
+              "quantity": 1,
+              "config": "旁路配置"
+            }
+          ],
+          "applicable_scenarios": [
+            "要求工频旁路运行",
+            "检修不停机"
+          ],
+          "description": "带旁路切换的高压变频配置。"
+        }
+      ],
+      "constraints": [
+        {
+          "constraint_type": "electrical",
+          "condition": "电机电缆 > 100m",
+          "action": "建议校核输出滤波和 dv/dt 抑制。",
+          "severity": "warning"
+        },
+        {
+          "constraint_type": "environmental",
+          "condition": "环温 > 40°C",
+          "action": "需校核降额或追加空调散热。",
+          "severity": "warning"
+        }
+      ]
+    },
+    {
+      "role_type": "primary",
+      "family": "高压固态软起动",
+      "family_code": "hv_solid_state_starter",
+      "series_name": "高压固态软起动系统",
+      "code": "hv_solid_state_starter",
+      "vendor": "标准产品",
+      "description": "适用于高压电机限流启动、压缩机软起和短时降压旁路场景。",
+      "voltage_levels": [
+        "6kV",
+        "10kV"
+      ],
+      "min_power_kw": 500,
+      "max_power_kw": 8000,
+      "topology": "晶闸管降压软起",
+      "applicable_motors": [
+        "异步电机",
+        "同步电机"
+      ],
+      "applicable_loads": [
+        "压缩机",
+        "风机",
+        "泵"
+      ],
+      "communication_protocols": [
+        "硬接点",
+        "RS485"
+      ],
+      "io_allocation": {
+        "DI": 8,
+        "DO": 6,
+        "AI": 0,
+        "AO": 0
+      },
+      "protection_features": [
+        "起动超时",
+        "过流",
+        "过热",
+        "缺相",
+        "门联锁"
+      ],
+      "preferred_scenarios": [
+        "限流起动",
+        "压缩机软起",
+        "短时旁路切换"
+      ],
+      "default_chapters": [
+        "总体方案",
+        "降压软起控制流程",
+        "旁路与联锁方案",
+        "主要设备技术参数",
+        "供货范围与配置清单"
+      ],
+      "standard_configs": [
+        {
+          "config_name": "标准配置",
+          "components": [],
+          "applicable_scenarios": [
+            "高压固态软起"
+          ],
+          "description": "包含固态软起主柜及基础联锁接口。"
+        }
+      ],
+      "constraints": [
+        {
+          "constraint_type": "control",
+          "condition": "需要自动旁路",
+          "action": "需明确旁路合闸时序与联锁条件。",
+          "severity": "warning"
+        },
+        {
+          "constraint_type": "electrical",
+          "condition": "同步电机",
+          "action": "需补充同步运行侧的切换边界说明。",
+          "severity": "warning"
+        }
+      ]
+    },
+    {
+      "role_type": "primary",
+      "family": "自耦变软起动",
+      "family_code": "autotransformer_starter",
+      "series_name": "自耦变降压软起动系统",
+      "code": "autotransformer_starter",
+      "vendor": "标准产品",
+      "description": "适用于大功率电机降压起动、调补补偿与旁路切换场景。",
+      "voltage_levels": [
+        "6kV",
+        "10kV"
+      ],
+      "min_power_kw": 2000,
+      "max_power_kw": 20000,
+      "topology": "调补降压自耦",
+      "applicable_motors": [
+        "异步电机",
+        "同步电机"
+      ],
+      "applicable_loads": [
+        "压缩机",
+        "风机",
+        "泵"
+      ],
+      "communication_protocols": [
+        "Modbus RTU",
+        "RS485"
+      ],
+      "io_allocation": {
+        "DI": 8,
+        "DO": 8,
+        "AI": 2,
+        "AO": 0
+      },
+      "protection_features": [
+        "起动超时",
+        "欠压",
+        "过流",
+        "联锁保护"
+      ],
+      "preferred_scenarios": [
+        "降压起动",
+        "大惯量负载",
+        "短路容量受限母线"
+      ],
+      "default_chapters": [
+        "总体方案",
+        "主回路与调补方案",
+        "控制与旁路切换逻辑",
+        "主要设备技术参数",
+        "供货范围与配置清单"
+      ],
+      "standard_configs": [
+        {
+          "config_name": "标准配置",
+          "components": [],
+          "applicable_scenarios": [
+            "自耦降压起动"
+          ],
+          "description": "包含调补变压器、控制柜与基础联锁方案。"
+        }
+      ],
+      "constraints": [
+        {
+          "constraint_type": "electrical",
+          "condition": "母线短路容量不足",
+          "action": "应校核调补容量与起动压降。",
+          "severity": "blocking"
+        },
+        {
+          "constraint_type": "control",
+          "condition": "多台电机共用参数",
+          "action": "需显式定义参数切换与旁路模式。",
+          "severity": "warning"
+        }
+      ]
+    },
+    {
+      "role_type": "primary",
+      "family": "水电阻 / 液阻软起动",
+      "family_code": "liquid_resistor_starter",
+      "series_name": "液阻软起动系统",
+      "code": "liquid_resistor_starter",
+      "vendor": "标准产品",
+      "description": "适用于高压电机液阻限流起动、平滑切换和柜间联锁场景。",
+      "voltage_levels": [
+        "3kV",
+        "6kV",
+        "10kV",
+        "12kV"
+      ],
+      "min_power_kw": 200,
+      "max_power_kw": 20000,
+      "topology": "液态电阻调阻",
+      "applicable_motors": [
+        "同步电机",
+        "异步电机"
+      ],
+      "applicable_loads": [
+        "磨机",
+        "泵",
+        "压缩机"
+      ],
+      "communication_protocols": [
+        "硬接点",
+        "RS485"
+      ],
+      "io_allocation": {
+        "DI": 8,
+        "DO": 4,
+        "AI": 0,
+        "AO": 0
+      },
+      "protection_features": [
+        "起动超时",
+        "热过载",
+        "接地",
+        "门锁"
+      ],
+      "preferred_scenarios": [
+        "平滑软起",
+        "重载起动",
+        "一次起动成功率优先"
+      ],
+      "default_chapters": [
+        "总体方案",
+        "液阻软起原理",
+        "联锁与上位机接口",
+        "主要设备技术参数",
+        "供货范围与配置清单"
+      ],
+      "standard_configs": [
+        {
+          "config_name": "标准配置",
+          "components": [],
+          "applicable_scenarios": [
+            "液阻软起"
+          ],
+          "description": "包含液阻主柜、传动机构与控制部分。"
+        }
+      ],
+      "constraints": [
+        {
+          "constraint_type": "control",
+          "condition": "与高压柜联锁运行",
+          "action": "需明确允许起动、运行、超时报警、综合故障信号。",
+          "severity": "warning"
+        },
+        {
+          "constraint_type": "environmental",
+          "condition": "液阻介质维护周期未确认",
+          "action": "应补充运行维护要求。",
+          "severity": "warning"
+        }
+      ]
+    },
+    {
+      "role_type": "support",
+      "family": "配套设备",
+      "family_code": "support_equipment",
+      "series_name": "整流变压器",
+      "code": "rectifier_transformer",
+      "vendor": "标准产品",
+      "description": "LCI 主回路配套整流变压器。",
+      "voltage_levels": [
+        "6kV",
+        "10kV"
+      ],
+      "min_power_kw": 2000,
+      "max_power_kw": 20000,
+      "topology": "隔离降压",
+      "applicable_motors": [
+        "同步电机"
+      ],
+      "applicable_loads": [
+        "鼓风机",
+        "压缩机",
+        "磨机"
+      ],
+      "communication_protocols": [],
+      "io_allocation": {},
+      "protection_features": [
+        "绕组温升监测"
+      ],
+      "preferred_scenarios": [
+        "LCI 配套"
+      ],
+      "default_chapters": [
+        "主要设备技术参数",
+        "供货范围与配置清单"
+      ],
+      "standard_configs": [
+        {
+          "config_name": "标准配置",
+          "components": [],
+          "applicable_scenarios": [
+            "LCI 主回路配套"
+          ],
+          "description": "标准整流变压器配置。"
+        }
+      ],
+      "constraints": [
+        {
+          "constraint_type": "electrical",
+          "condition": "与主驱动容量匹配",
+          "action": "需按主回路容量校核变比和容量。",
+          "severity": "blocking"
+        }
+      ]
+    },
+    {
+      "role_type": "support",
+      "family": "配套设备",
+      "family_code": "support_equipment",
+      "series_name": "励磁控制柜",
+      "code": "excitation_cabinet",
+      "vendor": "标准产品",
+      "description": "同步电机专用励磁控制单元。",
+      "voltage_levels": [
+        "6kV",
+        "10kV"
+      ],
+      "min_power_kw": 2000,
+      "max_power_kw": 20000,
+      "topology": "同步励磁",
+      "applicable_motors": [
+        "同步电机"
+      ],
+      "applicable_loads": [
+        "鼓风机",
+        "压缩机",
+        "磨机"
+      ],
+      "communication_protocols": [
+        "硬接点"
+      ],
+      "io_allocation": {
+        "DI": 4,
+        "DO": 4
+      },
+      "protection_features": [
+        "失步检测",
+        "励磁异常告警"
+      ],
+      "preferred_scenarios": [
+        "同步电机配套"
+      ],
+      "default_chapters": [
+        "启动与同步切换控制",
+        "主要设备技术参数"
+      ],
+      "standard_configs": [
+        {
+          "config_name": "同步电机配套",
+          "components": [],
+          "applicable_scenarios": [
+            "同步电机"
+          ],
+          "description": "同步电机励磁控制标准配置。"
+        }
+      ],
+      "constraints": [
+        {
+          "constraint_type": "control",
+          "condition": "同步电机",
+          "action": "需明确励磁投入、切除和同步切换时序。",
+          "severity": "warning"
+        }
+      ]
+    },
+    {
+      "role_type": "support",
+      "family": "配套设备",
+      "family_code": "support_equipment",
+      "series_name": "旁路切换柜",
+      "code": "bypass_cabinet",
+      "vendor": "标准产品",
+      "description": "主驱动旁路或工频切换专用柜。",
+      "voltage_levels": [
+        "6kV",
+        "10kV"
+      ],
+      "min_power_kw": 500,
+      "max_power_kw": 20000,
+      "topology": "工频旁路",
+      "applicable_motors": [
+        "异步电机",
+        "同步电机"
+      ],
+      "applicable_loads": [
+        "鼓风机",
+        "风机",
+        "泵",
+        "压缩机"
+      ],
+      "communication_protocols": [
+        "硬接点"
+      ],
+      "io_allocation": {
+        "DI": 2,
+        "DO": 2
+      },
+      "protection_features": [
+        "切换闭锁",
+        "机械电气双重互锁"
+      ],
+      "preferred_scenarios": [
+        "工频旁路",
+        "不停机检修"
+      ],
+      "default_chapters": [
+        "启动与同步切换控制",
+        "供货范围与配置清单"
+      ],
+      "standard_configs": [
+        {
+          "config_name": "旁路配置",
+          "components": [],
+          "applicable_scenarios": [
+            "工频旁路运行",
+            "不停机切换"
+          ],
+          "description": "旁路切换柜标准配置。"
+        }
+      ],
+      "constraints": [
+        {
+          "constraint_type": "control",
+          "condition": "存在旁路切换",
+          "action": "必须明确切换条件、闭锁逻辑和操作票。",
+          "severity": "blocking"
+        }
+      ]
+    }
+  ],
+  "product_models": [
+    {
+      "series_code": "lci_sync_drive",
+      "model_number": "GBT.LCI.SO-A0606-211N465",
+      "rated_voltage": "10kV",
+      "rated_power_kw": 4208,
+      "rated_current": "277.5A",
+      "source_material_key": null,
+      "specs": {
+        "equipment_role": "sfc_soft_start",
+        "converter_current_a": 2180,
+        "input_transformer_kva": 5458,
+        "output_transformer_kva": 4807,
+        "motor_current_a": 277.5,
+        "duty_cycle": "5min ON / 55min OFF",
+        "application": "high_consistency_refiner"
+      }
+    },
+    {
+      "series_code": "hv_vfd_multilevel",
+      "model_number": "10kV-1D2-19600/8100",
+      "rated_voltage": "10kV",
+      "rated_power_kw": null,
+      "rated_current": null,
+      "source_material_key": null,
+      "specs": {
+        "application": "one_drive_two_air_compressor_booster",
+        "motor_powers_kw": [
+          19600,
+          8100
+        ],
+        "quantity": 1,
+        "cooling": "forced_air",
+        "topology": "multi_level_cell_series",
+        "rectifier_transformer": "dry_phase_shifting",
+        "switchgear_current_a": 1250
+      }
+    },
+    {
+      "series_code": "hv_solid_state_starter",
+      "model_number": "GGQ-4000/10",
+      "rated_voltage": "10kV",
+      "rated_power_kw": 3100,
+      "rated_current": null,
+      "source_material_key": null,
+      "specs": {
+        "load_type": "compressor",
+        "quantity": 2,
+        "bypass_mode": "close_when_current_below_rated",
+        "switchgear_model": "KYN28-12"
+      }
+    },
+    {
+      "series_code": "autotransformer_starter",
+      "model_number": "TBQ-16000/6",
+      "rated_voltage": "6kV",
+      "rated_power_kw": 15000,
+      "rated_current": "1642A",
+      "source_material_key": null,
+      "specs": {
+        "motor_model": "YKS900-4",
+        "predicted_start_time_s": 44,
+        "start_current_control": "1.5Ie-2.5Ie",
+        "control_modes": [
+          "current_control",
+          "time_control"
+        ],
+        "communication": "RS485 Modbus"
+      }
+    },
+    {
+      "series_code": "liquid_resistor_starter",
+      "model_number": "GSDQ-8000/10",
+      "rated_voltage": "10kV",
+      "rated_power_kw": 6300,
+      "rated_current": null,
+      "source_material_key": null,
+      "specs": {
+        "motor_type": "synchronous_motor",
+        "voltage_range": "3-12kV",
+        "power_range_kw": "200-20000",
+        "start_current_limit": "2-3.5Ie",
+        "continuous_starts": "2-3",
+        "remote_monitoring": "RS485"
+      }
+    }
+  ],
+  "product_interfaces": [
+    {
+      "series_code": "lci_sync_drive",
+      "interface_type": "communication",
+      "protocol": "Profibus-DP",
+      "sort_order": 10,
+      "source_material_key": null,
+      "signal_spec": {
+        "adapter": "fieldbus_adapter",
+        "digital_input_voltage": "24VDC",
+        "coverage": [
+          "lci",
+          "switchgear",
+          "oil_station",
+          "cooler",
+          "excitation_cabinet"
+        ]
+      },
+      "notes": "Seed baseline for fieldbus adapter and local PLC coordination; final protocol and signal ownership still depend on customer interface schedule."
+    },
+    {
+      "series_code": "lci_sync_drive",
+      "interface_type": "io_signal",
+      "protocol": null,
+      "sort_order": 20,
+      "source_material_key": null,
+      "signal_spec": {
+        "analog_outputs": [
+          "4-20mA oil_level",
+          "4-20mA oil_temperature",
+          "4-20mA supply_temperature"
+        ],
+        "control_sequence": [
+          "excitation_build_wait_5s",
+          "sync_switching"
+        ],
+        "supporting_systems": [
+          "excitation_cabinet",
+          "oil_station",
+          "cooler"
+        ]
+      },
+      "notes": "当前只沉淀最小信号骨架，完整 I/O 点表仍需客户正式接口表补齐。"
+    },
+    {
+      "series_code": "hv_vfd_multilevel",
+      "interface_type": "communication",
+      "protocol": "Modbus/RS485",
+      "sort_order": 10,
+      "source_material_key": null,
+      "signal_spec": {
+        "remote_speed_reference": [
+          "4-20mA",
+          "0-10V"
+        ],
+        "analog_output_count": 4,
+        "analog_feedback_candidates": [
+          "output_frequency",
+          "output_current",
+          "output_voltage",
+          "output_power"
+        ]
+      },
+      "notes": "Seed baseline for remote speed reference and bus communication; final protocol and analog points should follow the customer interface schedule."
+    },
+    {
+      "series_code": "hv_vfd_multilevel",
+      "interface_type": "io_signal",
+      "protocol": null,
+      "sort_order": 20,
+      "source_material_key": null,
+      "signal_spec": {
+        "dcs_outputs": [
+          "alarm_fault",
+          "standby_running_fault_status",
+          "medium_voltage_close_permit",
+          "medium_voltage_emergency_trip",
+          "bypass_close_command"
+        ],
+        "dcs_inputs": [
+          "medium_voltage_ready",
+          "start",
+          "stop",
+          "emergency_stop"
+        ],
+        "contact_rating": "AC220V 5A passive_contact"
+      },
+      "notes": "保留高压变频与中压柜/旁路柜之间的最小联锁信号，最终以客户点表为准。"
+    },
+    {
+      "series_code": "hv_solid_state_starter",
+      "interface_type": "io_signal",
+      "protocol": null,
+      "sort_order": 10,
+      "source_material_key": null,
+      "signal_spec": {
+        "start_sequence": [
+          "upstream_breaker_close",
+          "soft_start",
+          "bypass_close_km1"
+        ],
+        "load_feedback": [
+          "current_below_rated"
+        ],
+        "boundary": "cabinet_terminals_outside_by_owner"
+      },
+      "notes": "当前按最小硬接点与联锁接口建模，最终以客户点表为准。"
+    },
+    {
+      "series_code": "autotransformer_starter",
+      "interface_type": "communication",
+      "protocol": "Modbus/RS485",
+      "sort_order": 10,
+      "source_material_key": null,
+      "signal_spec": {
+        "controller": "PLC",
+        "hmi": "touch_screen",
+        "capabilities": [
+          "remote_monitoring",
+          "parameter_storage",
+          "curve_optimization"
+        ]
+      },
+      "notes": "Seed baseline for RS485/Modbus and local HMI control capability."
+    },
+    {
+      "series_code": "autotransformer_starter",
+      "interface_type": "io_signal",
+      "protocol": null,
+      "sort_order": 20,
+      "source_material_key": null,
+      "signal_spec": {
+        "inputs": [
+          "start_breaker_close_signal",
+          "run_breaker_work_position",
+          "run_breaker_close_feedback"
+        ],
+        "outputs": [
+          "start_permit",
+          "trip_command",
+          "run_breaker_close_command"
+        ],
+        "effective_logic": "DI_DO_closed_valid"
+      },
+      "notes": "由调压控制柜与起动柜/运行柜之间的最小联锁信号抽象而来。"
+    },
+    {
+      "series_code": "liquid_resistor_starter",
+      "interface_type": "communication",
+      "protocol": "RS485",
+      "sort_order": 10,
+      "source_material_key": null,
+      "signal_spec": {
+        "controller": "PLC",
+        "capabilities": [
+          "remote_monitoring",
+          "centralized_control"
+        ]
+      },
+      "notes": "Seed baseline for RS485 remote monitoring capability."
+    },
+    {
+      "series_code": "liquid_resistor_starter",
+      "interface_type": "io_signal",
+      "protocol": null,
+      "sort_order": 20,
+      "source_material_key": null,
+      "signal_spec": {
+        "interlock_signals": [
+          "start_permit",
+          "running",
+          "start_timeout_alarm",
+          "common_fault"
+        ],
+        "signal_mode": "dry_contact",
+        "requires": [
+          "switchgear_interlock"
+        ]
+      },
+      "notes": "当前按液阻软起与上位机/高压柜之间的最小干接点信号归档。"
+    }
+  ]
+}

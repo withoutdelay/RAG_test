@@ -15,8 +15,9 @@ from app.models.product_material import ProductMaterial
 from app.models.product_model import ProductModel
 from app.models.product_series import ProductSeries
 from app.models.product_standard_config import ProductStandardConfig
-from app.services.catalog import ProductCatalogService
+from app.services.catalog import DEFAULT_PRODUCT_INTERFACES, DEFAULT_PRODUCT_MODELS, ProductCatalogService
 from app.services.solution import SolutionService
+from app.services.v2_errors import ArtifactValidationError
 
 
 def _make_series(
@@ -326,6 +327,40 @@ class ProductCatalogServiceTests(unittest.TestCase):
         self.assertEqual(payload["selection_reason"]["compatibility_actions"][0]["relation_type"], "requires")
         self.assertIn("rectifier_transformer", payload["selection_reason"]["compatibility_actions"][0]["added_series_codes"])
 
+    def test_default_seed_models_and_interfaces_do_not_expose_sample_source_material_keys(self) -> None:
+        self.assertTrue(all(item.get("source_material_key") in (None, "") for item in DEFAULT_PRODUCT_MODELS))
+        self.assertTrue(all(item.get("source_material_key") in (None, "") for item in DEFAULT_PRODUCT_INTERFACES))
+
+    def test_catalog_material_entries_prefer_customer_material_over_private_sample_in_same_bucket(self) -> None:
+        customer_manual = ProductMaterial(
+            material_key="customer-manual-001",
+            family_code="lci_sync_drive",
+            material_type="product_manual",
+            document_name="客户提供-LCI产品手册.pdf",
+            availability_status="available",
+            source_kind="customer_provided",
+            tags=[],
+            details={"quality_tier": "medium"},
+        )
+        sample_manual = ProductMaterial(
+            material_key="sample-manual-001",
+            family_code="lci_sync_drive",
+            material_type="product_manual",
+            document_name="历史样板-LCI产品手册.pdf",
+            availability_status="available",
+            source_kind="private_sample",
+            tags=[],
+            details={"quality_tier": "high"},
+        )
+        entries = self.solution_service._build_catalog_material_entries(
+            primary_series=self.lci_series,
+            component_series_rows=[],
+            material_rows=[sample_manual, customer_manual],
+            limit=4,
+        )
+
+        self.assertEqual([item["material_key"] for item in entries], ["customer-manual-001"])
+
     def test_solution_payload_applies_recommended_bypass_compatibility_when_bypass_required(self) -> None:
         project = SimpleNamespace(
             name="风机改造",
@@ -447,6 +482,22 @@ class ProductCatalogServiceTests(unittest.TestCase):
         self.assertEqual(record["details"]["source_confidence"], "llm_curated")
         self.assertEqual(record["details"]["solution_family"], "LCI / 同步电机变频软起动")
 
+    def test_build_material_record_prefers_document_name_over_file_name(self) -> None:
+        record = self.catalog_service._build_material_record(
+            {
+                "material_key": "synthetic-lci-manual-001",
+                "document_name": "LCI / 同步电机变频软起动系统 测试开发用产品手册",
+                "file_name": "lci_sync_drive-product-manual-synthetic-test-only.md",
+                "file_path": "/tmp/lci_sync_drive-product-manual-synthetic-test-only.md",
+                "material_type": "product_manual",
+            },
+            source_kind="synthetic_test_only",
+        )
+
+        self.assertEqual(record["document_name"], "LCI / 同步电机变频软起动系统 测试开发用产品手册")
+        self.assertEqual(record["source_path"], "/tmp/lci_sync_drive-product-manual-synthetic-test-only.md")
+        self.assertEqual(record["source_kind"], "synthetic_test_only")
+
     def test_import_material_manifest_adds_rows_and_returns_family_counts(self) -> None:
         with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8", delete=False) as handle:
             json.dump(
@@ -494,6 +545,126 @@ class ProductCatalogServiceTests(unittest.TestCase):
         self.assertEqual(result["family_counts"]["hv_solid_state_starter"], 1)
         self.assertEqual(session.add.call_count, 2)
         session.commit.assert_awaited_once()
+
+    def test_import_material_manifest_rejects_duplicate_material_keys(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8", delete=False) as handle:
+            json.dump(
+                {
+                    "entries": [
+                        {
+                            "material_key": "dup-material",
+                            "document_name": "LCI 产品手册 A.pdf",
+                            "family_code": "lci_sync_drive",
+                            "material_type": "product_manual",
+                            "availability_status": "available",
+                        },
+                        {
+                            "material_key": "dup-material",
+                            "document_name": "LCI 产品手册 B.pdf",
+                            "family_code": "lci_sync_drive",
+                            "material_type": "product_manual",
+                            "availability_status": "available",
+                        },
+                    ]
+                },
+                handle,
+                ensure_ascii=False,
+            )
+            manifest_path = handle.name
+
+        session = SimpleNamespace()
+
+        with self.assertRaises(ArtifactValidationError) as error:
+            asyncio.run(
+                self.catalog_service.import_material_manifest(
+                    session=session,
+                    manifest_path=manifest_path,
+                    replace_existing=False,
+                )
+            )
+
+        self.assertIn("duplicate material_key", str(error.exception))
+
+    def test_preview_material_manifest_summarizes_gate_and_inference_state(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8", delete=False) as handle:
+            json.dump(
+                {
+                    "entries": [
+                        {
+                            "material_key": "manual-lci-001",
+                            "document_name": "LCI 产品手册.pdf",
+                            "family_code": "lci_sync_drive",
+                            "material_type": "product_manual",
+                            "availability_status": "available",
+                        },
+                        {
+                            "material_key": "synthetic-vfd-rule-001",
+                            "document_name": "高压变频 测试开发用规则.md",
+                            "family_code": "hv_vfd_multilevel",
+                            "material_type": "selection_rule",
+                            "availability_status": "available",
+                            "source_kind": "synthetic_test_only",
+                            "source_path": "/tmp/non-existent-synthetic.md",
+                        },
+                        {
+                            "material_key": "bom-lci-001",
+                            "document_name": "LCI 标准配置清单.xlsx",
+                            "notes": "通过文件名推断类型与产品族。",
+                        },
+                    ]
+                },
+                handle,
+                ensure_ascii=False,
+            )
+            manifest_path = handle.name
+
+        existing_row = ProductMaterial(
+            material_key="manual-lci-001",
+            family_code="lci_sync_drive",
+            material_type="product_manual",
+            document_name="LCI 产品手册.pdf",
+            availability_status="available",
+            source_kind="private_sample",
+            tags=[],
+            details={},
+        )
+        session = SimpleNamespace()
+        session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: [existing_row]))
+
+        result = asyncio.run(
+            self.catalog_service.preview_material_manifest(
+                session=session,
+                manifest_path=manifest_path,
+                replace_existing=False,
+            )
+        )
+
+        self.assertFalse(result["import_blocked"])
+        self.assertEqual(result["total_entry_count"], 3)
+        self.assertEqual(result["unique_material_key_count"], 3)
+        self.assertEqual(result["existing_material_count"], 1)
+        self.assertEqual(result["new_material_count"], 2)
+        self.assertEqual(result["would_import_count"], 2)
+        self.assertEqual(result["would_skip_existing_count"], 1)
+        self.assertEqual(result["gate_ready_material_count"], 2)
+        self.assertEqual(result["non_synthetic_material_count"], 2)
+        self.assertEqual(result["inferred_family_count"], 1)
+        self.assertEqual(result["inferred_material_type_count"], 1)
+        self.assertEqual(result["inferred_status_count"], 1)
+        self.assertEqual(result["missing_source_path_count"], 2)
+        self.assertEqual(result["missing_source_file_count"], 1)
+        self.assertEqual(result["family_counts"]["lci_sync_drive"], 2)
+        self.assertEqual(result["material_type_counts"]["product_manual"], 1)
+        self.assertEqual(result["source_kind_counts"]["synthetic_test_only"], 1)
+        self.assertEqual(result["gate_ready_family_material_counts"]["lci_sync_drive"]["product_manual"], 1)
+        self.assertTrue(
+            any(issue["issue_type"] == "non_gate_source_kind" for issue in result["issues"])
+        )
+        inferred_entry = next(item for item in result["preview_entries"] if item["material_key"] == "bom-lci-001")
+        self.assertFalse(inferred_entry["explicit_family_code"])
+        self.assertFalse(inferred_entry["explicit_material_type"])
+        self.assertFalse(inferred_entry["explicit_availability_status"])
+        self.assertTrue(any("缺少 source_path" in issue for issue in inferred_entry["issues"]))
 
     def test_get_material_readiness_marks_gate_failed_when_entry_materials_missing(self) -> None:
         available_rows = [
@@ -610,6 +781,109 @@ class ProductCatalogServiceTests(unittest.TestCase):
         self.assertTrue(all(item["allowed"] for item in result["phase_allowances"][2:]))
         self.assertEqual(result["material_type_counts"]["product_manual"], 2)
         self.assertEqual(result["family_material_counts"]["unclassified"]["model_alias_map"], 1)
+
+    def test_get_material_readiness_ignores_synthetic_test_only_materials_for_gate(self) -> None:
+        available_rows = [
+            ProductMaterial(
+                material_key="manual-hvss-001",
+                family_code="hv_solid_state_starter",
+                material_type="product_manual",
+                document_name="高压固态软起动装置手册.pdf",
+                availability_status="available",
+                source_kind="private_sample",
+                tags=[],
+                details={},
+            ),
+            ProductMaterial(
+                material_key="manual-vfd-synth-001",
+                family_code="hv_vfd_multilevel",
+                material_type="product_manual",
+                document_name="高压变频器多电平驱动系统-测试开发用产品手册.md",
+                availability_status="available",
+                source_kind="synthetic_test_only",
+                tags=[],
+                details={},
+            ),
+            ProductMaterial(
+                material_key="bom-synth-001",
+                family_code="lci_sync_drive",
+                material_type="standard_bom",
+                document_name="LCI-测试开发用标准BOM.md",
+                availability_status="available",
+                source_kind="synthetic_test_only",
+                tags=[],
+                details={},
+            ),
+        ]
+        self.catalog_service.list_materials = AsyncMock(return_value=available_rows)
+        self.catalog_service.get_active_catalog_version = AsyncMock(return_value="seed-20260419-v1")
+
+        result = asyncio.run(self.catalog_service.get_material_readiness(session=object()))
+
+        self.assertFalse(result["gate_passed"])
+        self.assertEqual(result["available_material_count"], 1)
+        self.assertEqual(result["material_type_counts"]["product_manual"], 1)
+        self.assertNotIn("standard_bom", result["material_type_counts"])
+        self.assertEqual(result["checklist"][0]["actual_count"], 1)
+        self.assertTrue(result["checklist"][0]["passed"])
+        self.assertNotIn("core_product_manuals", result["missing_items"])
+        self.assertIn("standard_bom", result["missing_items"])
+
+    def test_get_material_readiness_infers_scope_from_available_materials(self) -> None:
+        available_rows = [
+            ProductMaterial(
+                material_key="manual-lci-001",
+                family_code="lci_sync_drive",
+                material_type="product_manual",
+                document_name="LCI 产品手册.pdf",
+                availability_status="available",
+                source_kind="customer_provided",
+                tags=[],
+                details={},
+            ),
+            ProductMaterial(
+                material_key="bom-support-001",
+                family_code="support_equipment",
+                material_type="standard_bom",
+                document_name="配套设备标准BOM.xlsx",
+                availability_status="available",
+                source_kind="customer_provided",
+                tags=[],
+                details={},
+            ),
+            ProductMaterial(
+                material_key="manual-vfd-001",
+                family_code="hv_vfd_multilevel",
+                material_type="product_manual",
+                document_name="高压变频产品手册.pdf",
+                availability_status="available",
+                source_kind="private_sample",
+                tags=[],
+                details={},
+            ),
+        ]
+        self.catalog_service.list_materials = AsyncMock(return_value=available_rows)
+        self.catalog_service.get_active_catalog_version = AsyncMock(return_value="seed-20260419-v1")
+
+        result = asyncio.run(self.catalog_service.get_material_readiness(session=object()))
+
+        self.assertEqual(result["target_family_codes"], ["lci_sync_drive", "hv_vfd_multilevel"])
+
+    def test_get_material_readiness_can_infer_scope_from_project_context(self) -> None:
+        project_id = uuid4()
+        project = SimpleNamespace(id=project_id, name="某项目", industry="冶金", product_line="lci", description="鼓风机软起改造")
+        requirement_card = SimpleNamespace(id=uuid4(), content={"motor_type": "同步电机"})
+        candidate = SimpleNamespace(series=SimpleNamespace(family_code="hv_vfd_multilevel", code="hv_vfd_multilevel"))
+
+        session = SimpleNamespace(get=AsyncMock(return_value=project))
+        self.catalog_service._resolve_latest_requirement_card = AsyncMock(return_value=requirement_card)
+        self.catalog_service.shortlist_primary_products = AsyncMock(return_value=(SimpleNamespace(), [candidate]))
+        self.catalog_service.list_materials = AsyncMock(return_value=[])
+        self.catalog_service.get_active_catalog_version = AsyncMock(return_value="seed-20260419-v1")
+
+        result = asyncio.run(self.catalog_service.get_material_readiness(session=session, project_id=project_id))
+
+        self.assertEqual(result["target_family_codes"], ["hv_vfd_multilevel"])
 
 
 class SolutionServiceDesignTests(unittest.IsolatedAsyncioTestCase):

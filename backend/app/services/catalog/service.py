@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,6 +64,9 @@ _READINESS_CHECK_DEFINITIONS = (
     ("selection_rule", "至少一份约束 / 选型规则资料已到位", "selection_rule"),
     ("model_alias_map", "至少一份型号与术语映射表已到位", "model_alias_map"),
 )
+_NON_GATE_SOURCE_KINDS = {
+    "synthetic_test_only",
+}
 
 
 @dataclass(frozen=True)
@@ -387,13 +392,23 @@ class ProductCatalogService:
         *,
         session: AsyncSession,
         target_family_codes: list[str] | None = None,
+        project_id: UUID | None = None,
     ) -> dict[str, Any]:
-        normalized_target_families = self._normalize_target_family_codes(target_family_codes)
+        normalized_target_families = await self._resolve_target_family_codes(
+            session=session,
+            family_codes=target_family_codes,
+            project_id=project_id,
+        )
         target_family_set = set(normalized_target_families)
-        available_materials = await self.list_materials(
+        all_available_materials = await self.list_materials(
             session=session,
             availability_status="available",
         )
+        available_materials = [
+            row
+            for row in all_available_materials
+            if str(getattr(row, "source_kind", "") or "").strip() not in _NON_GATE_SOURCE_KINDS
+        ]
         catalog_version = await self.get_active_catalog_version(session=session)
 
         material_type_counts: dict[str, int] = {}
@@ -547,6 +562,13 @@ class ProductCatalogService:
     ) -> dict[str, Any]:
         manifest = self._load_material_manifest(manifest_path)
         records = [self._build_material_record(entry, source_kind=source_kind) for entry in manifest["entries"]]
+        duplicate_material_keys = self._find_duplicate_material_keys(records)
+        if duplicate_material_keys:
+            duplicate_preview = ", ".join(duplicate_material_keys[:5])
+            suffix = " ..." if len(duplicate_material_keys) > 5 else ""
+            raise ArtifactValidationError(
+                f"Material manifest contains duplicate material_key entries: {duplicate_preview}{suffix}"
+            )
         keys = [record["material_key"] for record in records]
 
         existing_rows = []
@@ -580,6 +602,229 @@ class ProductCatalogService:
             "imported_material_count": imported_count,
             "skipped_existing_count": skipped_existing_count,
             "family_counts": family_counts,
+        }
+
+    async def preview_material_manifest(
+        self,
+        *,
+        session: AsyncSession,
+        manifest_path: str,
+        replace_existing: bool = False,
+        source_kind: str | None = None,
+    ) -> dict[str, Any]:
+        manifest = self._load_material_manifest(manifest_path)
+        prepared_entries = [self._prepare_material_record(entry, source_kind=source_kind) for entry in manifest["entries"]]
+        all_records = [record for record, _ in prepared_entries]
+        duplicate_material_keys = self._find_duplicate_material_keys(all_records)
+        duplicate_key_set = set(duplicate_material_keys)
+
+        unique_records: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+        preview_entries: list[dict[str, Any]] = []
+        for record, diagnostics in prepared_entries:
+            material_key = str(record["material_key"])
+            if material_key not in unique_records:
+                unique_records[material_key] = (record, diagnostics)
+
+        unique_keys = list(unique_records.keys())
+        existing_rows = []
+        if unique_keys:
+            existing_rows = (
+                await session.scalars(select(ProductMaterial).where(ProductMaterial.material_key.in_(unique_keys)))
+            ).all()
+        existing_key_set = {str(row.material_key) for row in existing_rows}
+
+        family_counts: dict[str, int] = {}
+        material_type_counts: dict[str, int] = {}
+        availability_status_counts: dict[str, int] = {}
+        source_kind_counts: dict[str, int] = {}
+        gate_ready_family_material_counts: dict[str, dict[str, int]] = {}
+        inferred_family_count = 0
+        inferred_material_type_count = 0
+        inferred_status_count = 0
+        missing_source_path_count = 0
+        missing_source_file_count = 0
+        non_synthetic_material_count = 0
+        gate_ready_material_count = 0
+
+        for record, diagnostics in prepared_entries:
+            material_key = str(record["material_key"])
+            material_type = str(record["material_type"] or "").strip()
+            source_kind_value = str(record["source_kind"] or "").strip()
+            availability_status = str(record["availability_status"] or "").strip()
+            family_key = str(record["family_code"] or "").strip() or "unclassified"
+            non_synthetic_source = source_kind_value not in _NON_GATE_SOURCE_KINDS
+            counted_toward_gate = non_synthetic_source and availability_status == "available"
+
+            entry_issues: list[str] = []
+            if material_key in duplicate_key_set:
+                entry_issues.append("Manifest 内 material_key 重复，正式导入前需要先去重。")
+            if not diagnostics["explicit_family_code"]:
+                entry_issues.append("family_code 由系统推断，正式材料建议显式提供。")
+            if not diagnostics["explicit_material_type"]:
+                entry_issues.append("material_type 由系统推断，正式材料建议显式提供。")
+            if not diagnostics["explicit_availability_status"]:
+                entry_issues.append("availability_status 由系统推断，正式材料建议显式提供。")
+            if not record["source_path"]:
+                entry_issues.append("缺少 source_path，当前只能做元数据导入。")
+            elif diagnostics["source_path_exists"] is False:
+                entry_issues.append("source_path 当前不存在，导入后无法直接读取原文。")
+
+            preview_entries.append(
+                {
+                    "material_key": material_key,
+                    "document_name": record["document_name"],
+                    "family_code": record["family_code"],
+                    "material_type": material_type,
+                    "availability_status": availability_status,
+                    "source_kind": source_kind_value,
+                    "source_path": record["source_path"],
+                    "source_path_exists": diagnostics["source_path_exists"],
+                    "explicit_family_code": diagnostics["explicit_family_code"],
+                    "explicit_material_type": diagnostics["explicit_material_type"],
+                    "explicit_availability_status": diagnostics["explicit_availability_status"],
+                    "existing_material": material_key in existing_key_set,
+                    "duplicate_material_key": material_key in duplicate_key_set,
+                    "non_synthetic_source": non_synthetic_source,
+                    "counted_toward_gate": counted_toward_gate,
+                    "issues": entry_issues,
+                }
+            )
+
+        for material_key, (record, diagnostics) in unique_records.items():
+            material_type = str(record["material_type"] or "").strip()
+            source_kind_value = str(record["source_kind"] or "").strip()
+            availability_status = str(record["availability_status"] or "").strip()
+            family_key = str(record["family_code"] or "").strip() or "unclassified"
+            non_synthetic_source = source_kind_value not in _NON_GATE_SOURCE_KINDS
+            counted_toward_gate = non_synthetic_source and availability_status == "available"
+
+            family_counts[family_key] = int(family_counts.get(family_key, 0)) + 1
+            material_type_counts[material_type] = int(material_type_counts.get(material_type, 0)) + 1
+            availability_status_counts[availability_status] = int(availability_status_counts.get(availability_status, 0)) + 1
+            source_kind_counts[source_kind_value] = int(source_kind_counts.get(source_kind_value, 0)) + 1
+
+            if not diagnostics["explicit_family_code"]:
+                inferred_family_count += 1
+            if not diagnostics["explicit_material_type"]:
+                inferred_material_type_count += 1
+            if not diagnostics["explicit_availability_status"]:
+                inferred_status_count += 1
+            if not record["source_path"]:
+                missing_source_path_count += 1
+            elif diagnostics["source_path_exists"] is False:
+                missing_source_file_count += 1
+
+            if non_synthetic_source:
+                non_synthetic_material_count += 1
+            if counted_toward_gate:
+                gate_ready_material_count += 1
+                family_bucket = gate_ready_family_material_counts.setdefault(family_key, {"total": 0})
+                family_bucket["total"] = int(family_bucket.get("total", 0)) + 1
+                family_bucket[material_type] = int(family_bucket.get(material_type, 0)) + 1
+
+        unique_material_key_count = len(unique_records)
+        existing_material_count = sum(1 for material_key in unique_records if material_key in existing_key_set)
+        new_material_count = unique_material_key_count - existing_material_count
+        import_blocked = bool(duplicate_material_keys)
+        would_import_count = unique_material_key_count if replace_existing else new_material_count
+        would_skip_existing_count = 0 if replace_existing else existing_material_count
+        would_replace_existing_count = existing_material_count if replace_existing else 0
+
+        issues: list[dict[str, Any]] = []
+        if duplicate_material_keys:
+            issues.append(
+                self._build_material_manifest_issue(
+                    issue_type="duplicate_material_key",
+                    severity="blocking",
+                    message=(
+                        "Manifest 中存在重复的 material_key，正式导入会被阻断："
+                        + "，".join(duplicate_material_keys[:8])
+                        + (" ..." if len(duplicate_material_keys) > 8 else "")
+                    ),
+                )
+            )
+        if missing_source_path_count:
+            issues.append(
+                self._build_material_manifest_issue(
+                    issue_type="missing_source_path",
+                    severity="warning",
+                    message=f"{missing_source_path_count} 条资料缺少 source_path，当前只能做元数据导入。",
+                )
+            )
+        if missing_source_file_count:
+            issues.append(
+                self._build_material_manifest_issue(
+                    issue_type="missing_source_file",
+                    severity="warning",
+                    message=f"{missing_source_file_count} 条资料的 source_path 当前不存在，后续无法直接读取原文。",
+                )
+            )
+        if inferred_family_count:
+            issues.append(
+                self._build_material_manifest_issue(
+                    issue_type="inferred_family_code",
+                    severity="warning",
+                    message=f"{inferred_family_count} 条资料的 family_code 依赖系统推断，正式材料建议显式补齐。",
+                )
+            )
+        if inferred_material_type_count:
+            issues.append(
+                self._build_material_manifest_issue(
+                    issue_type="inferred_material_type",
+                    severity="warning",
+                    message=f"{inferred_material_type_count} 条资料的 material_type 依赖系统推断，正式材料建议显式补齐。",
+                )
+            )
+        if inferred_status_count:
+            issues.append(
+                self._build_material_manifest_issue(
+                    issue_type="inferred_availability_status",
+                    severity="info",
+                    message=f"{inferred_status_count} 条资料的 availability_status 依赖系统推断，导入前最好显式确认。",
+                )
+            )
+        synthetic_only_count = sum(
+            1
+            for material_key, (record, _) in unique_records.items()
+            if str(record["source_kind"] or "").strip() in _NON_GATE_SOURCE_KINDS
+        )
+        if synthetic_only_count:
+            issues.append(
+                self._build_material_manifest_issue(
+                    issue_type="non_gate_source_kind",
+                    severity="info",
+                    message=f"{synthetic_only_count} 条资料属于 synthetic_test_only，不计入长期路线图 Entry Gate。",
+                )
+            )
+
+        return {
+            "manifest_path": str(Path(manifest_path).expanduser()),
+            "source_kind": str(source_kind or manifest.get("source_kind") or "mixed"),
+            "replace_existing": replace_existing,
+            "import_blocked": import_blocked,
+            "total_entry_count": len(prepared_entries),
+            "unique_material_key_count": unique_material_key_count,
+            "duplicate_material_key_count": len(duplicate_material_keys),
+            "existing_material_count": existing_material_count,
+            "new_material_count": new_material_count,
+            "would_import_count": would_import_count,
+            "would_skip_existing_count": would_skip_existing_count,
+            "would_replace_existing_count": would_replace_existing_count,
+            "gate_ready_material_count": gate_ready_material_count,
+            "non_synthetic_material_count": non_synthetic_material_count,
+            "inferred_family_count": inferred_family_count,
+            "inferred_material_type_count": inferred_material_type_count,
+            "inferred_status_count": inferred_status_count,
+            "missing_source_path_count": missing_source_path_count,
+            "missing_source_file_count": missing_source_file_count,
+            "family_counts": family_counts,
+            "material_type_counts": material_type_counts,
+            "availability_status_counts": availability_status_counts,
+            "source_kind_counts": source_kind_counts,
+            "gate_ready_family_material_counts": gate_ready_family_material_counts,
+            "duplicate_material_keys": duplicate_material_keys,
+            "issues": issues,
+            "preview_entries": preview_entries,
         }
 
     async def list_versions(self, *, session: AsyncSession) -> list[dict[str, Any]]:
@@ -997,11 +1242,20 @@ class ProductCatalogService:
         return payload
 
     def _build_material_record(self, entry: dict[str, Any], *, source_kind: str | None = None) -> dict[str, Any]:
+        record, _ = self._prepare_material_record(entry, source_kind=source_kind)
+        return record
+
+    def _prepare_material_record(
+        self,
+        entry: dict[str, Any],
+        *,
+        source_kind: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         if not isinstance(entry, dict):
             raise ArtifactValidationError("Material manifest entry must be an object")
 
         material_key = str(entry.get("sample_id") or entry.get("material_key") or "").strip()
-        document_name = str(entry.get("file_name") or entry.get("document_name") or "").strip()
+        document_name = str(entry.get("document_name") or entry.get("file_name") or "").strip()
         if not material_key or not document_name:
             raise ArtifactValidationError("Material manifest entry missing sample_id/material_key or file_name/document_name")
 
@@ -1012,13 +1266,15 @@ class ProductCatalogService:
             except (TypeError, ValueError) as exc:
                 raise ArtifactValidationError("Material manifest file_size_bytes must be numeric") from exc
 
-        return {
+        resolved_source_path = str(entry.get("file_path") or entry.get("source_path") or "").strip() or None
+        resolved_source_kind = str(source_kind or entry.get("source_kind") or "private_sample").strip() or "private_sample"
+        record = {
             "material_key": material_key,
             "family_code": self._resolve_material_family_code(entry),
             "material_type": self._resolve_material_type(entry),
             "document_name": document_name,
-            "source_path": str(entry.get("file_path") or entry.get("source_path") or "").strip() or None,
-            "source_kind": str(source_kind or entry.get("source_kind") or "private_sample"),
+            "source_path": resolved_source_path,
+            "source_kind": resolved_source_kind,
             "availability_status": self._resolve_material_status(entry),
             "file_format": str(entry.get("file_format") or "").strip() or None,
             "file_size_bytes": file_size_bytes,
@@ -1028,6 +1284,34 @@ class ProductCatalogService:
             "tags": self._build_material_tags(entry),
             "notes": str(entry.get("manual_notes") or entry.get("notes") or "").strip() or None,
             "details": self._build_material_details(entry),
+        }
+        diagnostics = {
+            "explicit_family_code": bool(str(entry.get("family_code") or "").strip()),
+            "explicit_material_type": bool(str(entry.get("material_type") or "").strip()),
+            "explicit_availability_status": bool(str(entry.get("availability_status") or "").strip()),
+            "source_path_exists": Path(resolved_source_path).expanduser().exists() if resolved_source_path else None,
+        }
+        return record, diagnostics
+
+    def _find_duplicate_material_keys(self, records: list[dict[str, Any]]) -> list[str]:
+        key_counter = Counter(str(record.get("material_key") or "").strip() for record in records)
+        return sorted(key for key, count in key_counter.items() if key and count > 1)
+
+    def _build_material_manifest_issue(
+        self,
+        *,
+        issue_type: str,
+        severity: str,
+        message: str,
+        material_key: str | None = None,
+        document_name: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "issue_type": issue_type,
+            "severity": severity,
+            "message": message,
+            "material_key": material_key,
+            "document_name": document_name,
         }
 
     def _resolve_material_family_code(self, entry: dict[str, Any]) -> str | None:
@@ -1136,14 +1420,96 @@ class ProductCatalogService:
                 tags.append(value)
         return tags
 
-    def _normalize_target_family_codes(self, family_codes: list[str] | None) -> list[str]:
-        values = family_codes or list(_DEFAULT_READINESS_FAMILY_CODES)
+    async def _resolve_target_family_codes(
+        self,
+        *,
+        session: AsyncSession,
+        family_codes: list[str] | None,
+        project_id: UUID | None,
+    ) -> list[str]:
+        normalized = self._dedupe_non_empty(family_codes or [])
+        if normalized:
+            return normalized
+
+        project_scoped = await self._infer_project_target_family_codes(session=session, project_id=project_id)
+        if project_scoped:
+            return project_scoped
+
+        material_scoped = await self._infer_available_material_family_codes(session=session)
+        if material_scoped:
+            return material_scoped
+
+        return list(_DEFAULT_READINESS_FAMILY_CODES)
+
+    async def _infer_project_target_family_codes(
+        self,
+        *,
+        session: AsyncSession,
+        project_id: UUID | None,
+    ) -> list[str]:
+        if project_id is None:
+            return []
+
+        project = await session.get(Project, project_id)
+        if project is None:
+            return []
+
+        requirement_card = await self._resolve_latest_requirement_card(session=session, project_id=project_id)
+        if requirement_card is None:
+            return []
+
+        try:
+            _, candidates = await self.shortlist_primary_products(
+                session=session,
+                project=project,
+                requirement_card=requirement_card,
+                limit=3,
+            )
+        except ArtifactValidationError:
+            return []
+
+        return self._dedupe_non_empty(
+            str(candidate.series.family_code or candidate.series.code or "").strip()
+            for candidate in candidates
+        )
+
+    async def _infer_available_material_family_codes(
+        self,
+        *,
+        session: AsyncSession,
+    ) -> list[str]:
+        rows = await self.list_materials(session=session, availability_status="available")
+        family_codes = self._dedupe_non_empty(
+            str(row.family_code or "").strip()
+            for row in rows
+            if str(getattr(row, "source_kind", "") or "").strip() not in _NON_GATE_SOURCE_KINDS
+        )
+        non_support = [code for code in family_codes if code != "support_equipment"]
+        if non_support:
+            return non_support
+        return [] if family_codes == ["support_equipment"] else family_codes
+
+    async def _resolve_latest_requirement_card(
+        self,
+        *,
+        session: AsyncSession,
+        project_id: UUID,
+    ) -> RequirementCard | None:
+        result = await session.scalars(
+            select(RequirementCard)
+            .where(RequirementCard.project_id == project_id)
+            .order_by(RequirementCard.version.desc(), RequirementCard.created_at.desc())
+            .limit(1)
+        )
+        return result.first()
+
+    def _dedupe_non_empty(self, values: Any) -> list[str]:
         normalized: list[str] = []
         for item in values:
             value = str(item or "").strip()
             if value and value not in normalized:
                 normalized.append(value)
-        return normalized or list(_DEFAULT_READINESS_FAMILY_CODES)
+        return normalized
 
     def _build_material_readiness_check(
         self,

@@ -46,3 +46,10 @@ If the repository already contains active Super Dev workflow context, the first 
 - PREVIEW_CONFIRM_GATE: required
 - HOST_PARITY: required
 <!-- END SUPER DEV CODEX -->
+
+## Worktree Data Isolation
+
+- This worktree must not share the primary `rag_test` Docker Compose project, Postgres volume/database, Qdrant collection, MinIO bucket, or Redis namespace/DB.
+- Set a unique `COMPOSE_PROJECT_NAME`, host port set, `DATABASE_URL`, `QDRANT_COLLECTION`, `MINIO_BUCKET`, and `REDIS_URL` before starting services.
+- Do not run destructive tests, database resets, Qdrant collection deletes, or sample re-ingestion against another worktree's dev database.
+- The primary worktree `/Volumes/thunder/code/RAG_test` is the only worktree allowed to use `COMPOSE_PROJECT_NAME=rag_test`.

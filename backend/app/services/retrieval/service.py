@@ -15,6 +15,7 @@ from app.models.job import Job
 from app.models.project import Project
 from app.models.requirement_card import RequirementCard
 from app.schemas.retrieval import RetrievalFilters, RetrievalSearchRequest
+from app.services.catalog import ProductCatalogService
 from app.services.retrieval.case_service import CaseLibraryService
 from app.services.retrieval.query_hints import PRODUCT_LINE_QUERY_HINTS
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
@@ -354,9 +355,11 @@ class EvidenceBundleService:
         *,
         retriever: Retriever | None = None,
         case_library: CaseLibraryService | None = None,
+        product_catalog: ProductCatalogService | None = None,
     ) -> None:
         self._retriever = retriever
         self.case_library = case_library or CaseLibraryService()
+        self.product_catalog = product_catalog or ProductCatalogService()
 
     @property
     def retriever(self) -> Retriever:
@@ -399,7 +402,41 @@ class EvidenceBundleService:
         query = build_requirement_query(card.content or {})
         resolved_doc_type = doc_type or "historical_proposal"
         chunk_types = ["PLAIN", "TABLE", "IMAGE"]
-        case_candidates = self.case_library.retrieve_cases(query=query, top_k=min(top_k, 3), library_tracks={"pilot_main"})
+        case_scope = await self._resolve_case_library_scope(
+            session=session,
+            project=project,
+            requirement_card=card,
+        )
+        case_candidates = self.case_library.retrieve_cases(
+            query=query,
+            top_k=min(top_k, 3),
+            sample_ids=case_scope["sample_ids"] or None,
+            document_names=case_scope["document_names"] or None,
+            library_tracks=case_scope["library_tracks"] or None,
+            family_codes=set(case_scope["target_family_codes"]) or None,
+        )
+        if not case_candidates and case_scope["library_tracks"] and case_scope["mode"] != "pilot_main_fallback":
+            case_candidates = self.case_library.retrieve_cases(
+                query=query,
+                top_k=min(top_k, 3),
+                library_tracks=case_scope["library_tracks"],
+                family_codes=set(case_scope["target_family_codes"]) or None,
+            )
+        if not case_candidates and case_scope["target_family_codes"]:
+            case_candidates = self.case_library.retrieve_cases(
+                query=query,
+                top_k=min(top_k, 3),
+                family_codes=set(case_scope["target_family_codes"]),
+            )
+        if not case_candidates and case_scope["mode"] != "pilot_main_fallback":
+            case_candidates = self.case_library.retrieve_cases(
+                query=query,
+                top_k=min(top_k, 3),
+                library_tracks={"pilot_main"},
+                family_codes=set(case_scope["target_family_codes"]) or None,
+            )
+        if not case_candidates and case_scope["mode"] != "pilot_main_fallback":
+            case_candidates = self.case_library.retrieve_cases(query=query, top_k=min(top_k, 3), library_tracks={"pilot_main"})
         scoped_document_names = [str(item.get("file_name") or "").strip() for item in case_candidates if str(item.get("file_name") or "").strip()]
         search_plan = build_evidence_search_plan(
             project_id=project_id,
@@ -447,6 +484,7 @@ class EvidenceBundleService:
         quality_trace = {
             "query": query,
             "query_hints": _extract_requirement_query_hints(card.content or {}),
+            "case_scope": case_scope,
             "search_attempts": retrieval_attempts,
             "case_candidate_count": len(case_candidates),
             "case_fallback_used": bool(fallback_items),
@@ -485,6 +523,76 @@ class EvidenceBundleService:
         await session.refresh(job)
         await session.refresh(bundle)
         return job, bundle
+
+    async def _resolve_case_library_scope(
+        self,
+        *,
+        session: AsyncSession,
+        project: Project,
+        requirement_card: RequirementCard,
+    ) -> dict[str, Any]:
+        try:
+            _, catalog_candidates = await self.product_catalog.shortlist_primary_products(
+                session=session,
+                project=project,
+                requirement_card=requirement_card,
+                limit=3,
+            )
+        except ArtifactValidationError:
+            catalog_candidates = []
+
+        target_family_codes = _dedupe_keep_order(
+            [
+                str(candidate.series.family_code or candidate.series.code or "").strip()
+                for candidate in catalog_candidates
+                if str(candidate.series.family_code or candidate.series.code or "").strip()
+            ]
+        )
+        if not target_family_codes:
+            return {
+                "mode": "pilot_main_fallback",
+                "target_family_codes": [],
+                "sample_ids": [],
+                "document_names": [],
+                "library_tracks": ["pilot_main"],
+            }
+
+        material_rows = await self.product_catalog.list_materials(session=session, availability_status="available")
+        scoped_materials = [
+            row
+            for row in material_rows
+            if str(row.family_code or "").strip() in set(target_family_codes)
+            and str(row.source_kind or "").strip() != "synthetic_test_only"
+        ]
+        sample_ids = _dedupe_keep_order(
+            [
+                str(row.material_key or "").strip()
+                for row in scoped_materials
+                if str(row.material_key or "").strip()
+            ]
+        )
+        document_names = _dedupe_keep_order(
+            [
+                str(row.document_name or "").strip()
+                for row in scoped_materials
+                if str(row.document_name or "").strip()
+            ]
+        )
+        library_tracks = _dedupe_keep_order(
+            [
+                str(row.assigned_track or "").strip()
+                for row in scoped_materials
+                if str(row.assigned_track or "").strip()
+            ]
+        )
+        mode = "project_material_scope" if document_names or sample_ids else "project_family_scope"
+        return {
+            "mode": mode,
+            "target_family_codes": target_family_codes,
+            "sample_ids": sample_ids,
+            "document_names": document_names,
+            "library_tracks": library_tracks,
+        }
 
     async def get_latest_evidence_bundle(self, *, session: AsyncSession, project_id: UUID) -> EvidenceBundle:
         project = await session.get(Project, project_id)

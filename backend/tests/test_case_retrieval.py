@@ -85,6 +85,42 @@ class CaseRetrievalTests(unittest.TestCase):
         self.assertEqual(results[0]["sample_id"], "case-hybrid")
         self.assertIn("secondary_family_signal_match", results[0]["reason"])
 
+    def test_retrieve_cases_can_be_scoped_to_family_codes_without_sample_ids(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[
+                {
+                    "sample_id": "case-lci",
+                    "file_name": "鼓风机LCI方案.docx",
+                    "library_track": "pilot_main",
+                    "family_code": "lci_sync_drive",
+                    "top_level_titles": ["系统方案", "接口说明"],
+                    "flat_outline": [{"heading_path": "系统方案 > 主回路说明"}],
+                },
+                {
+                    "sample_id": "case-vfd",
+                    "file_name": "高压变频方案.docx",
+                    "library_track": "pilot_main",
+                    "family_code": "hv_vfd_multilevel",
+                    "top_level_titles": ["系统方案", "接口说明"],
+                    "flat_outline": [{"heading_path": "系统方案 > 主回路说明"}],
+                },
+            ],
+            block_entries=[],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_cases(
+                query="系统方案 接口说明",
+                top_k=2,
+                family_codes={"lci_sync_drive"},
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["sample_id"], "case-lci")
+        self.assertEqual(results[0]["family_code"], "lci_sync_drive")
+
     def test_retrieve_blocks_can_be_scoped_to_case_ids(self) -> None:
         outline_path, block_path, temp_dir = self._write_library(
             outline_entries=[],
@@ -175,6 +211,57 @@ class CaseRetrievalTests(unittest.TestCase):
 
         self.assertEqual(results[0]["sample_id"], "case-hybrid")
         self.assertIn("secondary_family_signal_match", results[0]["reason"])
+
+    def test_retrieve_blocks_can_be_scoped_to_family_codes_without_sample_ids(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[],
+            block_entries=[
+                {
+                    "sample_id": "case-lci",
+                    "file_name": "鼓风机LCI方案.docx",
+                    "library_track": "pilot_main",
+                    "family_code": "lci_sync_drive",
+                    "heading_path": "2.4 控制接口说明",
+                    "reuse_level": "high",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "communication_interface",
+                    "equipment_type": "lci",
+                    "content_form": "narrative",
+                    "token_count": 120,
+                    "content": "励磁系统与主控PLC通过硬接线和串行通讯接口联动。",
+                },
+                {
+                    "sample_id": "case-vfd",
+                    "file_name": "高压变频方案.docx",
+                    "library_track": "pilot_main",
+                    "family_code": "hv_vfd_multilevel",
+                    "heading_path": "2.4 控制接口说明",
+                    "reuse_level": "high",
+                    "content_risk_level": "low",
+                    "front_matter": False,
+                    "section_type": "communication_interface",
+                    "equipment_type": "vfd",
+                    "content_form": "narrative",
+                    "token_count": 120,
+                    "content": "变频器与上位机通过Modbus TCP和RS485接口通讯。",
+                },
+            ],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_blocks(
+                query="控制接口 通讯 说明",
+                top_k=2,
+                family_codes={"lci_sync_drive"},
+                section_title="控制接口与通讯方案",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["sample_id"], "case-lci")
+        self.assertEqual(results[0]["family_code"], "lci_sync_drive")
 
     def test_retrieve_blocks_can_be_scoped_to_document_names_when_sample_ids_differ(self) -> None:
         outline_path, block_path, temp_dir = self._write_library(
@@ -543,6 +630,71 @@ class CaseRetrievalTests(unittest.TestCase):
 
         self.assertIn("section_context_match", results[0]["reason"])
         self.assertEqual(results[0]["contextualized_block_text"], "风机方案A 技术架构 Modbus RS485 PLC 接口协同 控制边界")
+
+    def test_retrieve_sections_can_be_scoped_to_family_codes_without_sample_ids(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[
+                {
+                    "sample_id": "case-lci",
+                    "file_name": "鼓风机LCI方案.docx",
+                    "library_track": "pilot_main",
+                    "family_code": "lci_sync_drive",
+                    "section_catalog": [
+                        {
+                            "section_id": "4.1",
+                            "title": "控制接口说明",
+                            "source_heading": "控制接口说明",
+                            "normalized_heading": "控制接口说明",
+                            "heading_aliases": ["控制接口说明", "接口说明"],
+                            "level": 1,
+                            "section_path": "第四章 控制接口说明",
+                            "heading_path": "第四章 控制接口说明",
+                            "normalized_section_path": "控制接口说明",
+                            "section_summary": "励磁系统与主控PLC的联动接口说明。",
+                            "source_signals": ["toc", "parser_heading"],
+                            "children": [],
+                        }
+                    ],
+                },
+                {
+                    "sample_id": "case-vfd",
+                    "file_name": "高压变频方案.docx",
+                    "library_track": "pilot_main",
+                    "family_code": "hv_vfd_multilevel",
+                    "section_catalog": [
+                        {
+                            "section_id": "4.1",
+                            "title": "控制接口说明",
+                            "source_heading": "控制接口说明",
+                            "normalized_heading": "控制接口说明",
+                            "heading_aliases": ["控制接口说明", "接口说明"],
+                            "level": 1,
+                            "section_path": "第四章 控制接口说明",
+                            "heading_path": "第四章 控制接口说明",
+                            "normalized_section_path": "控制接口说明",
+                            "section_summary": "变频器与上位机的通讯接口说明。",
+                            "source_signals": ["toc", "parser_heading"],
+                            "children": [],
+                        }
+                    ],
+                },
+            ],
+            block_entries=[],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_sections(
+                query="控制接口 说明",
+                top_k=2,
+                family_codes={"lci_sync_drive"},
+                section_title="控制接口与通讯方案",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["sample_id"], "case-lci")
+        self.assertEqual(results[0]["family_code"], "lci_sync_drive")
 
     def test_retrieve_sections_prefers_specific_subsection_when_detail_intent_is_present(self) -> None:
         outline_path, block_path, temp_dir = self._write_library(

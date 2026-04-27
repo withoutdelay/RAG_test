@@ -2,7 +2,7 @@ import os
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from app.config import get_settings
@@ -305,6 +305,40 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
 
         self.assertGreater(score, 0)
         self.assertLess(score, 0.70)
+
+    def test_evidence_bundle_scope_prefers_project_materials_over_default_track(self) -> None:
+        project = SimpleNamespace(name="某项目", industry="冶金", product_line="lci", description="鼓风机软起改造")
+        requirement_card = SimpleNamespace(content={"motor_type": "同步电机"})
+        candidate = SimpleNamespace(series=SimpleNamespace(family_code="lci_sync_drive", code="lci_sync_drive"))
+        product_catalog = SimpleNamespace(
+            shortlist_primary_products=AsyncMock(return_value=(SimpleNamespace(), [candidate])),
+            list_materials=AsyncMock(
+                return_value=[
+                    SimpleNamespace(
+                        family_code="lci_sync_drive",
+                        source_kind="customer_provided",
+                        material_key="customer-manual-001",
+                        document_name="客户提供-LCI系统方案.docx",
+                        assigned_track="customer_curated",
+                    )
+                ]
+            ),
+        )
+        service = EvidenceBundleService(product_catalog=product_catalog)
+
+        scope = asyncio.run(
+            service._resolve_case_library_scope(
+                session=object(),
+                project=project,
+                requirement_card=requirement_card,
+            )
+        )
+
+        self.assertEqual(scope["mode"], "project_material_scope")
+        self.assertEqual(scope["target_family_codes"], ["lci_sync_drive"])
+        self.assertEqual(scope["sample_ids"], ["customer-manual-001"])
+        self.assertEqual(scope["document_names"], ["客户提供-LCI系统方案.docx"])
+        self.assertEqual(scope["library_tracks"], ["customer_curated"])
 
     def test_evidence_bundle_service_defers_retriever_initialization(self) -> None:
         with patch("app.services.retrieval.service.Retriever", side_effect=AssertionError("retriever should be lazy")):

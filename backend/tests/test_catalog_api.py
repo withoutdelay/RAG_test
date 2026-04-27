@@ -244,7 +244,74 @@ class _FakeCatalogService:
             "family_counts": {"lci_sync_drive": 1, "hv_solid_state_starter": 2},
         }
 
-    async def get_material_readiness(self, *, session, target_family_codes=None):
+    async def preview_material_manifest(
+        self,
+        *,
+        session,
+        manifest_path,
+        replace_existing=False,
+        source_kind=None,
+    ):
+        return {
+            "manifest_path": manifest_path,
+            "source_kind": source_kind or "mixed",
+            "replace_existing": replace_existing,
+            "import_blocked": False,
+            "total_entry_count": 3,
+            "unique_material_key_count": 3,
+            "duplicate_material_key_count": 0,
+            "existing_material_count": 1,
+            "new_material_count": 2,
+            "would_import_count": 2,
+            "would_skip_existing_count": 1,
+            "would_replace_existing_count": 0,
+            "gate_ready_material_count": 2,
+            "non_synthetic_material_count": 2,
+            "inferred_family_count": 1,
+            "inferred_material_type_count": 1,
+            "inferred_status_count": 1,
+            "missing_source_path_count": 1,
+            "missing_source_file_count": 1,
+            "family_counts": {"lci_sync_drive": 2, "hv_vfd_multilevel": 1},
+            "material_type_counts": {"product_manual": 1, "selection_rule": 1, "standard_bom": 1},
+            "availability_status_counts": {"available": 2, "review_needed": 1},
+            "source_kind_counts": {"private_sample": 2, "synthetic_test_only": 1},
+            "gate_ready_family_material_counts": {
+                "lci_sync_drive": {"total": 2, "product_manual": 1, "standard_bom": 1}
+            },
+            "duplicate_material_keys": [],
+            "issues": [
+                {
+                    "issue_type": "non_gate_source_kind",
+                    "severity": "info",
+                    "message": "1 条资料属于 synthetic_test_only，不计入长期路线图 Entry Gate。",
+                    "material_key": None,
+                    "document_name": None,
+                }
+            ],
+            "preview_entries": [
+                {
+                    "material_key": "manual-lci-001",
+                    "document_name": "LCI 产品手册.pdf",
+                    "family_code": "lci_sync_drive",
+                    "material_type": "product_manual",
+                    "availability_status": "available",
+                    "source_kind": "private_sample",
+                    "source_path": "/tmp/manual-lci-001.pdf",
+                    "source_path_exists": True,
+                    "explicit_family_code": True,
+                    "explicit_material_type": True,
+                    "explicit_availability_status": True,
+                    "existing_material": True,
+                    "duplicate_material_key": False,
+                    "non_synthetic_source": True,
+                    "counted_toward_gate": True,
+                    "issues": [],
+                }
+            ],
+        }
+
+    async def get_material_readiness(self, *, session, target_family_codes=None, project_id=None):
         return {
             "catalog_version": "seed-20260419-v1",
             "target_family_codes": target_family_codes or [
@@ -361,6 +428,18 @@ class CatalogApiTests(unittest.TestCase):
             )
             self.assertEqual(import_materials_response.status_code, 200)
             self.assertEqual(import_materials_response.json()["data"]["imported_material_count"], 13)
+
+            preview_materials_response = client.post(
+                "/api/v1/catalog/materials/preview-manifest",
+                json={
+                    "manifest_path": "/Volumes/thunder/code/RAG_test-product-driven-solution/output/product-driven-sample-manifest.json",
+                    "replace_existing": False,
+                },
+            )
+            self.assertEqual(preview_materials_response.status_code, 200)
+            self.assertEqual(preview_materials_response.json()["data"]["unique_material_key_count"], 3)
+            self.assertEqual(preview_materials_response.json()["data"]["gate_ready_material_count"], 2)
+            self.assertEqual(preview_materials_response.json()["data"]["issues"][0]["issue_type"], "non_gate_source_kind")
 
             publish_response = client.post("/api/v1/catalog/versions/seed-20260419-v2/publish")
             self.assertEqual(publish_response.status_code, 200)
