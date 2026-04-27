@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
 from app.config import get_settings
-from app.db import get_db_session
+from app.db import get_db_session, get_session_factory
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.figure_asset import FigureAsset
@@ -43,6 +43,7 @@ from app.services.parsing.parser import ParserService
 from app.services.parsing.section_catalog import flatten_section_catalog, normalize_section_heading
 from app.services.parsing.table_profile import build_table_profile
 from app.services.retrieval import AssetRetrievalService
+from app.services.task_queue import get_background_task_queue
 from app.services.vectorstore.chunker import Chunker
 from app.services.vectorstore.embedder import Embedder
 from app.services.vectorstore.ingestion_filter import SafeIngestionFilter
@@ -157,12 +158,12 @@ def _build_chunk_contextual_text(
     *,
     document_name: str,
     base_metadata: dict,
-    chunk_index: int,
     chunk_content: str,
     chunk_type: str,
     heading_path: str | None,
     section_anchor: dict[str, str | None],
     chunk_metadata: dict,
+    chunk_index: int = 0,
 ) -> dict[str, str]:
     document_label = str(document_name or "").strip()
     industry = str(base_metadata.get("industry") or "").strip()
@@ -436,6 +437,8 @@ async def _parse_and_index_document(
 
 def _build_document_upload_message(*, doc_type: str, parse_status: str, reparsed: bool = False) -> str:
     if _should_refresh_history_library(doc_type=doc_type):
+        if parse_status in {"pending", "parsing", "queued"}:
+            return "文档已接收，正在后台解析入库；解析完成后会刷新历史方案库、AI Wiki 与视觉索引"
         if parse_status == "parse_insufficient":
             if reparsed:
                 return "文档已重新解析，但当前解析质量不足，已跳过历史方案库 / AI Wiki / 视觉索引入库；后台刷新会同步移除旧的历史库结果"
@@ -445,7 +448,59 @@ def _build_document_upload_message(*, doc_type: str, parse_status: str, reparsed
             if reparsed
             else "文档已接收并完成解析入库，历史方案库、AI Wiki 与视觉索引正在后台刷新"
         )
+    if parse_status in {"pending", "parsing", "queued"}:
+        return "文档已接收，正在后台解析入库"
     return "文档已重新解析并入库" if reparsed else "文档已接收并完成解析入库"
+
+
+async def _run_document_parse_job(job_id: UUID, document_id: UUID, base_metadata: dict) -> None:
+    parsed_doc_type = ""
+    async with get_session_factory()() as session:
+        job = await session.get(Job, job_id)
+        document = await session.get(Document, document_id)
+        if job is None or document is None:
+            return
+        parsed_doc_type = str(document.doc_type or "")
+        job.status = "running"
+        job.started_at = datetime.now(timezone.utc)
+        job.output_ref = {
+            **(job.output_ref or {}),
+            "progress": {"stage": "parsing", "document_id": str(document_id)},
+        }
+        document.parse_status = "parsing"
+        await session.commit()
+
+        try:
+            await _parse_and_index_document(
+                session=session,
+                document=document,
+                base_metadata=base_metadata,
+            )
+            job.status = "succeeded"
+            job.output_ref = {
+                **(job.output_ref or {}),
+                "document_id": str(document.id),
+                "parse_status": document.parse_status,
+                "progress": {"stage": "completed", "document_id": str(document.id)},
+            }
+            job.completed_at = datetime.now(timezone.utc)
+            await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            document.parse_status = "failed"
+            document.meta = {**(document.meta or {}), "parse_error": str(exc)}
+            job.status = "failed"
+            job.error_code = exc.__class__.__name__[:50]
+            job.output_ref = {
+                **(job.output_ref or {}),
+                "error": str(exc),
+                "progress": {"stage": "failed", "document_id": str(document.id)},
+            }
+            job.completed_at = datetime.now(timezone.utc)
+            await session.commit()
+            raise
+
+    if _should_refresh_history_library(doc_type=parsed_doc_type):
+        request_case_library_refresh()
 
 
 async def _upsert_raw_document(
@@ -537,6 +592,9 @@ async def _replace_figure_assets(
             caption=asset.caption,
             meta={
                 **asset.meta,
+                "sample_id": (document.meta or {}).get("sample_id"),
+                "library_track": (document.meta or {}).get("library_track"),
+                "material_route": (document.meta or {}).get("material_route"),
                 "heading_path": asset.heading_path,
                 "context_before": asset.context_before,
                 "context_after": asset.context_after,
@@ -748,19 +806,21 @@ async def upload_document(
 
     suffix = Path(file.filename or "").suffix or ".bin"
     storage = get_object_storage()
-    parser = ParserService()
 
     with NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
         temp_file.write(await file.read())
         temp_path = Path(temp_file.name)
 
-    parsed_document = await parser.parse_document(str(temp_path))
-    storage_path = storage.save(temp_path, prefix=f"{project_id}_")
+    try:
+        storage_path = storage.save(temp_path, prefix=f"{project_id}_")
+        file_size_bytes = temp_path.stat().st_size
+    finally:
+        temp_path.unlink(missing_ok=True)
     document = Document(
         project_id=project_id,
         filename=file.filename or temp_path.name,
         file_type=suffix.lstrip(".").lower(),
-        file_size_bytes=temp_path.stat().st_size,
+        file_size_bytes=file_size_bytes,
         storage_path=storage_path,
         doc_type=doc_type,
         parse_status="parsing",
@@ -768,24 +828,32 @@ async def upload_document(
     )
     session.add(document)
     await session.flush()
+    job = Job(
+        project_id=project_id,
+        job_type="document_parse",
+        status="queued",
+        input_ref={
+            "document_id": str(document.id),
+            "filename": document.filename,
+            "doc_type": doc_type,
+        },
+        output_ref={"progress": {"stage": "queued", "document_id": str(document.id)}},
+        trace_id=f"document-parse-{uuid.uuid4()}",
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(document)
+    await session.refresh(job)
 
-    try:
-        await _parse_and_index_document(
-            session=session,
-            document=document,
-            base_metadata=parsed_metadata,
-            parsed_document=parsed_document,
-        )
-        await session.commit()
-    except Exception as exc:
-        document.parse_status = "failed"
-        await session.commit()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Document parsing failed: {exc}") from exc
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-    if _should_refresh_history_library(doc_type=doc_type):
-        background_tasks.add_task(request_case_library_refresh)
+    queue = get_background_task_queue()
+    queue.submit(
+        job_id=job.id,
+        job_type="document_parse",
+        label=f"parse:{document.filename}",
+        run=lambda: _run_document_parse_job(job.id, document.id, parsed_metadata),
+        dedupe_key=f"document_parse:{document.id}",
+        priority=40,
+    )
 
     return APIResponse(
         code=202,
@@ -798,6 +866,8 @@ async def upload_document(
                 doc_type=doc_type,
                 parse_status=document.parse_status,
             ),
+            job_id=job.id,
+            next_poll=f"/api/v1/jobs/{job.id}",
         ),
     )
 

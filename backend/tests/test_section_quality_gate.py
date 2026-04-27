@@ -75,6 +75,18 @@ class _FailingLLMClient:
         raise RuntimeError("relay unavailable")
 
 
+class _StringIssueLLMClient:
+    async def invoke(self, request):
+        payload = {
+            "pass": True,
+            "score": 0.91,
+            "summary": "章节基本可用，但模型返回了字符串格式建议。",
+            "issues": ["建议进一步统一标题命名风格。"],
+            "rewrite_instruction": "保持当前内容，仅按需统一标题风格。",
+        }
+        return SimpleNamespace(content=json.dumps(payload, ensure_ascii=False))
+
+
 class _MetadataOnlyLLMClient:
     async def invoke(self, request):
         payload = {
@@ -680,6 +692,42 @@ class SectionQualityGateTests(unittest.TestCase):
 
         self.assertIn("SQ014", {issue.code for issue in issues})
 
+    def test_analyze_section_content_quality_flags_technical_scope_drift_headings(self) -> None:
+        issues = analyze_section_content_quality(
+            section={
+                "title": "第三章 高压变频系统总体方案",
+                "purpose": "提供变频改造主接线拓扑与系统架构设计，说明功率单元、冷却方式和柜体布置。",
+                "section_class": "architecture",
+                "expected_evidence_types": ["section", "figure"],
+            },
+            content_md=(
+                "## 第三章 高压变频系统总体方案\n\n"
+                "### 主回路拓扑说明\n\n"
+                "高压变频器主回路采用输入隔离、变频器、输出隔离和旁路回路组成。\n\n"
+                "### 培训计划\n\n"
+                "供方提供操作培训和售后服务。\n"
+            ),
+        )
+
+        self.assertIn("SQ015", {issue.code for issue in issues})
+
+    def test_analyze_section_content_quality_allows_training_headings_in_service_sections(self) -> None:
+        issues = analyze_section_content_quality(
+            section={
+                "title": "8 调试、验收与运维服务",
+                "purpose": "说明调试、验收、培训和运维服务安排。",
+                "section_class": "implementation",
+            },
+            content_md=(
+                "## 8 调试、验收与运维服务\n\n"
+                "### 验收与培训\n\n"
+                "调试完成后，双方按确认的验收项目进行检查，并形成问题闭环记录。培训内容围绕设备组成、"
+                "操作流程和日常维护注意事项展开。\n"
+            ),
+        )
+
+        self.assertNotIn("SQ015", {issue.code for issue in issues})
+
     def test_analyze_section_content_quality_allows_current_project_scenario_terms(self) -> None:
         issues = analyze_section_content_quality(
             section={
@@ -731,6 +779,32 @@ class SectionQualityGateTests(unittest.TestCase):
 
         self.assertFalse(review.passed)
         self.assertIn("SQ014", {issue.code for issue in review.issues})
+
+    def test_review_accepts_string_issues_from_llm(self) -> None:
+        service = SectionQualityGateService(
+            llm_client=_StringIssueLLMClient(),
+            executor=_StubExecutor(),
+        )
+
+        review = self._run(
+            service.review(
+                task_id="quality-string-issue",
+                section={"title": "控制接口方案", "purpose": "说明控制接口和联锁边界。"},
+                outline_title="测试项目技术方案",
+                global_params={"project_name": "测试项目"},
+                content_md=(
+                    "## 控制接口方案\n\n"
+                    "本节围绕控制接口、状态反馈和联锁保护边界进行说明。系统通过硬接线和通讯链路"
+                    "完成启停指令、运行状态、故障报警和保护闭锁信号交互，并保留现场联调阶段对"
+                    "信号点表、通讯规约和保护出口归属进行确认的空间。\n"
+                ),
+                recommended_assets=[],
+            )
+        )
+
+        llm_issue = next(issue for issue in review.issues if issue.code == "SQLLM")
+        self.assertEqual(llm_issue.severity, "low")
+        self.assertIn("统一标题命名风格", llm_issue.message)
 
     def test_review_and_repair_rewrites_bad_headings_before_returning(self) -> None:
         service = SectionQualityGateService(
@@ -1290,7 +1364,16 @@ class SectionQualityGateTests(unittest.TestCase):
             outline_title="测试项目技术方案",
             global_params={"project_name": "测试项目", "voltage_level": "10kV"},
             content_md="## 控制系统方案\n\n### 控制架构\n\n正文。",
-            recommended_assets=[{"asset_type": "figure", "title": "控制系统总图", "reason": "说明系统架构"}],
+            recommended_assets=[
+                {
+                    "asset_type": "figure",
+                    "visual_role": "product_photo",
+                    "title": "控制系统总图",
+                    "review_required": True,
+                    "metadata": {"asset_audit_status": "review_pending", "asset_quality_score": 0.41},
+                    "reason": "说明系统架构",
+                }
+            ],
         )
 
         self.assertIn("<review_context>", system_prompt)
@@ -1298,6 +1381,10 @@ class SectionQualityGateTests(unittest.TestCase):
         self.assertIn("<review_contract>", user_prompt)
         self.assertIn("<section_markdown>", user_prompt)
         self.assertIn("标签区中的 metadata", user_prompt)
+        self.assertIn("证据类型错配", user_prompt)
+        self.assertIn("visual_role=product_photo", user_prompt)
+        self.assertIn("audit_status=review_pending", user_prompt)
+        self.assertIn("quality_score=0.41", user_prompt)
 
     def test_build_section_quality_prompts_includes_ai_wiki_constraints_when_provided(self) -> None:
         _system_prompt, user_prompt = build_section_quality_prompts(

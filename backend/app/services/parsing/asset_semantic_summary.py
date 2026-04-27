@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import dataclass
 import json
@@ -145,7 +146,9 @@ class AssetSemanticSummaryService:
             return False
         metadata = dict(asset.meta or {})
         current_role = str(metadata.get("visual_role") or "")
-        if current_role == "page_furniture":
+        if current_role in {"page_furniture", "asset_fragment", "text_fragment", "product_photo"}:
+            return False
+        if metadata.get("preserve_in_vector_db") is False:
             return False
         if isinstance(metadata.get("semantic_summary"), dict) and str(metadata["semantic_summary"].get("status") or "") == "summarized":
             return False
@@ -192,7 +195,9 @@ class AssetSemanticSummaryService:
         )
 
         try:
-            response = await self.llm_client.invoke(request)
+            timeout_seconds = max(1.0, float(self.settings.parser_llm_asset_summary_timeout_seconds))
+            async with asyncio.timeout(timeout_seconds):
+                response = await self.llm_client.invoke(request)
             payload = json.loads(response.content)
         except Exception as exc:
             if len(batch) > 1:
@@ -212,7 +217,7 @@ class AssetSemanticSummaryService:
             }
             return
 
-        for decision in payload.get("items") or []:
+        for decision in _extract_items(payload):
             try:
                 asset_index = int(decision.get("candidate_index"))
             except (TypeError, ValueError):
@@ -233,20 +238,27 @@ class AssetSemanticSummaryService:
 
 def _build_system_prompt() -> str:
     return (
-        "你是电气技术方案图语义摘要器。请结合图片、标题、章节标题、前后文，对每个候选图资产做保守且结构化的总结。\n"
+        "你是电气技术方案图语义摘要器。请结合图片本体、标题、章节标题和前后文，对每个候选图资产做保守且结构化的总结。\n"
         "目标：增强图检索与章节生成，不是做工程签审。\n\n"
+        "证据优先级：\n"
+        "1. 如果提供了图片，先判断图片本体的视觉类型和可见内容。\n"
+        "2. 标题、caption、heading_path、前后文只是弱证据，可能来自相邻段落、OCR 或解析错误。\n"
+        "3. 当视觉内容与文字上下文冲突时，以视觉内容为准；在 review_notes 中说明冲突，不要按标题编造图意。\n"
+        "4. 如果没有图片或图片不可辨认，只能基于文字弱证据生成低置信摘要，并将 review_required 设为 true。\n\n"
         "输出要求：\n"
         "1. 只总结图中明确可见或上下文明确给出的信息，不要编造未出现的参数、型号或逻辑。\n"
-        "2. title_hint 输出一个适合界面展示和检索的短标题，长度尽量控制在 8 到 24 个字；无法判断时返回空字符串。\n"
-        "3. summary 用一句话概括这张图的用途与主题。\n"
-        "4. problem_solved 说明它用于解决什么问题。\n"
-        "5. principle_summary 说明核心工作原理或结构关系。\n"
-        "6. key_components 列关键部件、设备、柜体、回路或模块。\n"
-        "7. signals_or_loops 列关键控制信号、联锁、主回路或通讯回路，没有就返回空数组。\n"
-        "8. applicable_sections 列适合复用到哪些章节标题或章节类型。\n"
-        "9. retrieval_keywords 给出便于检索的关键词，优先专业术语。\n"
-        "10. 如果图意不清、文字太小或只能看出大概，请降低 confidence 并把 review_required 设为 true。\n"
-        "11. 只返回 JSON。"
+        "2. 不要把产品照片、布局图、文字截图或碎片摘要成主接线图、拓扑图、控制原理图或系统示意图。\n"
+        "3. title_hint 输出一个适合界面展示和检索的短标题，长度尽量控制在 8 到 24 个字；无法判断时返回空字符串。\n"
+        "4. diagram_type 必须描述真实视觉形态，例如“主回路接线图”“启动曲线”“柜体布置图”“产品照片”“文字截图”；不确定时写“待人工确认”。\n"
+        "5. summary 用一句话概括这张图的实际用途与主题；如果只是一张照片或布局图，不要写成电气连接逻辑。\n"
+        "6. problem_solved 说明它能支持哪类章节问题；如果价值有限，应说明仅作外观/布置/背景参考。\n"
+        "7. principle_summary 只写可见结构关系；照片、装饰图、文字截图和碎片没有原理关系时返回空字符串。\n"
+        "8. key_components 列关键部件、设备、柜体、回路或模块；看不清就返回空数组。\n"
+        "9. signals_or_loops 列关键控制信号、联锁、主回路或通讯回路；图中不可见则返回空数组。\n"
+        "10. applicable_sections 列适合复用到哪些章节标题或章节类型，必须与真实视觉形态匹配。\n"
+        "11. retrieval_keywords 给出便于检索的关键词，优先专业术语，但不得加入图中未出现的设备或回路。\n"
+        "12. 如果图意不清、文字太小、视觉内容与标题冲突或只能看出大概，请降低 confidence 并把 review_required 设为 true。\n"
+        "13. 只返回 JSON。"
     )
 
 
@@ -257,8 +269,22 @@ def _build_user_prompt(candidates: list[tuple[int, dict[str, Any]]], *, vision_c
     return (
         "请为以下方案图候选生成结构化语义摘要。\n"
         "如果附带图片输入，则图片顺序与 vision_candidate_indices 中列出的 candidate_index 顺序完全一致。\n\n"
+        "注意：候选标题和上下文可能来自相邻正文，不一定准确描述图片本体。"
+        "摘要必须服务于后续检索，宁可保守标注待人工确认，也不要把弱证据扩写成确定图意。\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
+
+
+def _extract_items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        items = payload.get("items") or []
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        return []
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
 
 
 def _build_candidate_payload(*, index: int, asset: ParsedAsset) -> dict[str, Any]:

@@ -8,8 +8,24 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { OutlineTree } from '@/components/outline/OutlineTree';
 import api, { getApiErrorMessage, isNotFoundError } from '@/lib/api';
-import { Outline, OutlineNode } from '@/lib/types';
+import { JobAccepted, JobRead, Outline, OutlineNode } from '@/lib/types';
 import { toast } from 'sonner';
+
+const OUTLINE_POLL_INTERVAL_MS = 2000;
+const OUTLINE_POLL_TIMEOUT_MS = 30 * 60 * 1000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function normalizePollPath(nextPoll: string): string {
+  if (nextPoll.startsWith('/api/v1/')) {
+    return nextPoll.slice('/api/v1'.length);
+  }
+  return nextPoll;
+}
 
 interface OutlineResponse {
   id: string;
@@ -52,6 +68,7 @@ export default function OutlinePage() {
   const [approving, setApproving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [navigating, setNavigating] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState<string | null>(null);
 
   const fetchOutline = useCallback(async () => {
     try {
@@ -118,21 +135,44 @@ export default function OutlinePage() {
 
   const handleGenerate = async () => {
     setGenerating(true);
+    setGenerationProgress('Submitting outline job...');
     try {
       const missing = await checkOutlinePrerequisites();
       if (missing.length > 0) {
         toast.error(`Generate Outline requires: ${missing.join(' + ')}`);
         return;
       }
-      await api.post(`/projects/${projectId}/generate-outline`, {});
+      const acceptedResponse = await api.post(`/projects/${projectId}/generate-outline`, {});
+      const accepted = acceptedResponse.data as JobAccepted;
+      const pollPath = normalizePollPath(accepted.next_poll);
+      const deadline = Date.now() + OUTLINE_POLL_TIMEOUT_MS;
+      let completed = false;
+      while (Date.now() < deadline) {
+        const jobResponse = await api.get(pollPath);
+        const job = jobResponse.data as JobRead;
+        setGenerationProgress(job.status === 'running' ? 'Generating outline...' : `Outline job: ${job.status}`);
+        if (job.status === 'succeeded') {
+          completed = true;
+          break;
+        }
+        if (job.status === 'failed') {
+          throw new Error(String(job.output_ref?.error || job.error_code || 'Outline generation failed'));
+        }
+        await sleep(OUTLINE_POLL_INTERVAL_MS);
+      }
+      if (!completed) {
+        throw new Error('Outline generation is still running after the local polling window.');
+      }
       toast.success('Outline generated');
       await fetchOutline();
+      setGenerationProgress(null);
     } catch (error: unknown) {
       if (isNotFoundError(error)) {
         toast.error('Generate Outline requires a ready Requirement Card and Evidence Bundle');
         return;
       }
       toast.error(getApiErrorMessage(error, 'Error generating outline'));
+      setGenerationProgress(getApiErrorMessage(error, 'Outline generation failed'));
     } finally {
       setGenerating(false);
     }
@@ -264,6 +304,9 @@ export default function OutlinePage() {
           )}
         </div>
       </div>
+      {generationProgress && (
+        <p className="text-right text-xs text-muted-foreground">{generationProgress}</p>
+      )}
 
       {loading ? (
         <div className="flex-1 flex justify-center items-center h-full">

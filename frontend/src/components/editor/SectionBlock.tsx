@@ -32,6 +32,8 @@ import api, { buildAssetContentUrl, getApiErrorMessage } from '@/lib/api';
 import type {
   Citation,
   EvidenceCard,
+  JobAccepted,
+  JobRead,
   RecommendedAsset,
   ReuseBlockLike,
   ReuseRetrievalTrace,
@@ -64,6 +66,36 @@ interface PreviewAssetSegment {
 }
 
 type PreviewSegment = PreviewMarkdownSegment | PreviewAssetSegment;
+const INLINE_ASSET_PLACEHOLDER_PATTERN = /\[\[ASSET:([A-Z_]+):([^\]]+)\]\]/g;
+const SECTION_REGENERATION_POLL_INTERVAL_MS = 2000;
+const SECTION_REGENERATION_POLL_TIMEOUT_MS = 30 * 60 * 1000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function normalizePollPath(nextPoll: string): string {
+  if (nextPoll.startsWith('/api/v1/')) {
+    return nextPoll.slice('/api/v1'.length);
+  }
+  return nextPoll;
+}
+
+function formatSectionRegenerationProgress(job: JobRead): string {
+  const progress = job.output_ref?.progress;
+  const title = progress?.current_section_title ? `: ${progress.current_section_title}` : '';
+  const elapsed = typeof progress?.elapsed_ms === 'number' ? ` (${Math.round(progress.elapsed_ms / 1000)}s)` : '';
+  if (job.status === 'queued') {
+    return `Regeneration queued${title}${elapsed}`;
+  }
+  if (job.status === 'running') {
+    const stage = progress?.stage ? String(progress.stage).replaceAll('_', ' ') : 'running';
+    return `Regeneration ${stage}${title}${elapsed}`;
+  }
+  return `Regeneration status: ${job.status}`;
+}
 
 function getStatusVariant(status: SectionDraft['status']): 'default' | 'secondary' | 'warning' | 'success' | 'destructive' {
   if (status === 'approved') return 'success';
@@ -88,6 +120,53 @@ function normalizeHeadingPath(value: string[] | string | undefined): string {
     .map((item) => item.trim())
     .filter(Boolean)
     .join(' > ');
+}
+
+function metadataNumber(metadata: Record<string, unknown>, key: string): number {
+  const value = metadata[key];
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function isFilteredRecommendedAsset(asset: RecommendedAsset, sectionTitle = ''): boolean {
+  const metadata = (asset.metadata || {}) as Record<string, unknown>;
+  if (asset.asset_type === 'table' && metadata.storage_fallback === true && !metadata.raw_table_markdown && !metadata.table_profile) {
+    return true;
+  }
+  if (!isVisualAsset(asset)) return false;
+  const visualRole = String(asset.visual_role || metadata.visual_role || '').toLowerCase();
+  const auditStatus = String(metadata.asset_audit_status || '').toLowerCase();
+  const qualityScore = Number(metadata.asset_quality_score || 0);
+  if (auditStatus === 'rejected') return true;
+  if (visualRole === 'page_furniture' || visualRole === 'asset_fragment' || visualRole === 'text_fragment') return true;
+  if (metadata.preserve_in_vector_db === false) return true;
+
+  const width = metadataNumber(metadata, 'width') || metadataNumber(metadata, 'image_width') || metadataNumber(metadata, 'pixel_width');
+  const height = metadataNumber(metadata, 'height') || metadataNumber(metadata, 'image_height') || metadataNumber(metadata, 'pixel_height');
+  const signalText = [
+    sectionTitle,
+    asset.title,
+    asset.display_title,
+    asset.heading_path,
+    asset.preview_text,
+    metadata.context_before,
+    metadata.context_after,
+    metadata.section_path,
+  ].join(' ');
+  if (/总体方案|主回路|一次/.test(sectionTitle) && (visualRole === 'product_photo' || /(产品照片|设备照片|实拍|photo)/i.test(signalText))) {
+    return true;
+  }
+  if (/总体方案/.test(sectionTitle) && /(房间布置|外形图|尺寸图|间距示意|检修通道|旧\s*SFC|输入输出变压器利旧)/i.test(signalText)) {
+    return true;
+  }
+  if (auditStatus === 'review_pending' && qualityScore > 0 && qualityScore < 0.45) return true;
+  if (width <= 0 || height <= 0) return false;
+  const area = width * height;
+  return Math.min(width, height) < 80 || (area < 12000 && Math.max(width, height) < 160);
 }
 
 function formatIntentLabel(key: string): string {
@@ -302,6 +381,36 @@ function buildPreviewSegments(content: string): PreviewSegment[] {
       });
       continue;
     }
+
+    const inlineMatches = [...line.matchAll(INLINE_ASSET_PLACEHOLDER_PATTERN)];
+    if (inlineMatches.length > 0) {
+      let cursor = 0;
+      for (const inlineMatch of inlineMatches) {
+        const matchIndex = inlineMatch.index ?? 0;
+        let beforeText = line.slice(cursor, matchIndex);
+        let nextCursor = matchIndex + inlineMatch[0].length;
+        const followingPunctuation = line.slice(nextCursor).match(/^\s*([:：,，.。;；])/);
+        if (followingPunctuation) {
+          beforeText = `${beforeText.trimEnd()}${followingPunctuation[1]}`;
+          nextCursor += followingPunctuation[0].length;
+        }
+        if (beforeText.trim()) {
+          buffer.push(beforeText.trimEnd());
+        }
+        flushBuffer();
+        segments.push({
+          kind: 'asset',
+          assetType: inlineMatch[1],
+          assetId: inlineMatch[2],
+        });
+        cursor = nextCursor;
+      }
+      const trailingText = line.slice(cursor);
+      if (trailingText.trim()) {
+        buffer.push(trailingText.trimStart());
+      }
+      continue;
+    }
     buffer.push(line);
   }
 
@@ -316,6 +425,15 @@ function getReusableBlocks(section: SectionDraft): ReuseBlockLike[] {
 
 function getSectionValidatorResult(section: SectionDraft): SectionValidatorResult | undefined {
   return section.validator_result;
+}
+
+function getSectionAssetCandidates(section: SectionDraft): RecommendedAsset[] {
+  return (
+    section.asset_candidates ||
+    section.validator_result?.asset_candidates ||
+    section.validator_result?.reuse_pack?.asset_candidates ||
+    []
+  );
 }
 
 function getGenerationDetails(section: SectionDraft): SectionGenerationDetails | undefined {
@@ -398,6 +516,20 @@ function findReusableBlockPreviewContent(section: SectionDraft, asset: Recommend
   return mergeMarkdownTableBlocks(tableBlocks) || tableBlocks.map((block) => block.content_md?.trim()).filter(Boolean).join('\n\n');
 }
 
+function getAssetTableMarkdown(asset?: RecommendedAsset): string | undefined {
+  if (!asset || asset.asset_type !== 'table') {
+    return undefined;
+  }
+  const metadata = (asset.metadata || {}) as Record<string, unknown>;
+  for (const key of ['raw_table_markdown', 'table_markdown', 'reconstructed_table_markdown']) {
+    const value = metadata[key];
+    if (typeof value === 'string' && markdownTableCandidate(value)) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
 function resolveCitationSourceContent(
   section: SectionDraft,
   citation: Citation,
@@ -429,12 +561,15 @@ function AssetPreviewCard({
     failed: false,
   });
   const visualAsset = isVisualAsset(asset);
-  const supportContent = asset && !visualAsset ? findReusableBlockPreviewContent(section, asset) : undefined;
+  const tableMarkdown = getAssetTableMarkdown(asset);
+  const supportContent = asset && !visualAsset ? tableMarkdown || findReusableBlockPreviewContent(section, asset) : undefined;
   const previewMarkdown = supportContent?.trim() || asset?.preview_text || '';
+  const hasMarkdownTablePreview = Boolean(asset?.asset_type === 'table' && markdownTableCandidate(previewMarkdown));
   const title = placeholderLabel || asset?.display_title || asset?.title || asset?.caption || '已插入图表引用';
   const currentAssetId = asset?.asset_id || '';
   const imageFailed = imageState.assetId === currentAssetId ? imageState.failed : false;
-  const assetContentUrl = asset?.asset_id && visualAsset ? buildAssetContentUrl(asset.asset_id) : null;
+  const binaryPreview = visualAsset || (asset?.asset_type === 'table' && !hasMarkdownTablePreview);
+  const assetContentUrl = asset?.asset_id && binaryPreview ? buildAssetContentUrl(asset.asset_id) : null;
   const summaryText = (asset?.caption || asset?.preview_text || '').trim();
   const metadata = (asset?.metadata || {}) as Record<string, unknown>;
   const breakdown = asset?.score_breakdown || (metadata.retrieval_score_breakdown as Record<string, number | string> | undefined);
@@ -477,7 +612,7 @@ function AssetPreviewCard({
           {[asset?.document_name, asset?.heading_path].filter(Boolean).join(' / ')}
         </p>
       )}
-      {visualAsset && assetContentUrl && !imageFailed ? (
+      {assetContentUrl && !imageFailed ? (
         <div className="mt-3 overflow-hidden rounded-[1.25rem] border border-white/80 bg-white/90 p-3 shadow-[0_20px_50px_-28px_rgba(15,23,42,0.45)]">
           <div className="relative overflow-hidden rounded-[1rem] border border-slate-200/80 bg-slate-50">
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -485,16 +620,16 @@ function AssetPreviewCard({
               src={assetContentUrl}
               alt={title}
               loading="lazy"
-              className={`block w-full bg-transparent object-contain ${embedded ? 'max-h-[300px]' : 'max-h-[420px]'}`}
+              className={`block w-full bg-transparent object-contain ${embedded ? 'max-h-[300px]' : asset?.asset_type === 'table' ? 'max-h-[560px]' : 'max-h-[420px]'}`}
               onError={() => setImageState({ assetId: currentAssetId, failed: true })}
             />
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-slate-50/85" />
+            {asset?.asset_type !== 'table' ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-slate-50/85" /> : null}
           </div>
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
               <span className="inline-flex items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-2.5 py-1 font-medium text-emerald-700">
                 <Eye className="h-3.5 w-3.5" />
-                原图预览
+                {asset?.asset_type === 'table' ? '表格原图预览' : '原图预览'}
               </span>
               {asset?.visual_role ? <span>{asset.visual_role}</span> : null}
             </div>
@@ -525,8 +660,8 @@ function AssetPreviewCard({
           ) : (
             <p className="text-sm text-slate-500">该位置已绑定图表资产，导出时会继续引用对应资源。</p>
           )}
-          {visualAsset && assetContentUrl && imageFailed ? (
-            <p className="mt-3 text-xs text-amber-700">原图加载失败，当前已回退到文本摘要视图。</p>
+          {assetContentUrl && imageFailed ? (
+            <p className="mt-3 text-xs text-amber-700">原始资产加载失败，当前已回退到文本摘要视图。</p>
           ) : null}
         </div>
       )}
@@ -553,7 +688,9 @@ function ReadonlyBlock({
   assetLookup: Map<string, RecommendedAsset>;
 }) {
   const headingMatch = block.content.match(/^(#{1,6})\s*(.*)$/);
-  const placeholder = parseAssetPlaceholder(block.content);
+  const placeholder = block.kind === 'placeholder' ? parseAssetPlaceholder(block.content) : null;
+  const previewSegments = buildPreviewSegments(block.content);
+  const hasAssetSegments = previewSegments.some((segment) => segment.kind === 'asset');
   if (block.kind === 'heading' && headingMatch?.[2]) {
     return (
       <div className="rounded-2xl border border-slate-200 bg-white p-4">
@@ -579,7 +716,26 @@ function ReadonlyBlock({
         <Badge variant="outline">{blockLabel(block.kind)}</Badge>
         <span className="text-xs text-slate-400">Read only</span>
       </div>
-      <MarkdownArticle markdown={block.content} compact />
+      {hasAssetSegments ? (
+        <div className="space-y-4">
+          {previewSegments.map((segment, index) => {
+            if (segment.kind === 'markdown') {
+              return <MarkdownArticle key={`md-${index}`} markdown={segment.markdown} compact />;
+            }
+            return (
+              <AssetPreviewCard
+                key={`asset-${segment.assetId}-${index}`}
+                asset={assetLookup.get(segment.assetId)}
+                placeholderLabel={segment.label}
+                section={section}
+                embedded
+              />
+            );
+          })}
+        </div>
+      ) : (
+        <MarkdownArticle markdown={block.content} compact />
+      )}
     </div>
   );
 }
@@ -600,6 +756,7 @@ export function SectionBlock({
   const [blocks, setBlocks] = useState<EditableBlock[]>(parseMarkdownBlocks(section.content_md || ''));
   const [saving, setSaving] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
+  const [regenerationProgress, setRegenerationProgress] = useState<string | null>(null);
   const [selectedCitationIds, setSelectedCitationIds] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState('preview');
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
@@ -614,7 +771,23 @@ export function SectionBlock({
 
   const selectedCitationCount = selectedCitationIds.length;
   const hasEditableContent = Boolean(content.trim());
-  const assetCount = section.recommended_assets?.length || 0;
+  const visibleRecommendedAssets = useMemo(
+    () => (section.recommended_assets || []).filter((asset) => !isFilteredRecommendedAsset(asset, section.title)),
+    [section.recommended_assets, section.title],
+  );
+  const visibleAssetCandidates = useMemo(() => {
+    const recommendedIds = new Set(
+      visibleRecommendedAssets
+        .map((asset) => asset.asset_id)
+        .filter((assetId): assetId is string => Boolean(assetId)),
+    );
+    return getSectionAssetCandidates(section).filter((asset) => {
+      if (isFilteredRecommendedAsset(asset, section.title)) return false;
+      return !asset.asset_id || !recommendedIds.has(asset.asset_id);
+    });
+  }, [section, visibleRecommendedAssets]);
+  const assetCount = visibleRecommendedAssets.length;
+  const assetCandidateCount = visibleAssetCandidates.length;
   const generationDetails = getGenerationDetails(section);
   const reuseTrace = getReuseTrace(section);
   const queryIntents = reuseTrace?.query_intents;
@@ -636,11 +809,11 @@ export function SectionBlock({
   const assetLookup = useMemo(
     () =>
       new Map(
-        (section.recommended_assets || [])
+        [...visibleRecommendedAssets, ...visibleAssetCandidates]
           .filter((asset) => asset.asset_id)
           .map((asset) => [asset.asset_id as string, asset]),
       ),
-    [section.recommended_assets],
+    [visibleRecommendedAssets, visibleAssetCandidates],
   );
 
   const citationModalContent = useMemo(() => {
@@ -675,12 +848,38 @@ export function SectionBlock({
     }
   };
 
+  const waitForRegenerationJob = async (nextPoll: string): Promise<JobRead> => {
+    const pollPath = normalizePollPath(nextPoll);
+    const deadline = Date.now() + SECTION_REGENERATION_POLL_TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+      const jobResponse = (await api.get(pollPath)) as { data: JobRead };
+      const job = jobResponse.data;
+      setRegenerationProgress(formatSectionRegenerationProgress(job));
+
+      if (job.status === 'succeeded') {
+        return job;
+      }
+      if (job.status === 'failed') {
+        const detail = job.output_ref?.error || job.error_code || 'Section regeneration job failed';
+        throw new Error(String(detail));
+      }
+
+      await sleep(SECTION_REGENERATION_POLL_INTERVAL_MS);
+    }
+
+    throw new Error('Section regeneration is still running after the local polling window. Refresh this page later.');
+  };
+
   const handleRegenerate = async (preferredIds?: string[]) => {
     setRegenerating(true);
+    setRegenerationProgress('Submitting regeneration job...');
     try {
-      await api.post(`/projects/${projectId}/sections/${section.section_id}/regenerate`, {
+      const acceptedResponse = (await api.post(`/projects/${projectId}/sections/${section.section_id}/regenerate`, {
         preferred_citation_ids: preferredIds && preferredIds.length > 0 ? preferredIds : undefined,
-      });
+      })) as { data: JobAccepted };
+      setRegenerationProgress('Regeneration job accepted. Waiting for progress...');
+      await waitForRegenerationJob(acceptedResponse.data.next_poll);
       toast.success(preferredIds?.length ? 'Section regenerated from selected evidence' : 'Section regenerated');
       setSelectedCitationIds([]);
       onRefresh();
@@ -688,6 +887,7 @@ export function SectionBlock({
       toast.error(getApiErrorMessage(error, 'Error regenerating section'));
     } finally {
       setRegenerating(false);
+      setRegenerationProgress(null);
     }
   };
 
@@ -758,7 +958,8 @@ export function SectionBlock({
               </div>
               <div className="flex flex-wrap gap-4 text-xs text-slate-500">
                 <span>{section.citation_refs.length} citations</span>
-                <span>{assetCount} assets</span>
+                <span>{assetCount} recommended assets</span>
+                {assetCandidateCount > 0 ? <span>{assetCandidateCount} candidates</span> : null}
                 <span>{hasEditableContent ? 'draft ready for review' : 'draft not generated yet'}</span>
               </div>
             </div>
@@ -798,6 +999,9 @@ export function SectionBlock({
                 {regenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RotateCcw className="mr-2 h-4 w-4" />}
                 {selectedCitationCount > 0 ? `Regenerate (${selectedCitationCount})` : 'Regenerate'}
               </Button>
+              {regenerationProgress && (
+                <p className="basis-full text-right text-xs text-slate-500">{regenerationProgress}</p>
+              )}
             </div>
           </div>
         </div>
@@ -1268,28 +1472,59 @@ export function SectionBlock({
                 <GalleryVerticalEnd className="h-4 w-4 text-slate-400" />
               </div>
 
-              {assetCount > 0 ? (
+              {assetCount > 0 || assetCandidateCount > 0 ? (
                 <div className="space-y-3">
-                  {(section.recommended_assets || []).map((asset, index) => {
-                    const placeholder = buildAssetPlaceholder(asset);
-                    const alreadyUsed = placeholder ? content.includes(placeholder) : false;
-                    return (
-                      <div
-                        key={`${asset.asset_id || asset.title || asset.document_name}-${index}`}
-                        className={asset.review_required ? 'rounded-2xl border border-amber-300 bg-amber-50/70 p-4' : 'rounded-2xl border border-slate-200 bg-slate-50/70 p-4'}
-                      >
-                        <AssetPreviewCard asset={asset} section={section} />
-                        <div className="mt-3 flex items-center justify-between gap-3">
-                          <span className="text-xs text-slate-500">
-                            {alreadyUsed ? '已插入当前正文' : '尚未插入正文'}
-                          </span>
-                          <Button size="sm" variant="outline" onClick={() => insertAssetPlaceholder(asset)}>
-                            {alreadyUsed ? '再次定位到该图表' : '插入正文'}
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
+                  {visibleRecommendedAssets.length > 0 ? (
+                    <div className="space-y-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Recommended</p>
+                      {visibleRecommendedAssets.map((asset, index) => {
+                        const placeholder = buildAssetPlaceholder(asset);
+                        const alreadyUsed = placeholder ? content.includes(placeholder) : false;
+                        return (
+                          <div
+                            key={`${asset.asset_id || asset.title || asset.document_name}-${index}`}
+                            className={asset.review_required ? 'rounded-2xl border border-amber-300 bg-amber-50/70 p-4' : 'rounded-2xl border border-slate-200 bg-slate-50/70 p-4'}
+                          >
+                            <AssetPreviewCard asset={asset} section={section} />
+                            <div className="mt-3 flex items-center justify-between gap-3">
+                              <span className="text-xs text-slate-500">
+                                {alreadyUsed ? '已插入当前正文' : '尚未插入正文'}
+                              </span>
+                              <Button size="sm" variant="outline" onClick={() => insertAssetPlaceholder(asset)}>
+                                {alreadyUsed ? '再次定位到该图表' : '插入正文'}
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+
+                  {visibleAssetCandidates.length > 0 ? (
+                    <div className="space-y-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">More Candidates</p>
+                      {visibleAssetCandidates.map((asset, index) => {
+                        const placeholder = buildAssetPlaceholder(asset);
+                        const alreadyUsed = placeholder ? content.includes(placeholder) : false;
+                        return (
+                          <div
+                            key={`candidate-${asset.asset_id || asset.title || asset.document_name}-${index}`}
+                            className={asset.review_required ? 'rounded-2xl border border-amber-300 bg-amber-50/70 p-4' : 'rounded-2xl border border-slate-200 bg-slate-50/70 p-4'}
+                          >
+                            <AssetPreviewCard asset={asset} section={section} />
+                            <div className="mt-3 flex items-center justify-between gap-3">
+                              <span className="text-xs text-slate-500">
+                                {alreadyUsed ? '已插入当前正文' : '候选资产，可人工替换'}
+                              </span>
+                              <Button size="sm" variant="outline" onClick={() => insertAssetPlaceholder(asset)}>
+                                {alreadyUsed ? '再次定位到该图表' : '插入正文'}
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
               ) : (
                 <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center">

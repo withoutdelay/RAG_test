@@ -59,6 +59,7 @@ LAYOUT_ILLUSTRATION_PATTERN = re.compile(
     r"(外观图|高度关系|平面间距|间距示意|外形|柜体分段|顶部通风|布置图|尺寸图|检修通道)",
     re.IGNORECASE,
 )
+PRODUCT_PHOTO_PATTERN = re.compile(r"(产品照片|设备照片|实拍|现场照片|photo|photograph)", re.IGNORECASE)
 LOGO_ASSET_PATTERN = re.compile(
     r"(logo|标\s*识|商标|公司徽标|公司全称|股份有限公司|dayu\s*electric|大\s*禹\s*电\s*气|大\s*禹\s*标\s*识)",
     re.IGNORECASE,
@@ -73,6 +74,8 @@ CONTROL_INTERFACE_TABLE_NOISE_PATTERN = re.compile(
 )
 VFD_AUXILIARY_CURVE_NOISE_PATTERN = re.compile(r"(润滑油|油站|冷却器|冷却水|辅机)", re.IGNORECASE)
 VFD_FOCUS_PATTERN = re.compile(r"(LCI|SFC|变频软起|软起动|软启动|同步切换|工频切换|晶闸管|主回路)", re.IGNORECASE)
+MIN_REUSABLE_FIGURE_DIMENSION = 80
+MIN_REUSABLE_FIGURE_AREA = 12000
 
 
 @dataclass(frozen=True)
@@ -196,6 +199,31 @@ class AssetRetrievalService:
             for item in ((section_context or {}).get("anchor_heading_paths") or [])
             if str(item).strip()
         ]
+        anchor_sample_ids = {
+            str(item).strip()
+            for item in ((section_context or {}).get("anchor_sample_ids") or [])
+            if str(item).strip()
+        }
+        anchor_source_section_ids = {
+            str(item).strip()
+            for item in ((section_context or {}).get("anchor_source_section_ids") or [])
+            if str(item).strip()
+        }
+        anchor_image_document_names = {
+            str(item).strip()
+            for item in ((section_context or {}).get("anchor_image_document_names") or [])
+            if str(item).strip()
+        }
+        anchor_image_sample_ids = {
+            str(item).strip()
+            for item in ((section_context or {}).get("anchor_image_sample_ids") or [])
+            if str(item).strip()
+        }
+        anchor_image_source_section_ids = {
+            str(item).strip()
+            for item in ((section_context or {}).get("anchor_image_source_section_ids") or [])
+            if str(item).strip()
+        }
 
         scored_cards: list[tuple[float, AssetCard, dict[str, float | str], list[str]]] = []
         result_source_breakdown: dict[str, int] = {}
@@ -233,6 +261,8 @@ class AssetRetrievalService:
                 target_taxonomy=target_taxonomy,
                 anchor_document_names=anchor_document_names,
                 anchor_headings=anchor_headings,
+                anchor_sample_ids=anchor_sample_ids,
+                anchor_source_section_ids=anchor_source_section_ids,
                 card=card,
                 textual_semantic_score=max(0.0, _cosine_similarity(query_vector, retrieval_vector)),
                 visual_semantic_score=direct_visual_score,
@@ -252,6 +282,15 @@ class AssetRetrievalService:
             result_source_breakdown[visual_source] = int(result_source_breakdown.get(visual_source, 0)) + 1
 
         scored_cards.sort(key=lambda item: item[0], reverse=True)
+        scored_cards = _dedupe_scored_asset_cards(scored_cards)
+        source_section_asset_matches = _promote_source_section_asset_matches(
+            scored_cards=scored_cards,
+            anchor_document_names=anchor_document_names,
+            anchor_sample_ids=anchor_sample_ids,
+            anchor_image_document_names=anchor_image_document_names,
+            anchor_image_sample_ids=anchor_image_sample_ids,
+            anchor_image_source_section_ids=anchor_image_source_section_ids,
+        )
         preferred_cards = [
             (score, card, breakdown, reason_trace)
             for score, card, breakdown, reason_trace in scored_cards
@@ -269,6 +308,8 @@ class AssetRetrievalService:
                     if card.asset_id not in preferred_ids
                 ],
             ]
+        if source_section_asset_matches:
+            result_pool = _dedupe_scored_asset_cards([*source_section_asset_matches, *result_pool])
         results = [
             _to_result(
                 card=card,
@@ -348,7 +389,7 @@ class AssetRetrievalService:
         fallback_cards: list[AssetCard] = []
         for asset, raw_document in rows:
             card = _build_asset_card(asset=asset, raw_document=raw_document, document_map=document_map)
-            if card.asset_type == "figure" and card.visual_role == "page_furniture":
+            if _should_skip_unusable_asset_card(card):
                 continue
             if normalized_doc_types and (card.doc_type or "") not in normalized_doc_types:
                 continue
@@ -653,6 +694,8 @@ def _compose_asset_score(
     target_taxonomy: dict[str, Any],
     anchor_document_names: set[str],
     anchor_headings: list[str],
+    anchor_sample_ids: set[str] | None = None,
+    anchor_source_section_ids: set[str] | None = None,
     card: AssetCard,
     textual_semantic_score: float,
     visual_semantic_score: float,
@@ -691,6 +734,8 @@ def _compose_asset_score(
         card=card,
         anchor_document_names=anchor_document_names,
         anchor_headings=anchor_headings,
+        anchor_sample_ids=anchor_sample_ids,
+        anchor_source_section_ids=anchor_source_section_ids,
     )
     structural_score = type_boost + taxonomy_boost + anchor_boost
 
@@ -750,6 +795,29 @@ def _build_reason_trace(
     return trace
 
 
+def _dedupe_scored_asset_cards(
+    scored_cards: list[tuple[float, AssetCard, dict[str, float | str], list[str]]],
+) -> list[tuple[float, AssetCard, dict[str, float | str], list[str]]]:
+    deduped: list[tuple[float, AssetCard, dict[str, float | str], list[str]]] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    for item in scored_cards:
+        _score, card, _breakdown, _reason_trace = item
+        metadata = card.metadata or {}
+        key = (
+            str(metadata.get("sample_id") or card.document_name or ""),
+            str(metadata.get("source_ref") or card.source_ref or ""),
+            str(card.asset_type or ""),
+            str(card.title or card.display_title or card.heading_path or ""),
+            str(metadata.get("width") or ""),
+            str(metadata.get("height") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def _asset_taxonomy_boost(*, card: AssetCard, target_taxonomy: dict[str, Any]) -> float:
     target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
     target_equipment_type = str(target_taxonomy.get("equipment_type") or "generic").lower()
@@ -777,8 +845,27 @@ def _asset_anchor_boost(
     card: AssetCard,
     anchor_document_names: set[str],
     anchor_headings: list[str],
+    anchor_sample_ids: set[str] | None = None,
+    anchor_source_section_ids: set[str] | None = None,
 ) -> float:
     score = 0.0
+    metadata = card.metadata or {}
+    normalized_anchor_sample_ids = anchor_sample_ids or set()
+    normalized_anchor_source_section_ids = anchor_source_section_ids or set()
+    card_sample_id = str(metadata.get("sample_id") or metadata.get("source_doc_id") or "").strip()
+    card_source_section_id = str(metadata.get("source_section_id") or "").strip()
+    if normalized_anchor_sample_ids and card_sample_id and card_sample_id in normalized_anchor_sample_ids:
+        score += 0.28
+    section_relation = _best_source_section_id_relation(
+        candidate_section_id=card_source_section_id,
+        anchor_source_section_ids=normalized_anchor_source_section_ids,
+    )
+    if section_relation == "exact":
+        score += 0.42
+    elif section_relation == "descendant":
+        score += 0.36
+    elif section_relation == "ancestor":
+        score += 0.22
     if anchor_document_names and (card.document_name or "") in anchor_document_names:
         score += 0.18
     if anchor_headings and card.heading_path:
@@ -790,6 +877,110 @@ def _asset_anchor_boost(
         if any(card.heading_path == anchor_heading for anchor_heading in anchor_headings):
             score += 0.14
     return score
+
+
+def _promote_source_section_asset_matches(
+    *,
+    scored_cards: list[tuple[float, AssetCard, dict[str, float | str], list[str]]],
+    anchor_document_names: set[str],
+    anchor_sample_ids: set[str],
+    anchor_image_document_names: set[str],
+    anchor_image_sample_ids: set[str],
+    anchor_image_source_section_ids: set[str],
+) -> list[tuple[float, AssetCard, dict[str, float | str], list[str]]]:
+    if not anchor_image_source_section_ids:
+        return []
+    effective_document_names = anchor_image_document_names or anchor_document_names
+    effective_sample_ids = anchor_image_sample_ids or anchor_sample_ids
+    promoted: list[tuple[float, AssetCard, dict[str, float | str], list[str]]] = []
+    for score, card, breakdown, reason_trace in scored_cards:
+        if card.asset_type != "figure":
+            continue
+        if str(card.visual_role or "").lower() in {"asset_fragment", "text_fragment", "page_furniture"}:
+            continue
+        if _asset_quality_flags(card=card)["low_information"]:
+            continue
+        if not _card_matches_source_identity(
+            card=card,
+            anchor_document_names=effective_document_names,
+            anchor_sample_ids=effective_sample_ids,
+        ):
+            continue
+        section_relation = _best_source_section_id_relation(
+            candidate_section_id=str((card.metadata or {}).get("source_section_id") or ""),
+            anchor_source_section_ids=anchor_image_source_section_ids,
+        )
+        if section_relation not in {"exact", "descendant", "ancestor"}:
+            continue
+        bonus = {"exact": 0.22, "descendant": 0.2, "ancestor": 0.12}[section_relation]
+        promoted_breakdown = dict(breakdown or {})
+        promoted_breakdown["source_section_asset_recovery"] = round(bonus, 4)
+        promoted_breakdown["source_section_relation"] = section_relation
+        promoted_breakdown["final"] = round(float(score or 0.0) + bonus, 4)
+        promoted_trace = [
+            *list(reason_trace or []),
+            f"source_section_asset_recovery={section_relation}:{bonus:.3f}",
+        ]
+        promoted.append((float(score or 0.0) + bonus, card, promoted_breakdown, promoted_trace))
+    promoted.sort(key=lambda item: item[0], reverse=True)
+    return promoted
+
+
+def _card_matches_source_identity(
+    *,
+    card: AssetCard,
+    anchor_document_names: set[str],
+    anchor_sample_ids: set[str],
+) -> bool:
+    metadata = card.metadata or {}
+    card_sample_id = str(metadata.get("sample_id") or metadata.get("source_doc_id") or "").strip()
+    if anchor_sample_ids:
+        return bool(card_sample_id and card_sample_id in anchor_sample_ids)
+    if anchor_document_names:
+        return bool((card.document_name or "") in anchor_document_names)
+    return False
+
+
+def _best_source_section_id_relation(
+    *,
+    candidate_section_id: str,
+    anchor_source_section_ids: set[str],
+) -> str | None:
+    candidate = _normalize_source_section_id(candidate_section_id)
+    if not candidate or not anchor_source_section_ids:
+        return None
+    best_rank = 0
+    best_relation: str | None = None
+    relation_ranks = {"ancestor": 1, "descendant": 2, "exact": 3}
+    for anchor_value in anchor_source_section_ids:
+        anchor = _normalize_source_section_id(anchor_value)
+        if not anchor:
+            continue
+        if candidate == anchor:
+            relation = "exact"
+        elif _section_id_has_child_prefix(child=candidate, parent=anchor):
+            relation = "descendant"
+        elif _section_id_has_child_prefix(child=anchor, parent=candidate):
+            relation = "ancestor"
+        else:
+            relation = None
+        rank = relation_ranks.get(relation or "", 0)
+        if rank > best_rank:
+            best_rank = rank
+            best_relation = relation
+    return best_relation
+
+
+def _normalize_source_section_id(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
+    return re.sub(r"\s+", "", normalized)
+
+
+def _section_id_has_child_prefix(*, child: str, parent: str) -> bool:
+    if not child or not parent or child == parent or not child.startswith(parent):
+        return False
+    delimiter = child[len(parent) : len(parent) + 1]
+    return delimiter in {".", "-", "/", ">", "_"}
 
 
 def _asset_noise_penalty(*, card: AssetCard, target_section_type: str) -> float:
@@ -804,12 +995,19 @@ def _asset_noise_penalty(*, card: AssetCard, target_section_type: str) -> float:
         penalty += 0.14
     if quality_flags["low_confidence_summary"]:
         penalty += 0.1
+    if quality_flags["audit_review_pending"]:
+        penalty += 0.18
+    if quality_flags["low_quality_score"]:
+        penalty += 0.16
     if (
         target_section_type in {"main_circuit_scheme", "overall_solution", "control_logic", "protection_interlock"}
-        and str(card.visual_role or "").lower() == "illustration"
+        and str(card.visual_role or "").lower() in {"illustration", "layout_drawing"}
         and LAYOUT_ILLUSTRATION_PATTERN.search(text)
     ):
-        penalty += 0.34
+        penalty += 0.55
+    if target_section_type in {"main_circuit_scheme", "overall_solution", "control_logic", "protection_interlock"}:
+        if str(card.visual_role or "").lower() == "product_photo" or PRODUCT_PHOTO_PATTERN.search(text):
+            penalty += 0.68
     if target_section_type in {"protection_interlock", "control_logic", "communication_interface"} and card.asset_type == "table":
         focus_match = bool(CONTROL_INTERFACE_FOCUS_PATTERN.search(text))
         if not focus_match:
@@ -821,10 +1019,28 @@ def _asset_noise_penalty(*, card: AssetCard, target_section_type: str) -> float:
             penalty += 0.34
     if card.visual_role == "page_furniture":
         penalty += 0.32
-    if any(token in text for token in ("检测报告", "检验", "认证", "证书", "质量保证", "文档控制", "公司简介")):
+    if card.visual_role == "asset_fragment":
+        penalty += 1.0
+    if _contains_any_token_compact(
+        text,
+        (
+            "检测报告",
+            "检验",
+            "认证",
+            "证书",
+            "质量保证",
+            "文档控制",
+            "公司简介",
+            "test report",
+            "report number",
+            "certificate",
+            "certification",
+        ),
+    ):
         penalty += 0.22
-    if target_section_type in {"main_circuit_scheme", "overall_solution", "communication_interface"} and any(
-        token in text for token in ("检测报告", "认证", "证书")
+    if target_section_type in {"main_circuit_scheme", "overall_solution", "communication_interface"} and _contains_any_token_compact(
+        text,
+        ("检测报告", "认证", "证书", "test report", "report number", "certificate", "certification"),
     ):
         penalty += 0.18
     return penalty
@@ -849,24 +1065,41 @@ def _asset_quality_flags(*, card: AssetCard) -> dict[str, Any]:
     compact_signal_text = re.sub(r"\s+", "", normalized_signal_text)
     logo_like = bool(LOGO_ASSET_PATTERN.search(normalized_signal_text) or LOGO_ASSET_PATTERN.search(compact_signal_text))
     low_information = bool(HARD_FRAGMENT_PATTERN.search(normalized_signal_text) or logo_like)
+    if _looks_like_visual_fragment_asset(metadata=card.metadata):
+        low_information = True
     partial_fragment = bool(PARTIAL_FRAGMENT_PATTERN.search(signal_text))
     complete_diagram = bool(COMPLETE_DIAGRAM_PATTERN.search(signal_text))
     summary_review_required = bool((summary or {}).get("review_required"))
     summary_confidence = _coerce_confidence((summary or {}).get("confidence"))
     low_confidence_summary = bool(summary) and summary_confidence > 0 and summary_confidence < 0.45
+    audit_status = str(card.metadata.get("asset_audit_status") or "").strip().lower()
+    quality_score = _coerce_confidence(card.metadata.get("asset_quality_score"))
+    if audit_status == "rejected":
+        low_information = True
 
-    if low_information and not logo_like and complete_diagram and summary_confidence >= 0.72 and not summary_review_required:
+    if (
+        low_information
+        and audit_status != "rejected"
+        and not logo_like
+        and complete_diagram
+        and summary_confidence >= 0.72
+        and not summary_review_required
+    ):
         low_information = False
     if complete_diagram and not low_information:
         partial_fragment = False
 
     return {
-        "low_information": low_information,
+        "low_information": low_information or audit_status == "rejected",
         "partial_fragment": partial_fragment and not low_information,
         "complete_diagram": complete_diagram,
         "summary_review_required": summary_review_required,
         "low_confidence_summary": low_confidence_summary,
         "summary_confidence": summary_confidence,
+        "asset_audit_status": audit_status or None,
+        "asset_quality_score": quality_score,
+        "audit_review_pending": audit_status == "review_pending",
+        "low_quality_score": bool(quality_score and quality_score < 0.55),
     }
 
 
@@ -907,8 +1140,17 @@ def _derive_visual_role(
     if asset.asset_type == "table":
         return "table_asset"
     combined = " ".join(item for item in (title, caption, context_before, context_after) if item)
-    if _looks_like_page_furniture_asset(metadata=metadata, text=combined):
+    strong_engineering_signal = _has_strong_engineering_visual_signal(metadata=metadata, text=combined)
+    if _looks_like_page_furniture_asset(metadata=metadata, text=combined) and not strong_engineering_signal:
         return "page_furniture"
+    if _looks_like_visual_fragment_asset(metadata=metadata):
+        return "asset_fragment"
+    if LAYOUT_ILLUSTRATION_PATTERN.search(combined):
+        return "layout_drawing"
+    if PRODUCT_PHOTO_PATTERN.search(combined):
+        return "product_photo"
+    if strong_engineering_signal:
+        return "engineering_figure"
     if metadata.get("visual_role"):
         return str(metadata["visual_role"])
     if FORMULA_VISUAL_PATTERN.search(combined):
@@ -916,6 +1158,28 @@ def _derive_visual_role(
     if ENGINEERING_VISUAL_PATTERN.search(combined):
         return "engineering_figure"
     return "reference_figure"
+
+
+def _has_strong_engineering_visual_signal(*, metadata: dict[str, Any], text: str) -> bool:
+    raw_width = metadata.get("width") or metadata.get("image_width") or metadata.get("pixel_width")
+    raw_height = metadata.get("height") or metadata.get("image_height") or metadata.get("pixel_height")
+    try:
+        image_width = int(raw_width or 0)
+        image_height = int(raw_height or 0)
+    except (TypeError, ValueError):
+        image_width = 0
+        image_height = 0
+
+    large_enough = (
+        image_width >= MIN_REUSABLE_FIGURE_DIMENSION * 3
+        and image_height >= MIN_REUSABLE_FIGURE_DIMENSION * 2
+        and image_width * image_height >= 120000
+    )
+    if not large_enough:
+        return False
+
+    normalized_text = unicodedata.normalize("NFKC", str(text or ""))
+    return bool(ENGINEERING_VISUAL_PATTERN.search(normalized_text) or COMPLETE_DIAGRAM_PATTERN.search(normalized_text))
 
 
 def _looks_like_page_furniture_asset(*, metadata: dict[str, Any], text: str) -> bool:
@@ -954,12 +1218,64 @@ def _looks_like_page_furniture_asset(*, metadata: dict[str, Any], text: str) -> 
     return (near_top or near_bottom) and narrow_band and (slim_band or small_area or wide_banner or small_image)
 
 
+def _looks_like_visual_fragment_asset(*, metadata: dict[str, Any]) -> bool:
+    raw_width = metadata.get("width") or metadata.get("image_width") or metadata.get("pixel_width")
+    raw_height = metadata.get("height") or metadata.get("image_height") or metadata.get("pixel_height")
+    try:
+        image_width = int(raw_width or 0)
+        image_height = int(raw_height or 0)
+    except (TypeError, ValueError):
+        image_width = 0
+        image_height = 0
+
+    if image_width > 0 and image_height > 0:
+        area = image_width * image_height
+        if min(image_width, image_height) < MIN_REUSABLE_FIGURE_DIMENSION:
+            return True
+        if area < MIN_REUSABLE_FIGURE_AREA and max(image_width, image_height) < MIN_REUSABLE_FIGURE_DIMENSION * 2:
+            return True
+
+    bbox = metadata.get("bbox") or {}
+    page_width = float(metadata.get("page_width") or 0)
+    page_height = float(metadata.get("page_height") or 0)
+    if not bbox or page_width <= 0 or page_height <= 0:
+        return False
+    try:
+        left = float(bbox.get("l") or 0.0)
+        right = float(bbox.get("r") or 0.0)
+        top = float(bbox.get("t") or 0.0)
+        bottom = float(bbox.get("b") or 0.0)
+    except (TypeError, ValueError):
+        return False
+
+    box_width = max(0.0, right - left)
+    box_height = max(0.0, top - bottom)
+    if box_width <= 0 or box_height <= 0:
+        return False
+    box_area = box_width * box_height
+    page_area = page_width * page_height
+    return box_area <= page_area * 0.005 and min(box_width, box_height) <= min(page_width, page_height) * 0.08
+
+
 def _derive_asset_type(*, asset: FigureAsset, visual_role: str | None) -> str:
     if asset.asset_type == "table":
         return "table"
     if visual_role == "formula_candidate":
         return "formula_candidate"
     return "figure"
+
+
+def _should_skip_unusable_asset_card(card: AssetCard) -> bool:
+    metadata = card.metadata or {}
+    if str(metadata.get("asset_audit_status") or "").strip().lower() == "rejected":
+        return True
+    if card.asset_type == "figure":
+        if card.visual_role in {"page_furniture", "asset_fragment", "text_fragment"}:
+            return True
+        return metadata.get("preserve_in_vector_db") is False
+    if card.asset_type == "table" and bool(metadata.get("storage_fallback")):
+        return not bool(metadata.get("raw_table_markdown") or metadata.get("table_profile"))
+    return False
 
 
 def _derive_review_required(
@@ -972,6 +1288,10 @@ def _derive_review_required(
     if bool(metadata.get("review_required")):
         return True
     if not bool(metadata.get("preserve_in_vector_db", True)):
+        return True
+    if str(metadata.get("asset_audit_status") or "").strip().lower() in {"review_pending", "rejected"}:
+        return True
+    if visual_role == "asset_fragment":
         return True
     if asset_type in {"table", "formula_candidate"}:
         return True
@@ -992,6 +1312,8 @@ def _derive_risk_level(
         return "high"
     if visual_role == "engineering_figure":
         return "medium"
+    if visual_role == "asset_fragment":
+        return "high"
     if review_required:
         return "medium"
     return "low"
@@ -1007,6 +1329,15 @@ def _keyword_overlap_boost(query: str, text: str) -> float:
         keywords.add(stripped_query)
     hits = sum(1 for keyword in keywords if keyword and keyword in normalized_text)
     return min(0.24, hits * 0.06)
+
+
+def _contains_any_token_compact(text: str, tokens: tuple[str, ...] | set[str]) -> bool:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    compact = re.sub(r"\s+", "", normalized)
+    return any(
+        token.casefold() in normalized or token.casefold().replace(" ", "") in compact
+        for token in tokens
+    )
 
 
 def _expected_type_boost(asset_type: str, expected_types: list[str]) -> float:
@@ -1058,6 +1389,8 @@ def _asset_visual_quality_bonus(
 ) -> float:
     quality_flags = _asset_quality_flags(card=card)
     bonus = 0.0
+    if quality_flags["asset_audit_status"] == "review_pending" or quality_flags["low_quality_score"]:
+        return 0.0
     normalized_expected_types = {str(item).lower() for item in expected_types}
     if card.asset_type == "figure" and normalized_expected_types.intersection({"figure", "diagram"}):
         bonus += 0.04

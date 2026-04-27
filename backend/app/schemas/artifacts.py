@@ -130,6 +130,7 @@ class SectionDraftRead(BaseModel):
     assumptions: list
     global_param_snapshot: dict
     recommended_assets: list = Field(default_factory=list)
+    asset_candidates: list = Field(default_factory=list)
     status: str
     validator_result: dict
     created_at: datetime

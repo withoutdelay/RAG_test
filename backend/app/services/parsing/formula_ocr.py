@@ -131,6 +131,12 @@ class FormulaOCRService:
 
             joined_text = self._asset_text(asset)
             visual_role = str(asset.meta.get("visual_role") or "")
+            if visual_role in {"asset_fragment", "text_fragment", "page_furniture", "product_photo"}:
+                continue
+            if str(asset.meta.get("asset_audit_status") or "").strip().lower() == "rejected":
+                continue
+            if asset.meta.get("preserve_in_vector_db") is False:
+                continue
             score = 0
             if visual_role == "engineering_figure":
                 score += 1

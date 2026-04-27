@@ -4,13 +4,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Activity, Database, Link as LinkIcon, Loader2, Search } from 'lucide-react';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import api, { getApiErrorMessage, isNotFoundError } from '@/lib/api';
-import { CaseCandidate, EvidenceBundle } from '@/lib/types';
+import { CaseCandidate, EvidenceBundle, JobAccepted, JobRead } from '@/lib/types';
 import { toast } from 'sonner';
 
 function buildCaseCandidateBreakdownText(candidate: CaseCandidate): string {
@@ -46,12 +47,46 @@ function buildEvidenceBreakdownText(evidence: EvidenceBundle['content']['results
   return parts.join(' / ');
 }
 
+const RETRIEVAL_JOB_POLL_INTERVAL_MS = 2000;
+const RETRIEVAL_JOB_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function normalizePollPath(nextPoll: string): string {
+  if (nextPoll.startsWith('/api/v1/')) {
+    return nextPoll.slice('/api/v1'.length);
+  }
+  return nextPoll;
+}
+
+function formatRetrievalProgress(job: JobRead): string {
+  const stage = job.output_ref?.progress?.stage;
+  if (job.status === 'queued') {
+    return 'Evidence retrieval queued. Waiting for backend worker...';
+  }
+  if (stage === 'resolving_requirement') {
+    return 'Resolving requirement card...';
+  }
+  if (stage === 'retrieving') {
+    return 'Searching historical evidence...';
+  }
+  if (job.status === 'running') {
+    return 'Evidence retrieval running...';
+  }
+  return `Evidence retrieval status: ${job.status}`;
+}
+
 export default function EvidencePage() {
   const params = useParams();
   const projectId = params.id as string;
   const [bundle, setBundle] = useState<EvidenceBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [retrieving, setRetrieving] = useState(false);
+  const [retrievalProgress, setRetrievalProgress] = useState<string | null>(null);
 
   const fetchEvidenceBundle = useCallback(async () => {
     try {
@@ -74,10 +109,37 @@ export default function EvidencePage() {
     }
   }, [fetchEvidenceBundle, projectId]);
 
+  const waitForRetrievalJob = useCallback(async (nextPoll: string): Promise<JobRead> => {
+    const pollPath = normalizePollPath(nextPoll);
+    const deadline = Date.now() + RETRIEVAL_JOB_POLL_TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+      const jobResponse = (await api.get(pollPath)) as { data: JobRead };
+      const job = jobResponse.data;
+      setRetrievalProgress(formatRetrievalProgress(job));
+
+      if (job.status === 'succeeded') {
+        return job;
+      }
+      if (job.status === 'failed') {
+        const detail = job.output_ref?.error || job.error_code || 'Evidence retrieval job failed';
+        throw new Error(String(detail));
+      }
+
+      await sleep(RETRIEVAL_JOB_POLL_INTERVAL_MS);
+    }
+
+    throw new Error('Evidence retrieval is still running after the local polling window. Refresh this page later.');
+  }, []);
+
   const handleRetrieve = async () => {
     setRetrieving(true);
+    setRetrievalProgress('Submitting evidence retrieval job...');
     try {
-      await api.post(`/projects/${projectId}/retrieve-evidence`, {});
+      const res = await api.post(`/projects/${projectId}/retrieve-evidence`, {});
+      const accepted = res.data as JobAccepted;
+      setRetrievalProgress(`Evidence retrieval queued: ${accepted.job_id}`);
+      await waitForRetrievalJob(accepted.next_poll);
       toast.success('Evidence retrieval completed');
       await fetchEvidenceBundle();
     } catch (error: unknown) {
@@ -86,6 +148,7 @@ export default function EvidencePage() {
         return;
       }
       toast.error(getApiErrorMessage(error, 'Error retrieving evidence'));
+      setRetrievalProgress(getApiErrorMessage(error, 'Evidence retrieval failed'));
     } finally {
       setRetrieving(false);
     }
@@ -111,6 +174,13 @@ export default function EvidencePage() {
         </Button>
       </div>
 
+      {retrievalProgress && (
+        <Alert>
+          {retrieving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
+          <AlertDescription>{retrievalProgress}</AlertDescription>
+        </Alert>
+      )}
+
       {loading ? (
         <div className="py-12 flex justify-center">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -123,7 +193,8 @@ export default function EvidencePage() {
             Generate a requirement card first, then search for supporting evidence.
           </p>
           <Button onClick={handleRetrieve} disabled={retrieving}>
-            <Database className="mr-2 h-4 w-4" /> Start Retrieval
+            {retrieving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Database className="mr-2 h-4 w-4" />}
+            {retrieving ? 'Retrieving...' : 'Start Retrieval'}
           </Button>
         </Card>
       ) : (

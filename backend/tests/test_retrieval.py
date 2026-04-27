@@ -19,6 +19,7 @@ from app.services.retrieval.asset_service import (
     _build_visual_retrieval_text,
     _compose_asset_score,
     _derive_visual_role,
+    _promote_source_section_asset_matches,
     _resolve_visual_query_key,
     _to_result,
 )
@@ -433,6 +434,7 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
                     "EMBEDDING_BACKEND": "sentence-transformers",
                     "EMBEDDING_MODEL": "BAAI/bge-large-zh-v1.5",
                     "EMBEDDING_LOCAL_FILES_ONLY": "true",
+                    "EMBEDDING_DEVICE": "cpu",
                 },
                 clear=False,
             ):
@@ -442,7 +444,7 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         get_settings.cache_clear()
 
         self.assertIs(embedder._model, mock_model)
-        mock_loader.assert_called_once_with("BAAI/bge-large-zh-v1.5", local_files_only=True)
+        mock_loader.assert_called_once_with("BAAI/bge-large-zh-v1.5", local_files_only=True, device="cpu")
 
     def test_asset_taxonomy_boost_prefers_main_circuit_figure(self) -> None:
         target = infer_target_taxonomy(
@@ -497,9 +499,9 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
             usage_mode="reference_only",
             review_required=False,
             page_no=1,
-            heading_path="4.2 电力工业电气设备质量检验测试中心检测报告",
-            title="检测报告",
-            display_title="检测报告",
+            heading_path="4.2 电 力 工业电气设备 质 量 检 验测试中 心检 测 报告",
+            title="电 力 工业电气设备 检 测 报告",
+            display_title="电 力 工业电气设备 检 测 报告",
             caption=None,
             source_ref=None,
             asset_uri="s3://asset",
@@ -703,6 +705,122 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         )
 
         self.assertGreater(boost, 0.3)
+
+    def test_asset_anchor_boost_matches_descendant_source_section_id(self) -> None:
+        card = AssetCard(
+            asset_card_id="asset:test",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="乌海建龙技术方案.docx",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=18,
+            heading_path="2.2 高压变频器主回路方案说明",
+            title="2.2 高压变频器主回路方案说明",
+            display_title="高压变频器主回路方案说明",
+            caption=None,
+            source_ref=None,
+            asset_uri="s3://asset",
+            preview_text="主回路采用一拖一输入输出隔离方案，一次原理如下图所示。",
+            retrieval_text="主回路 一次接线 QS1 QS2 QF M",
+            section_type="main_circuit_scheme",
+            equipment_type="vfd",
+            content_form="figure",
+            metadata={"sample_id": "sample-a", "source_section_id": "3.2.2"},
+        )
+
+        boost = _asset_anchor_boost(
+            card=card,
+            anchor_document_names=set(),
+            anchor_headings=[],
+            anchor_sample_ids={"sample-a"},
+            anchor_source_section_ids={"3.2"},
+        )
+
+        self.assertGreaterEqual(boost, 0.6)
+
+    def test_promote_source_section_asset_matches_recovers_image_marker_descendant_asset(self) -> None:
+        correct_asset_id = uuid4()
+        correct = AssetCard(
+            asset_card_id="asset:correct",
+            asset_id=correct_asset_id,
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="乌海建龙技术方案.docx",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=18,
+            heading_path="2.2 高压变频器主回路方案说明",
+            title="2.2 高压变频器主回路方案说明",
+            display_title="高压变频器主回路方案说明",
+            caption=None,
+            source_ref=None,
+            asset_uri="s3://correct",
+            preview_text="主回路采用一拖一输入输出隔离方案，一次原理如下图所示。",
+            retrieval_text="主回路 一次接线 QS1 QS2 QF M",
+            section_type="main_circuit_scheme",
+            equipment_type="vfd",
+            content_form="figure",
+            metadata={
+                "sample_id": "sample-a",
+                "source_section_id": "3.2.2",
+                "asset_audit_status": "review_pending",
+                "asset_quality_score": 0.52,
+            },
+        )
+        unrelated = AssetCard(
+            asset_card_id="asset:unrelated",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="其他方案.docx",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="low",
+            usage_mode="reference_only",
+            review_required=False,
+            page_no=3,
+            heading_path="培训计划",
+            title="培训计划",
+            display_title="培训计划",
+            caption=None,
+            source_ref=None,
+            asset_uri="s3://unrelated",
+            preview_text="培训安排。",
+            retrieval_text="培训计划",
+            section_type="service_support",
+            equipment_type="generic",
+            content_form="figure",
+            metadata={"sample_id": "sample-b", "source_section_id": "5.5"},
+        )
+
+        promoted = _promote_source_section_asset_matches(
+            scored_cards=[
+                (0.95, unrelated, {"final": 0.95}, ["high_text_score"]),
+                (0.2, correct, {"final": 0.2}, ["low_text_score"]),
+            ],
+            anchor_document_names={"乌海建龙技术方案.docx"},
+            anchor_sample_ids={"sample-a"},
+            anchor_image_document_names={"乌海建龙技术方案.docx"},
+            anchor_image_sample_ids={"sample-a"},
+            anchor_image_source_section_ids={"3.2"},
+        )
+
+        self.assertEqual([item[1].asset_id for item in promoted], [correct_asset_id])
+        self.assertEqual(promoted[0][2]["source_section_relation"], "descendant")
 
     def test_asset_summary_boost_prefers_semantic_match(self) -> None:
         card = AssetCard(
@@ -929,6 +1047,25 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         )
 
         self.assertEqual(role, "page_furniture")
+
+    def test_derive_visual_role_keeps_large_named_diagram_as_engineering_figure(self) -> None:
+        role = _derive_visual_role(
+            asset=SimpleNamespace(asset_type="figure", reuse_mode="reference_only"),
+            metadata={
+                "visual_role": "page_furniture",
+                "bbox": {"l": 83.78, "r": 544.68, "b": 517.33, "t": 689.26},
+                "page_width": 595.32,
+                "page_height": 841.92,
+                "width": 921,
+                "height": 344,
+            },
+            title="5.1.1 变频器系统示意图",
+            caption=None,
+            context_before="5.1 变频器配置 | 5.1.1 变频器系统示意图",
+            context_after="5.1.2 变频器主要数据 | 版本",
+        )
+
+        self.assertEqual(role, "engineering_figure")
 
     def test_build_visual_retrieval_text_prefers_semantic_summary_fields(self) -> None:
         visual_text = _build_visual_retrieval_text(

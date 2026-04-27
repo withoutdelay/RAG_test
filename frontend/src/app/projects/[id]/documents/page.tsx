@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
 import { UploadCloud, File, CheckCircle2, AlertCircle, XCircle, RefreshCw, Loader2 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -19,7 +20,7 @@ export default function DocumentsPage() {
   const [historyLibraryStatus, setHistoryLibraryStatus] = useState<HistoryLibraryRefreshStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
-  const [docType, setDocType] = useState<'rfp' | 'historical_proposal'>('historical_proposal');
+  const docType = 'rfp';
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchDocuments = useCallback(async () => {
@@ -61,6 +62,17 @@ export default function DocumentsPage() {
     return () => window.clearTimeout(timer);
   }, [fetchHistoryLibraryStatus, historyLibraryStatus]);
 
+  useEffect(() => {
+    if (!documents.some((document) => document.parse_status === 'parsing' || document.parse_status === 'pending')) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void fetchDocuments();
+      void fetchHistoryLibraryStatus();
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [documents, fetchDocuments, fetchHistoryLibraryStatus]);
+
   const handleUploadClick = () => {
     fileInputRef.current?.click();
   };
@@ -91,19 +103,18 @@ export default function DocumentsPage() {
       if (files.length === 1 && lastAccepted?.message) {
         if (lastAccepted.parse_status === 'parse_insufficient') {
           toast.warning(lastAccepted.message);
+        } else if (lastAccepted.parse_status === 'parsing' || lastAccepted.parse_status === 'pending') {
+          toast.info(lastAccepted.message);
         } else {
           toast.success(lastAccepted.message);
         }
       } else {
-        toast.success(`Imported ${successCount}/${files.length} documents`);
+        toast.info(`Queued ${successCount}/${files.length} documents for parsing`);
         if (parseInsufficientCount > 0) {
           toast.warning(
             `${parseInsufficientCount} document(s) were saved but excluded from the historical library because the parse quality was insufficient.`
           );
         }
-      }
-      if (docType === 'historical_proposal' && successCount > parseInsufficientCount) {
-        toast.info('Historical library refresh, AI Wiki compilation, and visual indexing are running in the background.');
       }
       await fetchHistoryLibraryStatus();
       await fetchDocuments();
@@ -324,28 +335,13 @@ export default function DocumentsPage() {
         <div>
           <h2 className="text-2xl font-bold">Documents</h2>
           <p className="text-muted-foreground mt-1">
-            Upload RFP documents or batch import historical technical proposals.
+            Upload current project RFP documents. Historical proposals are managed from the library audit page.
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center rounded-md border p-1">
-            <Button
-              variant={docType === 'historical_proposal' ? 'default' : 'ghost'}
-              size="sm"
-              onClick={() => setDocType('historical_proposal')}
-              disabled={uploading}
-            >
-              Historical Library
-            </Button>
-            <Button
-              variant={docType === 'rfp' ? 'default' : 'ghost'}
-              size="sm"
-              onClick={() => setDocType('rfp')}
-              disabled={uploading}
-            >
-              RFP
-            </Button>
-          </div>
+          <Link href="/library/materials" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+            Historical Library
+          </Link>
           <input 
             type="file" 
             ref={fileInputRef} 
@@ -356,7 +352,7 @@ export default function DocumentsPage() {
           />
           <Button onClick={handleUploadClick} disabled={uploading}>
             {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
-            {uploading ? 'Uploading...' : docType === 'historical_proposal' ? 'Import Documents' : 'Upload Document'}
+            {uploading ? 'Uploading...' : 'Upload RFP'}
           </Button>
         </div>
       </div>

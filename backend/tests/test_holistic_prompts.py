@@ -34,6 +34,7 @@ class HolisticPromptTests(unittest.TestCase):
         self.assertIn("[[ASSET:FIGURE:asset-001]]", user_prompt)
         self.assertNotIn("用 HTML 注释标注修改处", system_prompt)
         self.assertIn("不要输出解释说明、审查报告、修改记录或 HTML 注释", system_prompt)
+        self.assertIn("不得在终审阶段把照片、布局图、文字截图、碎片图或待确认资产改写成确定的主接线图", system_prompt)
 
 
 if __name__ == "__main__":

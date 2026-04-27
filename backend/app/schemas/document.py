@@ -28,6 +28,8 @@ class DocumentUploadAccepted(BaseModel):
     filename: str
     parse_status: str
     message: str
+    job_id: UUID | None = None
+    next_poll: str | None = None
 
 
 class HistoryLibraryRefreshPipelineStatusRead(BaseModel):

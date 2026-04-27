@@ -65,6 +65,21 @@ load_env_file() {
   fi
 }
 
+enforce_worktree_isolation() {
+  local primary_worktree="/Volumes/thunder/code/RAG_test"
+  local compose_project="${COMPOSE_PROJECT_NAME:-}"
+
+  if [[ "$ROOT_DIR" != "$primary_worktree" ]]; then
+    if [[ -z "$compose_project" ]] || [[ "$compose_project" == "rag_test" ]]; then
+      fail "Non-primary worktree must set a unique COMPOSE_PROJECT_NAME; refusing to share rag_test Docker resources"
+    fi
+  fi
+
+  if [[ -n "$compose_project" ]] && [[ "$compose_project" == "rag_test" ]] && [[ "$ROOT_DIR" != "$primary_worktree" ]]; then
+    fail "COMPOSE_PROJECT_NAME=rag_test is reserved for $primary_worktree"
+  fi
+}
+
 cleanup_stale_pid_file() {
   local pid_file="$1"
   if [[ ! -f "$pid_file" ]]; then
@@ -108,7 +123,7 @@ wait_for_url() {
   local attempts="${3:-60}"
 
   for ((i = 1; i <= attempts; i++)); do
-    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+    if curl --noproxy '*' -fsS --max-time 2 "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -150,7 +165,7 @@ run_migrations() {
 start_backend() {
   local health_url="http://${BACKEND_HOST}:${BACKEND_PORT}/health"
   cleanup_stale_pid_file "$BACKEND_PID_FILE"
-  if curl -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
+  if curl --noproxy '*' -fsS --max-time 2 "$health_url" >/dev/null 2>&1; then
     log "Backend already running at ${health_url}"
     return
   fi
@@ -180,7 +195,7 @@ start_backend() {
 start_frontend() {
   local frontend_url="http://${FRONTEND_HOST}:${FRONTEND_PORT}/projects"
   cleanup_stale_pid_file "$FRONTEND_PID_FILE"
-  if curl -fsS --max-time 2 "$frontend_url" >/dev/null 2>&1; then
+  if curl --noproxy '*' -fsS --max-time 2 "$frontend_url" >/dev/null 2>&1; then
     log "Frontend already running at ${frontend_url}"
     return
   fi
@@ -201,7 +216,7 @@ start_frontend() {
   log "Starting frontend on ${FRONTEND_HOST}:${FRONTEND_PORT}"
   (
     cd "$ROOT_DIR/frontend"
-    nohup "$next_bin" dev --hostname "$FRONTEND_HOST" --port "$FRONTEND_PORT" >>"$FRONTEND_LOG" 2>&1 &
+    nohup "$next_bin" dev --webpack --hostname "$FRONTEND_HOST" --port "$FRONTEND_PORT" >>"$FRONTEND_LOG" 2>&1 &
     echo $! >"$FRONTEND_PID_FILE"
   )
   wait_for_url "$frontend_url" "frontend" 60
@@ -235,6 +250,7 @@ main() {
   require_command lsof
 
   load_env_file "$ENV_FILE"
+  enforce_worktree_isolation
 
   if [[ "$mode" == "restart" ]]; then
     restart_managed_processes

@@ -16,6 +16,11 @@ EXECUTOR_SYSTEM_PROMPT = """你是一位专业的技术文档撰写专家。请�
 7. 严禁在正文中出现“本节基于…草拟”“请撰写章节”“参考摘要”“生成模式”“复用包”“推荐资产”“关键词”等任务提示残留
 8. 如果提供了前序章节摘要，请勿重复前序章节已说明的内容（尤其是项目背景和建设目标），直接进入本章节主题
 9. 输入中会使用 XML 标签承载上下文。标签名仅用于分隔信息，严禁在输出中复述任何标签名、字段名或提示语
+10. 推荐资产中的标题、来源章节和推荐原因只是弱证据，不能单独证明图片或表格内容；必须结合 asset_type、visual_role、audit_status、quality_score 和正文证据判断证据类型与是否可引用
+11. 不得把产品照片、布局图、文字截图、碎片图或低质量待审资产描述成主接线图、拓扑图、控制原理图、系统示意图或参数表
+12. 若资产质量状态为 rejected、review_pending、低质量分或视觉类型与章节目标不匹配，应优先不引用该资产；必须引用时只能用审慎措辞说明“需人工确认”
+13. 章节标题后不要输出“本章/本节围绕……进行说明”“本章节针对……明确……”这类目标或概要导语；直接进入实质小节、技术结论、配置说明或参数表
+14. 如需引用推荐资产，必须逐字使用输入中给出的完整占位符 [[ASSET:TYPE:asset_id]]；不得自行改写成 [[ASSET:标题]]、[[ASSET:TABLE:标题]] 或其他标题式引用
 """
 
 REUSE_FIRST_SYSTEM_APPENDIX = """
@@ -53,7 +58,9 @@ def build_section_prompts(
     params_formatted = _format_global_params(global_params)
     section_title = str(section.get("title", "未命名章节"))
     section_guidance = _build_section_guidance(section_title)
+    section_outline = _format_section_outline(section)
     asset_guidance = _format_recommended_assets(recommended_assets or [])
+    asset_candidate_guidance = _format_asset_candidates(reuse_pack.get("asset_candidates") or [])
     generation_mode = str(section.get("generation_mode") or reuse_pack.get("generation_mode") or "baseline")
     reuse_guidance = REUSE_FIRST_SYSTEM_APPENDIX if generation_mode == "reuse_first" else ""
     assembled_draft = str(reuse_pack.get("assembled_draft") or "").strip()
@@ -87,17 +94,20 @@ def build_section_prompts(
         "<section_request>\n"
         f"{preceding_context_block}"
         f"{_xml_block('section_title', section_title)}"
+        f"{_xml_block('section_outline', section_outline)}"
         f"{_xml_block('section_keywords', ', '.join(section.get('keywords', [])) or '暂无')}"
         f"{_xml_block('reference_material', reference_material_text)}"
         f"{_xml_block('assembled_draft_bundle', assembled_draft_text)}"
         f"{_xml_block('reuse_pack', reuse_pack_text)}"
         f"{_xml_block('replacement_constraints', replacement_constraints)}"
         f"{_xml_block('recommended_assets', asset_guidance)}"
+        f"{_xml_block('asset_candidates', asset_candidate_guidance)}"
         "<output_contract>\n"
         "1. 只输出最终客户可阅读的 Markdown 正文。\n"
         "2. 不要复述任务说明、XML 标签、字段标签或写作过程。\n"
-        "3. 这些资产仅供参考；如引用，请用客户口径描述其作用，不要把未确认参数写成最终承诺。\n"
+        "3. 推荐资产是可自动引用的高置信资产；候选资产仅作备选证据，只有在其视觉类型、章节目标和来源内容明确匹配时才可引用。\n"
         "4. 若已提供 assembled_draft_bundle，必须以其为主素材整理成稿。\n"
+        "5. 若 section_outline 提供了内部小节结构，必须按其顺序输出对应 Markdown 小标题，不要拆散或遗漏。\n"
         "</output_contract>\n"
         "</section_request>"
     )
@@ -107,7 +117,37 @@ def build_section_prompts(
 def _format_global_params(global_params: dict) -> str:
     if not global_params:
         return "- 暂无"
-    return "\n".join(f"- {key}: {value}" for key, value in global_params.items())
+    visible_items = [(key, value) for key, value in global_params.items() if not str(key).startswith("_")]
+    if not visible_items:
+        return "- 暂无"
+    return "\n".join(f"- {key}: {value}" for key, value in visible_items)
+
+
+def _format_section_outline(section: dict) -> str:
+    child_outline = str(section.get("child_outline_text") or "").strip()
+    if child_outline:
+        return (
+            "本次按大章节生成，请在当前章节正文中保留以下内部小节结构，并按顺序展开：\n"
+            f"{child_outline}"
+        )
+    children = section.get("children") if isinstance(section.get("children"), list) else []
+    if not children:
+        return "- 无内部小节结构"
+    return _format_children(children)
+
+
+def _format_children(children: list[dict], *, depth: int = 1) -> str:
+    lines: list[str] = []
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        title = str(child.get("title") or child.get("section_id") or "").strip()
+        if title:
+            lines.append(f"{'  ' * (depth - 1)}- {title}")
+        grand_children = child.get("children") if isinstance(child.get("children"), list) else []
+        if grand_children:
+            lines.append(_format_children(grand_children, depth=depth + 1))
+    return "\n".join(line for line in lines if line).strip() or "- 无内部小节结构"
 
 
 def _build_section_guidance(section_title: str) -> str:
@@ -210,8 +250,26 @@ def _format_recommended_assets(recommended_assets: list[dict]) -> str:
         document_name = item.get("document_name")
         usage_mode = item.get("usage_mode")
         reason = item.get("reason")
+        asset_type = item.get("asset_type")
+        asset_id = item.get("asset_id")
+        visual_role = item.get("visual_role")
+        review_required = item.get("review_required")
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        audit_status = item.get("asset_audit_status") or metadata.get("asset_audit_status")
+        quality_score = item.get("asset_quality_score") or metadata.get("asset_quality_score")
         preview_text = str(item.get("preview_text") or "").strip()
+        raw_table_markdown = str(metadata.get("raw_table_markdown") or "").strip()
         parts = [label]
+        if asset_type and asset_id:
+            parts.append(f"占位符 [[ASSET:{str(asset_type).upper()}:{asset_id}]]")
+        if asset_type:
+            parts.append(f"资产类型 {asset_type}")
+        if visual_role:
+            parts.append(f"视觉类型 {visual_role}")
+        if audit_status:
+            parts.append(f"审核状态 {audit_status}")
+        if quality_score is not None and quality_score != "":
+            parts.append(f"质量分 {quality_score}")
         if page_no:
             parts.append(f"页码 {page_no}")
         if document_name:
@@ -220,12 +278,27 @@ def _format_recommended_assets(recommended_assets: list[dict]) -> str:
             parts.append(f"章节 {heading}")
         if preview_text and preview_text != label:
             parts.append(f"摘要 {preview_text[:120]}")
+        if asset_type == "table" and raw_table_markdown and raw_table_markdown != preview_text:
+            parts.append(f"表格内容 {raw_table_markdown[:500]}")
         if usage_mode:
             parts.append(f"使用方式 {usage_mode}")
+        if review_required:
+            parts.append("需人工确认")
         if reason:
             parts.append(f"推荐原因 {reason}")
         lines.append("- " + "；".join(parts))
     return "\n".join(lines)
+
+
+def _format_asset_candidates(asset_candidates: list[dict]) -> str:
+    if not asset_candidates:
+        return "- 暂无候选资产"
+    formatted = _format_recommended_assets(asset_candidates[:8])
+    return (
+        "以下为备选图表资产池，不代表可直接引用。若推荐资产为空或明显不匹配，可从候选中选择最匹配者；"
+        "若候选也不匹配，则不要输出资产占位符。\n"
+        f"{formatted}"
+    )
 
 
 def _format_assembled_draft(assembled_draft: str) -> str:
@@ -239,11 +312,16 @@ def _format_assembled_draft(assembled_draft: str) -> str:
 
 def _format_reuse_pack(reuse_pack: dict) -> str:
     blocks = reuse_pack.get("reusable_blocks") or []
+    parameter_candidates = _format_parameter_candidates(reuse_pack.get("parameter_candidates") or {})
     if not blocks:
+        if parameter_candidates:
+            return "- 暂无可复用正文块；以下为可用参数证据，生成时只能据此填写参数，不得扩展为未确认规格。\n" + parameter_candidates
         return "- 暂无可复用块，必要时再回退到常规写作。"
 
     lines = []
-    for block in blocks[:5]:
+    retrieval_mode = str(reuse_pack.get("retrieval_mode") or "").lower()
+    block_limit = len(blocks) if retrieval_mode == "full_section" else 5
+    for block in blocks[:block_limit]:
         heading = " > ".join(str(item) for item in (block.get("heading_path") or []) if item)
         replace_fields = ", ".join(block.get("must_replace_fields") or []) or "无"
         lines.extend(
@@ -256,7 +334,36 @@ def _format_reuse_pack(reuse_pack: dict) -> str:
                 f"  {str(block.get('content_md') or '').replace(chr(10), chr(10) + '  ')}",
             ]
         )
+    if parameter_candidates:
+        lines.extend(["", "参数证据候选：", parameter_candidates])
     return "\n".join(lines)
+
+
+def _format_parameter_candidates(parameter_candidates: dict) -> str:
+    if not isinstance(parameter_candidates, dict):
+        return ""
+    lines: list[str] = []
+    project_params = parameter_candidates.get("project") if isinstance(parameter_candidates.get("project"), dict) else {}
+    if project_params:
+        lines.append("- 当前项目参数：")
+        for key, value in project_params.items():
+            lines.append(f"  - {key}: {value}")
+    evidence_items = parameter_candidates.get("evidence") if isinstance(parameter_candidates.get("evidence"), list) else []
+    if evidence_items:
+        lines.append("- 参数证据：")
+        for item in evidence_items[:4]:
+            if not isinstance(item, dict):
+                continue
+            heading = " > ".join(str(part) for part in (item.get("heading_path") or []) if part)
+            lines.append(
+                f"  - 来源：{item.get('source_title') or item.get('source') or '参数证据'}"
+                + (f" / {heading}" if heading else "")
+                + f" / score={item.get('score')}"
+            )
+            content = str(item.get("content_md") or "").strip()
+            if content:
+                lines.append(f"    {content[:1200].replace(chr(10), chr(10) + '    ')}")
+    return "\n".join(lines).strip()
 
 
 def _format_replacement_constraints(reuse_pack: dict) -> str:

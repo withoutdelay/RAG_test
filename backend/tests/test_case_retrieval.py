@@ -4922,6 +4922,59 @@ class CaseRetrievalTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["source_section_id"], "3.2.4")
 
+    def test_retrieve_section_blocks_returns_whole_source_section_in_source_order(self) -> None:
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[],
+            block_entries=[
+                {
+                    "sample_id": "case-a",
+                    "file_name": "环冷风机方案.docx",
+                    "library_track": "pilot_main",
+                    "source_section_id": "3.2",
+                    "section_path": "第三章 总体方案 > 3.2 高压变频系统总体方案 > 3.2.2 控制接口",
+                    "heading_path": "第三章 总体方案 > 3.2 高压变频系统总体方案 > 3.2.2 控制接口",
+                    "chunk_index": 12,
+                    "content": "第二个来源块。",
+                },
+                {
+                    "sample_id": "case-a",
+                    "file_name": "环冷风机方案.docx",
+                    "library_track": "pilot_main",
+                    "source_section_id": "3.2",
+                    "section_path": "第三章 总体方案 > 3.2 高压变频系统总体方案",
+                    "heading_path": "第三章 总体方案 > 3.2 高压变频系统总体方案",
+                    "chunk_index": 11,
+                    "content": "第一个来源块。",
+                },
+                {
+                    "sample_id": "case-a",
+                    "file_name": "环冷风机方案.docx",
+                    "library_track": "pilot_main",
+                    "source_section_id": "4.1",
+                    "section_path": "第四章 培训计划",
+                    "heading_path": "第四章 培训计划",
+                    "chunk_index": 13,
+                    "content": "不应进入 3.2。",
+                },
+            ],
+        )
+        try:
+            service = CaseLibraryService(outline_library_path=outline_path, block_library_path=block_path)
+            results = service.retrieve_section_blocks(
+                sample_id="case-a",
+                file_name="环冷风机方案.docx",
+                section_id="3.2",
+                section_path="第三章 总体方案 > 3.2 高压变频系统总体方案",
+                top_k=10,
+                base_score=0.88,
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual([item["content"] for item in results], ["第一个来源块。", "第二个来源块。"])
+        self.assertEqual(results[0]["score"], 0.88)
+        self.assertIn("full_section_source_block", results[0]["reason"])
+
     def test_retrieve_blocks_auto_scopes_to_specific_section_candidates(self) -> None:
         outline_path, block_path, temp_dir = self._write_library(
             outline_entries=[
@@ -5208,6 +5261,7 @@ class CaseRetrievalTests(unittest.TestCase):
                         ): 0.92,
                     }
                 ),
+                section_scope_semantic_enabled=True,
             )
             results = service.retrieve_sections(
                 query="系统架构说明",
@@ -5340,6 +5394,7 @@ class CaseRetrievalTests(unittest.TestCase):
                         ("总体说明\n系统架构说明", section_b_text): 0.15,
                     }
                 ),
+                section_scope_rerank_enabled=True,
             )
             results = service.retrieve_sections(
                 query="系统架构说明",

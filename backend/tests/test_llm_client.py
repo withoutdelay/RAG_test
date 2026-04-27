@@ -201,6 +201,8 @@ class LLMClientTests(unittest.TestCase):
                 "QWEN_API_KEY": "qwen-key",
                 "QWEN_BASE_URL": "https://dashscope.test/compatible-mode/v1",
                 "QWEN_MODEL": "qwen-plus",
+                "LLM_RETRY_ATTEMPTS": "1",
+                "LLM_RETRY_BACKOFF_SECONDS": "0",
             },
             clear=False,
         ):
@@ -361,17 +363,17 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(response.content, '{"ok":true}')
         self.assertEqual(response.model_used, "gpt-4o-mini")
 
-    def test_live_client_uses_openai_compatible_endpoint_when_only_openai_configured(self) -> None:
+    def test_live_client_uses_chat_completions_for_openai_compatible_relay_by_default(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             payload = json.loads(request.content.decode("utf-8"))
-            self.assertEqual(request.url.host, "relay.test")
-            self.assertEqual(request.url.path, "/v1/responses")
+            self.assertEqual(request.url.host, "dashscope.test")
+            self.assertEqual(request.url.path, "/compatible-mode/v1/chat/completions")
             self.assertEqual(request.headers["Authorization"], "Bearer relay-key")
-            self.assertEqual(payload["model"], "gpt-4o-mini")
-            self.assertTrue(payload["stream"])
-            self.assertEqual(payload["text"]["format"]["type"], "json_schema")
-            self.assertFalse(payload["text"]["format"]["schema"]["additionalProperties"])
-            nested_items = payload["text"]["format"]["schema"]["properties"]["sections"]["items"]
+            self.assertEqual(payload["model"], "qwen-plus")
+            self.assertNotIn("stream", payload)
+            self.assertEqual(payload["response_format"]["type"], "json_schema")
+            self.assertFalse(payload["response_format"]["json_schema"]["schema"]["additionalProperties"])
+            nested_items = payload["response_format"]["json_schema"]["schema"]["properties"]["sections"]["items"]
             self.assertEqual(
                 nested_items["required"],
                 ["index", "title", "subsections"],
@@ -380,16 +382,22 @@ class LLMClientTests(unittest.TestCase):
                 nested_items["properties"]["subsections"]["items"]["required"],
                 ["index", "title"],
             )
-            result_text = '{"title":"结构化摘要","sections":[{"index":1,"title":"项目概述","subsections":[{"index":1,"title":"背景"}]}]}'
-            stream_body = (
-                "event: response.created\n"
-                f"data: {json.dumps({'type': 'response.created', 'response': {'id': 'resp-openai', 'model': 'gpt-4o-mini'}}, ensure_ascii=False)}\n\n"
-                "event: response.output_text.delta\n"
-                f"data: {json.dumps({'type': 'response.output_text.delta', 'delta': result_text}, ensure_ascii=False)}\n\n"
-                "event: response.completed\n"
-                f"data: {json.dumps({'type': 'response.completed', 'response': {'id': 'resp-openai', 'model': 'gpt-4o-mini', 'usage': {'input_tokens': 14, 'output_tokens': 5, 'total_tokens': 19}}}, ensure_ascii=False)}\n\n"
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-qwen",
+                    "model": "qwen-plus",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": '{"title":"结构化摘要","sections":[{"index":1,"title":"项目概述","subsections":[{"index":1,"title":"背景"}]}]}',
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 14, "completion_tokens": 5, "total_tokens": 19},
+                },
             )
-            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=stream_body)
 
         with patch.dict(
             os.environ,
@@ -401,8 +409,9 @@ class LLMClientTests(unittest.TestCase):
                 "AZURE_OPENAI_ENDPOINT": "",
                 "AZURE_OPENAI_DEPLOYMENT": "",
                 "OPENAI_API_KEY": "relay-key",
-                "OPENAI_BASE_URL": "https://relay.test",
-                "OPENAI_MODEL": "gpt-4o-mini",
+                "OPENAI_BASE_URL": "https://dashscope.test/compatible-mode/v1",
+                "OPENAI_MODEL": "qwen-plus",
+                "OPENAI_API_STYLE": "auto",
             },
             clear=False,
         ):
@@ -451,7 +460,7 @@ class LLMClientTests(unittest.TestCase):
             response.content,
             '{"title":"结构化摘要","sections":[{"index":1,"title":"项目概述","subsections":[{"index":1,"title":"背景"}]}]}',
         )
-        self.assertEqual(response.model_used, "gpt-4o-mini")
+        self.assertEqual(response.model_used, "qwen-plus")
 
     def test_live_provider_streams_sse_chunks(self) -> None:
         stream_body = (
@@ -526,6 +535,9 @@ class LLMClientTests(unittest.TestCase):
                 "OPENAI_API_KEY": "relay-key",
                 "OPENAI_BASE_URL": "https://relay.test",
                 "OPENAI_MODEL": "gpt-4.1-mini",
+                "OPENAI_API_STYLE": "responses",
+                "VISION_LLM_API_KEY": "",
+                "VISION_LLM_BASE_URL": "",
                 "GATEWAY_MASKING_ENABLED": "false",
             },
             clear=False,
@@ -571,6 +583,76 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(user_content[1]["detail"], "low")
         self.assertIn('"visual_role":"page_furniture"', response.content)
 
+    def test_live_client_routes_image_asset_tasks_to_dedicated_vision_model(self) -> None:
+        seen_hosts: list[str] = []
+        seen_payloads: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_hosts.append(str(request.url.host))
+            payload = json.loads(request.content.decode("utf-8"))
+            seen_payloads.append(payload)
+            self.assertEqual(request.url.host, "vision.test")
+            self.assertEqual(request.url.path, "/v1/chat/completions")
+            self.assertEqual(payload["model"], "vision-model")
+            user_content = payload["messages"][1]["content"]
+            self.assertEqual(user_content[1]["type"], "image_url")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-vision",
+                    "model": "vision-model",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": '{"items":[{"candidate_index":0,"visual_role":"product_photo","confidence":0.94,"reason":"photo","title_hint":"产品照片"}]}',
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 14, "completion_tokens": 5, "total_tokens": 19},
+                },
+            )
+
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_PROVIDER_BACKEND": "live",
+                "DEEPSEEK_API_KEY": "",
+                "DOUBAO_API_KEY": "",
+                "AZURE_OPENAI_API_KEY": "",
+                "AZURE_OPENAI_ENDPOINT": "",
+                "AZURE_OPENAI_DEPLOYMENT": "",
+                "OPENAI_API_KEY": "",
+                "OPENAI_BASE_URL": "",
+                "QWEN_API_KEY": "qwen-key",
+                "QWEN_BASE_URL": "https://dashscope.test/compatible-mode/v1",
+                "QWEN_MODEL": "qwen-plus",
+                "VISION_LLM_API_KEY": "vision-key",
+                "VISION_LLM_BASE_URL": "https://vision.test/v1",
+                "VISION_LLM_MODEL": "vision-model",
+                "VISION_LLM_API_STYLE": "chat_completions",
+                "GATEWAY_MASKING_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            provider = HTTPChatCompletionsProvider(transport=httpx.MockTransport(handler))
+            client = self._make_client(provider)
+            response = asyncio.run(
+                client.invoke(
+                    LLMRequest(
+                        task_type=TaskType.ASSET_REVIEW,
+                        system_prompt="请输出 JSON。",
+                        user_prompt="请审核图片资产。",
+                        input_images=[LLMInputImage(image_url="data:image/png;base64,ZmFrZQ==", detail="low")],
+                    )
+                )
+            )
+
+        self.assertEqual(seen_hosts, ["vision.test"])
+        self.assertEqual(seen_payloads[0]["model"], "vision-model")
+        self.assertIn('"visual_role":"product_photo"', response.content)
+
     def test_live_provider_retries_retryable_responses_failure_once(self) -> None:
         calls = 0
 
@@ -603,6 +685,7 @@ class LLMClientTests(unittest.TestCase):
                 "OPENAI_API_KEY": "relay-key",
                 "OPENAI_BASE_URL": "https://relay.test",
                 "OPENAI_MODEL": "gpt-4o-mini",
+                "OPENAI_API_STYLE": "responses",
                 "LLM_RETRY_ATTEMPTS": "1",
                 "LLM_RETRY_BACKOFF_SECONDS": "0",
             },
@@ -652,6 +735,7 @@ class LLMClientTests(unittest.TestCase):
                 "OPENAI_API_KEY": "relay-key",
                 "OPENAI_BASE_URL": "https://relay.test",
                 "OPENAI_MODEL": "gpt-4o-mini",
+                "OPENAI_API_STYLE": "responses",
                 "LLM_STREAM_TIMEOUT_SECONDS": "0.01",
                 "LLM_RETRY_ATTEMPTS": "0",
                 "LLM_RETRY_BACKOFF_SECONDS": "0",

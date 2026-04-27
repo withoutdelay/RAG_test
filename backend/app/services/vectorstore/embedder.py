@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 
@@ -22,6 +23,7 @@ class Embedder:
             self.dimension = settings.embedding_dimension
             self.model_name = settings.embedding_model
             self.local_files_only = settings.embedding_local_files_only
+            self.device = settings.embedding_device
         else:
             self.backend_mode = os.getenv("EMBEDDING_BACKEND", "fallback")
             self.dimension = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
@@ -32,6 +34,7 @@ class Embedder:
                 "no",
                 "off",
             }
+            self.device = os.getenv("EMBEDDING_DEVICE", "cpu")
         self._model = None
         self.backend_name = "fallback"
 
@@ -53,7 +56,7 @@ class Embedder:
         contract for local development.
         """
         if self._model is not None:
-            vector = self._model.encode(text, normalize_embeddings=True)
+            vector = await asyncio.to_thread(self._model.encode, text, normalize_embeddings=True)
             return [float(value) for value in vector.tolist()]
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         seed = list(digest) * ((self.dimension // len(digest)) + 1)
@@ -70,7 +73,8 @@ class Embedder:
                 raise RuntimeError("sentence-transformers backend requested with fallback model name")
             return None
         try:
-            return SentenceTransformer(self.model_name, local_files_only=self.local_files_only)
+            device = str(self.device or "cpu").strip() or "cpu"
+            return SentenceTransformer(self.model_name, local_files_only=self.local_files_only, device=device)
         except Exception:
             if strict:
                 raise

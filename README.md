@@ -282,9 +282,9 @@ backend/app/services/composition/section_service.py
 5. 补充邻近 block，但优先保持在同章节或同章节族内。
 6. 调用 `AssetRetrievalService` 回填图、表、公式资产。
 7. 生成 `reuse_pack`，包含 reusable blocks、recommended assets、参数候选、禁用词、替换提示、风险标记。
-8. 根据 token 预算选择装配模式：
-   - `full_section`：高置信、整章可控时，把更完整的历史章节材料提供给 LLM。
-   - `section_pack`：默认模式，提供候选章节摘要、精选 block 和必要资产。
+8. 根据 `SECTION_REUSE_CONTEXT_MODE` 选择装配模式：
+   - `full_section`：MVP 默认优先模式；高置信命中来源章节时，把同源章节复用块按原文顺序提供给 LLM。
+   - `section_pack`：保守模式，提供候选章节摘要、精选 block 和必要资产。
    - `baseline_fallback`：复用证据不足时，退回普通生成。
 9. 先组装可复用材料，再强制走一次 LLM 成稿，避免只复制旧段落或只返回拼接内容。
 10. 写入 `SectionDraft.content_md`、`citation_refs`、`recommended_assets`、`reuse_pack` 和 `generation_details`。
@@ -356,10 +356,11 @@ backend/app/services/llm/client.py
 支持 provider：
 
 - DeepSeek：`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`
-- Qwen：`QWEN_API_KEY`、`QWEN_BASE_URL`、`QWEN_MODEL`
+- Qwen / 阿里云 DashScope：`QWEN_API_KEY`、`QWEN_BASE_URL`、`QWEN_MODEL`
 - Doubao：`DOUBAO_API_KEY`、`DOUBAO_BASE_URL`、`DOUBAO_MODEL`
 - Azure OpenAI：`AZURE_OPENAI_API_KEY`、`AZURE_OPENAI_ENDPOINT`、`AZURE_OPENAI_DEPLOYMENT`
-- OpenAI-compatible relay：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`
+- OpenAI-compatible relay：`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`OPENAI_API_STYLE`
+- Vision LLM relay：`VISION_LLM_API_KEY`、`VISION_LLM_BASE_URL`、`VISION_LLM_MODEL`、`VISION_LLM_API_STYLE`
 
 当前 routing table 按任务类型选择模型，典型任务包括：
 
@@ -372,7 +373,19 @@ backend/app/services/llm/client.py
 - `HOLISTIC`：导出前全文融合增强。
 - `REWRITE`：局部改写。
 
-生产环境如果最终选择阿里千问，应优先评估 DashScope SDK 对 OCR、文件理解和 vision-heavy asset enrichment 的支持；开发阶段可以继续使用 OpenAI-compatible relay。
+阿里云 DashScope 兼容模式默认使用 `https://dashscope.aliyuncs.com/compatible-mode/v1` 和 `/chat/completions`；可以直接配置 `QWEN_*`，也可以把 DashScope 当作 OpenAI-compatible relay 配到 `OPENAI_*`，并保持 `OPENAI_API_STYLE=auto` 或显式设为 `chat_completions`。
+
+章节生成支持两种运行取向：
+
+- 质量优先：`SECTION_GENERATION_CONCURRENCY=1`、`SECTION_GENERATION_QUALITY_GATE=full`，逐章串行生成并执行逐章 LLM 质量修复。
+- MVP 快速演示：`SECTION_GENERATION_CONCURRENCY=4`、`SECTION_GENERATION_QUALITY_GATE=skip`，并发生成章节，跳过重型逐章质量修复，并保留 `review_required` 供人工复核。
+- 默认生成粒度：`SECTION_GENERATION_GRANULARITY=top_level`，按大章节生成，子节作为章节内部结构写入；如需旧行为可设为 `all_nodes`。
+
+`SECTION_GENERATION_FAST_COHERENCE_PASS=true` 会在并发生成后做一次确定性的重复段落清理，用于降低相邻章节重复。
+
+`SECTION_REUSE_CONTEXT_MODE=prefer_full_section` 是 MVP 默认策略：章节级 shortlist 命中后，系统会拉取该来源章节下的复用块并按原文顺序发送给写作 LLM；`SECTION_REUSE_FULL_SECTION_BUDGET_ENABLED=false` 表示不因 token 预算退回 `section_pack`。如果部署到小上下文模型，可切回 `auto` 或打开预算门控。
+
+`EVIDENCE_JUDGE_MODE=auto` 会在 reuse-first 技术章节写作前增加一轮轻量 LLM 证据裁判：先由 hybrid 检索召回候选，再让模型把候选块标成 `core`、`support` 或 `noise`，只把可用证据交给后续写作。可选值为 `off|auto|strict`，`EVIDENCE_JUDGE_MAX_CANDIDATES` 控制每节最多裁判的候选块数量。
 
 ## 主要 API
 
@@ -497,6 +510,11 @@ npm --prefix frontend run dev -- --hostname 127.0.0.1 --port 3000
 - `PARSER_LLM_ASSET_REVIEW_USE_VISION=true|false`
 - `PARSER_LLM_ASSET_SUMMARY_ENABLED=true|false`
 - `PARSER_LLM_ASSET_SUMMARY_USE_VISION=true|false`
+- `PARSER_ASSET_QUALITY_GATE_ENABLED=true|false`
+- `RUNTIME_ASSET_VISION_GATE_ENABLED=true|false`
+- `RUNTIME_ASSET_VISION_GATE_MAX_ASSETS=4`
+
+当 `ASSET_REVIEW`、`ASSET_SUMMARY` 或运行时资产门控请求携带图片时，系统会优先使用 `VISION_LLM_*` 配置；未配置时再回退到普通 LLM provider。纯文本模型只能审核标题、上下文和 metadata，无法可靠识别产品照片、文字截图、局部箭头碎片或房间布置图。
 
 向量与 embedding：
 
@@ -514,9 +532,25 @@ LLM：
 - `LLM_PROVIDER_BACKEND=mock|live`
 - `LLM_TIMEOUT_SECONDS=60`
 - `LLM_RETRY_ATTEMPTS=1`
+- `SECTION_GENERATION_CONCURRENCY=1`
+- `SECTION_GENERATION_QUALITY_GATE=full|skip`
+- `SECTION_GENERATION_FAST_COHERENCE_PASS=true|false`
+- `SECTION_GENERATION_GRANULARITY=top_level|all_nodes`
+- `SECTION_REUSE_CONTEXT_MODE=prefer_full_section|auto|section_pack`
+- `SECTION_REUSE_CANDIDATE_LIMIT=16`
+- `SECTION_REUSE_FULL_SECTION_BLOCK_LIMIT=32`
+- `SECTION_REUSE_FULL_SECTION_BUDGET_ENABLED=false`
+- `SECTION_REUSE_FULL_SECTION_MAX_TOKENS=4000`
+- `EVIDENCE_JUDGE_MODE=off|auto|strict`
+- `EVIDENCE_JUDGE_MAX_CANDIDATES=10`
 - `OPENAI_API_KEY=...`
 - `OPENAI_BASE_URL=...`
 - `OPENAI_MODEL=...`
+- `OPENAI_API_STYLE=auto|responses|chat_completions`
+- `VISION_LLM_API_KEY=...`
+- `VISION_LLM_BASE_URL=...`
+- `VISION_LLM_MODEL=...`
+- `VISION_LLM_API_STYLE=auto|responses|chat_completions`
 - `DOUBAO_API_KEY=...`
 - `DOUBAO_BASE_URL=...`
 - `DOUBAO_MODEL=...`

@@ -5,10 +5,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.api import artifacts as artifacts_api
 from app.api.artifacts import (
     get_evidence_bundle_service,
     get_job_service,
@@ -16,6 +18,8 @@ from app.api.artifacts import (
 )
 from app.api.router import api_router
 from app.db import get_db_session
+from app.models.job import Job
+from app.models.project import Project
 
 
 class _FakeArtifactService:
@@ -136,20 +140,75 @@ class _FakeJobService:
         )
 
 
-async def _fake_db_session():
-    yield object()
+class _FakeAsyncSession:
+    def __init__(self, project_id):
+        self.project_id = project_id
+        self.jobs = {}
+
+    async def get(self, model, ident):
+        if model is Project and ident == self.project_id:
+            return SimpleNamespace(id=ident)
+        if model is Job:
+            return self.jobs.get(ident)
+        return None
+
+    def add(self, obj):
+        if isinstance(obj, Job):
+            self._ensure_job_defaults(obj)
+            self.jobs[obj.id] = obj
+
+    async def commit(self):
+        for job in self.jobs.values():
+            self._ensure_job_defaults(job)
+
+    async def refresh(self, obj):
+        if isinstance(obj, Job):
+            self._ensure_job_defaults(obj)
+
+    @staticmethod
+    def _ensure_job_defaults(job):
+        if job.id is None:
+            job.id = uuid4()
+        if job.input_ref is None:
+            job.input_ref = {}
+        if job.output_ref is None:
+            job.output_ref = {}
+        if job.retry_count is None:
+            job.retry_count = 0
+        if job.created_at is None:
+            job.created_at = datetime.now(timezone.utc)
+
+
+class _FakeQueue:
+    def __init__(self) -> None:
+        self.submitted = []
+
+    def active_job_id(self, _dedupe_key):
+        return None
+
+    def submit(self, **kwargs):
+        self.submitted.append(kwargs)
+        return kwargs["job_id"]
+
+    def status(self):
+        return {"worker_count": 1, "queued_count": len(self.submitted), "running_count": 0, "queued": [], "running": []}
 
 
 class ArtifactApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.artifact_service = _FakeArtifactService()
         self.job_service = _FakeJobService()
+        self.db_session = _FakeAsyncSession(self.artifact_service.project_id)
+        self.queue = _FakeQueue()
         self.app = FastAPI()
         self.app.include_router(api_router, prefix="/api/v1")
         self.app.dependency_overrides[get_requirement_service] = lambda: self.artifact_service
         self.app.dependency_overrides[get_evidence_bundle_service] = lambda: self.artifact_service
         self.app.dependency_overrides[get_job_service] = lambda: self.job_service
-        self.app.dependency_overrides[get_db_session] = _fake_db_session
+        async def fake_db_session():
+            yield self.db_session
+
+        self.app.dependency_overrides[get_db_session] = fake_db_session
 
     def tearDown(self) -> None:
         self.app.dependency_overrides.clear()
@@ -183,12 +242,15 @@ class ArtifactApiTests(unittest.TestCase):
             self.assertEqual(resolve_response.status_code, 200)
             self.assertEqual(resolve_response.json()["data"]["content"]["product_line"], "hv_vfd")
 
-            retrieve_response = client.post(
-                f"/api/v1/projects/{self.artifact_service.project_id}/retrieve-evidence",
-                json={"top_k": 4},
-            )
+            with patch.object(artifacts_api, "get_background_task_queue", return_value=self.queue):
+                retrieve_response = client.post(
+                    f"/api/v1/projects/{self.artifact_service.project_id}/retrieve-evidence",
+                    json={"top_k": 4},
+                )
             self.assertEqual(retrieve_response.status_code, 202)
-            self.assertEqual(retrieve_response.json()["data"]["resource_id"], str(self.artifact_service.bundle_id))
+            self.assertEqual(retrieve_response.json()["data"]["status"], "queued")
+            self.assertIsNone(retrieve_response.json()["data"]["resource_id"])
+            self.assertEqual(len(self.queue.submitted), 1)
 
             latest_bundle = client.get(f"/api/v1/projects/{self.artifact_service.project_id}/evidence-bundles/latest")
             self.assertEqual(latest_bundle.status_code, 200)

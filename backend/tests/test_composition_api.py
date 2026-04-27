@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi import FastAPI
@@ -15,6 +16,10 @@ from app.api.artifacts import (
 )
 from app.api.router import api_router
 from app.db import get_db_session
+
+
+async def _noop_background_job(*args, **kwargs):
+    return None
 
 
 class _FakeOutlineService:
@@ -126,11 +131,17 @@ class _FakeSectionDraftService:
             updated_at=datetime.now(timezone.utc),
         )
 
-    async def generate_sections(self, *, session, project_id, outline_id=None):
+    async def create_generate_sections_job(self, *, session, project_id, outline_id=None):
+        return SimpleNamespace(id=self.job_id, status="queued")
+
+    async def generate_sections(self, *, session, project_id, outline_id=None, job_id=None):
         return (
             SimpleNamespace(id=self.job_id, status="succeeded"),
             [self._make_draft(project_id=project_id, draft_id=self.section_draft_id)],
         )
+
+    async def create_regenerate_section_job(self, *, session, project_id, section_id, outline_id=None, preferred_citation_ids=None):
+        return SimpleNamespace(id=self.job_id, status="queued")
 
     async def list_section_drafts(self, *, session, project_id, draft_version=None):
         return [
@@ -168,14 +179,52 @@ class _FakeSectionDraftService:
         return draft
 
 
+class _FakeSession:
+    async def get(self, model, object_id):
+        return SimpleNamespace(id=object_id)
+
+    def add(self, obj):
+        if getattr(obj, "id", None) is None:
+            obj.id = uuid4()
+        return None
+
+    async def commit(self):
+        return None
+
+    async def refresh(self, obj):
+        return None
+
+
 async def _fake_db_session():
-    yield object()
+    yield _FakeSession()
+
+
+class _FakeQueue:
+    def __init__(self) -> None:
+        self.submitted = []
+
+    def active_job_id(self, _dedupe_key):
+        return None
+
+    def submit(self, **kwargs):
+        self.submitted.append(kwargs)
+        return kwargs["job_id"]
+
+    def status(self):
+        return {"worker_count": 1, "queued_count": len(self.submitted), "running_count": 0, "queued": [], "running": []}
 
 
 class CompositionApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.outline_service = _FakeOutlineService()
         self.section_service = _FakeSectionDraftService()
+        self.queue = _FakeQueue()
+        self._outline_job_patch = patch("app.api.artifacts._run_generate_outline_job", _noop_background_job)
+        self._section_job_patch = patch("app.api.artifacts._run_generate_sections_job", _noop_background_job)
+        self._queue_patch = patch("app.api.artifacts.get_background_task_queue", return_value=self.queue)
+        self._outline_job_patch.start()
+        self._section_job_patch.start()
+        self._queue_patch.start()
         self.app = FastAPI()
         self.app.include_router(api_router, prefix="/api/v1")
         self.app.dependency_overrides[get_outline_service] = lambda: self.outline_service
@@ -184,6 +233,9 @@ class CompositionApiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.app.dependency_overrides.clear()
+        self._queue_patch.stop()
+        self._section_job_patch.stop()
+        self._outline_job_patch.stop()
 
     def test_outline_and_section_routes(self) -> None:
         with TestClient(self.app) as client:
@@ -192,7 +244,9 @@ class CompositionApiTests(unittest.TestCase):
                 json={},
             )
             self.assertEqual(generate_outline_response.status_code, 202)
-            self.assertEqual(generate_outline_response.json()["data"]["resource_id"], str(self.outline_service.outline_id))
+            self.assertEqual(generate_outline_response.json()["data"]["status"], "queued")
+            self.assertIsNone(generate_outline_response.json()["data"]["resource_id"])
+            self.assertTrue(generate_outline_response.json()["data"]["next_poll"].startswith("/api/v1/jobs/"))
 
             get_outline_response = client.get(
                 f"/api/v1/projects/{self.outline_service.project_id}/outlines/latest"
@@ -237,7 +291,7 @@ class CompositionApiTests(unittest.TestCase):
                 json={},
             )
             self.assertEqual(generate_sections_response.status_code, 202)
-            self.assertEqual(generate_sections_response.json()["data"]["status"], "succeeded")
+            self.assertEqual(generate_sections_response.json()["data"]["status"], "queued")
 
             list_sections_response = client.get(
                 f"/api/v1/projects/{self.outline_service.project_id}/sections"
@@ -251,7 +305,9 @@ class CompositionApiTests(unittest.TestCase):
                 json={},
             )
             self.assertEqual(regenerate_response.status_code, 202)
-            self.assertEqual(regenerate_response.json()["data"]["resource_id"], str(self.section_service.section_draft_id))
+            self.assertEqual(regenerate_response.json()["data"]["status"], "queued")
+            self.assertIsNone(regenerate_response.json()["data"]["resource_id"])
+            self.assertEqual(len(self.queue.submitted), 1)
 
             update_section_response = client.patch(
                 f"/api/v1/projects/{self.outline_service.project_id}/sections/1",

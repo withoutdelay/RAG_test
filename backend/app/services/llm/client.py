@@ -23,15 +23,18 @@ class ModelType(str, Enum):
     DOUBAO = "doubao"
     AZURE = "azure"
     OPENAI = "openai"
+    VISION = "vision"
 
 
 class TaskType(str, Enum):
     EXTRACTION = "extraction"
     ASSET_REVIEW = "asset_review"
     ASSET_SUMMARY = "asset_summary"
+    ASSET_RERANK = "asset_rerank"
     SECTION_QUALITY = "section_quality"
     OUTLINE = "outline"
     SECTION_WRITE = "section_write"
+    EVIDENCE_JUDGE = "evidence_judge"
     HOLISTIC = "holistic"
     REWRITE = "rewrite"
     QUESTION_GEN = "question_gen"
@@ -41,9 +44,11 @@ ROUTING_TABLE = {
     TaskType.EXTRACTION: ModelType.DEEPSEEK,
     TaskType.ASSET_REVIEW: ModelType.DOUBAO,
     TaskType.ASSET_SUMMARY: ModelType.DOUBAO,
+    TaskType.ASSET_RERANK: ModelType.DOUBAO,
     TaskType.SECTION_QUALITY: ModelType.DOUBAO,
     TaskType.OUTLINE: ModelType.DOUBAO,
     TaskType.SECTION_WRITE: ModelType.DOUBAO,
+    TaskType.EVIDENCE_JUDGE: ModelType.DOUBAO,
     TaskType.HOLISTIC: ModelType.DOUBAO,
     TaskType.REWRITE: ModelType.DOUBAO,
     TaskType.QUESTION_GEN: ModelType.DEEPSEEK,
@@ -55,6 +60,7 @@ FALLBACK_TABLE = {
     ModelType.DOUBAO: ModelType.QWEN,
     ModelType.AZURE: ModelType.QWEN,
     ModelType.OPENAI: ModelType.DOUBAO,
+    ModelType.VISION: ModelType.OPENAI,
 }
 
 
@@ -130,6 +136,7 @@ class MockLLMProvider(BaseLLMProvider):
         ModelType.DOUBAO: 0.000003,
         ModelType.AZURE: 0.000004,
         ModelType.OPENAI: 0.000004,
+        ModelType.VISION: 0.000006,
     }
 
     def __init__(self, *, chunk_size: int = 48, failing_models: set[ModelType] | None = None) -> None:
@@ -166,6 +173,8 @@ class MockLLMProvider(BaseLLMProvider):
             return self._render_outline(request)
         if request.task_type == TaskType.SECTION_WRITE:
             return self._render_section(model_type, request)
+        if request.task_type == TaskType.EVIDENCE_JUDGE:
+            return self._render_evidence_judge(request)
         if request.task_type == TaskType.HOLISTIC:
             return self._render_holistic(request)
         if request.task_type == TaskType.REWRITE:
@@ -176,6 +185,8 @@ class MockLLMProvider(BaseLLMProvider):
             return self._render_asset_review(request)
         if request.task_type == TaskType.ASSET_SUMMARY:
             return self._render_asset_summary(request)
+        if request.task_type == TaskType.ASSET_RERANK:
+            return self._render_asset_rerank(request)
         if request.task_type == TaskType.SECTION_QUALITY:
             return self._render_section_quality(request)
         if request.task_type == TaskType.QUESTION_GEN:
@@ -246,6 +257,37 @@ class MockLLMProvider(BaseLLMProvider):
             f"本节基于{model_type.value.upper()}模型草拟，重点覆盖：{prompt_excerpt}。\n\n"
             f"参考摘要：{context[:180]}\n"
         )
+
+    def _render_evidence_judge(self, request: LLMRequest) -> str:
+        candidates = request.metadata.get("candidates") or []
+        items: list[dict[str, Any]] = []
+        noise_tokens = (
+            "培训",
+            "售后",
+            "维保",
+            "经营",
+            "运营",
+            "实施进度",
+            "进度计划",
+            "节能效益",
+            "所有权",
+        )
+        for item in candidates:
+            candidate_id = str(item.get("candidate_id") or "")
+            text = "\n".join(
+                str(item.get(key) or "")
+                for key in ("heading_path", "source_heading", "section_type", "excerpt")
+            )
+            is_noise = any(token in text for token in noise_tokens)
+            items.append(
+                {
+                    "candidate_id": candidate_id,
+                    "decision": "noise" if is_noise else "core",
+                    "confidence": 0.86 if is_noise else 0.72,
+                    "reason": "mock evidence judge",
+                }
+            )
+        return json.dumps({"summary": "mock evidence judge completed", "items": items}, ensure_ascii=False)
 
     def _render_holistic(self, request: LLMRequest) -> str:
         sections_markdown = str(request.metadata.get("sections_markdown") or request.user_prompt)
@@ -318,6 +360,26 @@ class MockLLMProvider(BaseLLMProvider):
             )
         return json.dumps({"items": items}, ensure_ascii=False)
 
+    def _render_asset_rerank(self, request: LLMRequest) -> str:
+        candidates = request.metadata.get("candidates") or []
+        items: list[dict[str, Any]] = []
+        for item in candidates:
+            asset_id = str(item.get("asset_id") or "")
+            visual_role = str(item.get("visual_role") or "engineering_figure")
+            score = float(item.get("score") or 0.0)
+            review_required = bool(item.get("review_required"))
+            items.append(
+                {
+                    "asset_id": asset_id,
+                    "visual_relevance": max(0.0, min(1.0, score if score else 0.72)),
+                    "confidence": 0.72 if not review_required else 0.58,
+                    "visual_role": visual_role,
+                    "should_recommend": not review_required,
+                    "reason": "mock runtime asset rerank",
+                }
+            )
+        return json.dumps({"items": items}, ensure_ascii=False)
+
     def _render_section_quality(self, request: LLMRequest) -> str:
         draft_text = str(request.user_prompt or "")
         issues: list[dict[str, Any]] = []
@@ -380,16 +442,35 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
     async def invoke(self, model_type: ModelType, request: LLMRequest) -> LLMResponse:
         config = self._get_config(model_type)
         if config.api_style == "responses":
-            payload = self._build_payload(model_type, request, stream=True)
-            return await self._invoke_with_retry(
-                operation=lambda: self._collect_responses_stream(
-                    config=config,
-                    request=request,
-                    model_type=model_type,
-                    payload=payload,
-                ),
-            )
-        payload = self._build_payload(model_type, request, stream=False)
+            payload = self._build_payload_for_config(config, model_type, request, stream=True)
+            try:
+                return await self._invoke_with_retry(
+                    operation=lambda: self._collect_responses_stream(
+                        config=config,
+                        request=request,
+                        model_type=model_type,
+                        payload=payload,
+                    ),
+                )
+            except RuntimeError as exc:
+                fallback_config = self._responses_chat_fallback_config(config=config, model_type=model_type)
+                if fallback_config is None:
+                    raise
+                fallback_payload = self._build_payload_for_config(fallback_config, model_type, request, stream=False)
+                try:
+                    return await self._invoke_with_retry(
+                        operation=lambda: self._invoke_chat_completion(
+                            config=fallback_config,
+                            request=request,
+                            model_type=model_type,
+                            payload=fallback_payload,
+                        ),
+                    )
+                except Exception as fallback_exc:
+                    raise RuntimeError(
+                        f"{exc}; chat completions fallback also failed: {fallback_exc}"
+                    ) from fallback_exc
+        payload = self._build_payload_for_config(config, model_type, request, stream=False)
         return await self._invoke_with_retry(
             operation=lambda: self._invoke_chat_completion(
                 config=config,
@@ -402,18 +483,34 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
     async def invoke_stream(self, model_type: ModelType, request: LLMRequest) -> AsyncIterator[str]:
         config = self._get_config(model_type)
         if config.api_style == "responses":
-            payload = self._build_payload(model_type, request, stream=True)
-            async for delta in self._iterate_with_retry(
-                operation_factory=lambda: self._iterate_responses_stream(
-                    config=config,
-                    payload=payload,
-                    model_type=model_type,
-                ),
-            ):
-                if delta:
-                    yield delta
+            payload = self._build_payload_for_config(config, model_type, request, stream=True)
+            try:
+                async for delta in self._iterate_with_retry(
+                    operation_factory=lambda: self._iterate_responses_stream(
+                        config=config,
+                        payload=payload,
+                        model_type=model_type,
+                    ),
+                ):
+                    if delta:
+                        yield delta
+                return
+            except RuntimeError:
+                fallback_config = self._responses_chat_fallback_config(config=config, model_type=model_type)
+                if fallback_config is None:
+                    raise
+                fallback_payload = self._build_payload_for_config(fallback_config, model_type, request, stream=True)
+                async for delta in self._iterate_with_retry(
+                    operation_factory=lambda: self._iterate_chat_completions_stream(
+                        config=fallback_config,
+                        payload=fallback_payload,
+                        model_type=model_type,
+                    ),
+                ):
+                    if delta:
+                        yield delta
             return
-        payload = self._build_payload(model_type, request, stream=True)
+        payload = self._build_payload_for_config(config, model_type, request, stream=True)
         async for delta in self._iterate_with_retry(
             operation_factory=lambda: self._iterate_chat_completions_stream(
                 config=config,
@@ -513,13 +610,32 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
             )
 
         if settings.openai_api_key and settings.openai_base_url:
+            openai_api_style = _resolve_openai_api_style(
+                api_style=settings.openai_api_style,
+                base_url=settings.openai_base_url,
+            )
             configs[ModelType.OPENAI] = ProviderEndpointConfig(
                 provider_name="openai",
                 base_url=_normalize_openai_base_url(settings.openai_base_url),
                 api_key=settings.openai_api_key,
                 model_name=settings.openai_model_name,
-                path="/responses",
-                api_style="responses",
+                path=_endpoint_path_for_api_style(openai_api_style),
+                api_style=openai_api_style,
+            )
+
+        vision_base_url = settings.vision_llm_base_url
+        if settings.vision_llm_api_key and vision_base_url:
+            vision_api_style = _resolve_openai_api_style(
+                api_style=settings.vision_llm_api_style,
+                base_url=vision_base_url,
+            )
+            configs[ModelType.VISION] = ProviderEndpointConfig(
+                provider_name="vision_llm",
+                base_url=_normalize_openai_base_url(vision_base_url),
+                api_key=settings.vision_llm_api_key,
+                model_name=settings.vision_llm_model_name,
+                path=_endpoint_path_for_api_style(vision_api_style),
+                api_style=vision_api_style,
             )
 
         return configs
@@ -542,6 +658,16 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
 
     def _build_payload(self, model_type: ModelType, request: LLMRequest, *, stream: bool) -> dict[str, Any]:
         config = self._get_config(model_type)
+        return self._build_payload_for_config(config, model_type, request, stream=stream)
+
+    def _build_payload_for_config(
+        self,
+        config: ProviderEndpointConfig,
+        model_type: ModelType,
+        request: LLMRequest,
+        *,
+        stream: bool,
+    ) -> dict[str, Any]:
         if config.api_style == "responses":
             user_content: list[dict[str, Any]] = [{"type": "input_text", "text": request.user_prompt}]
             for image in request.input_images:
@@ -611,6 +737,24 @@ class HTTPChatCompletionsProvider(BaseLLMProvider):
             payload["stream"] = True
 
         return payload
+
+    def _responses_chat_fallback_config(
+        self,
+        *,
+        config: ProviderEndpointConfig,
+        model_type: ModelType,
+    ) -> ProviderEndpointConfig | None:
+        if model_type == ModelType.OPENAI:
+            configured_style = self.settings.openai_api_style
+        elif model_type == ModelType.VISION:
+            configured_style = self.settings.vision_llm_api_style
+        else:
+            return None
+        if config.api_style != "responses":
+            return None
+        if str(configured_style or "auto").strip().lower() != "auto":
+            return None
+        return replace(config, path="/chat/completions", api_style="chat_completions")
 
     def _build_response_format(
         self,
@@ -970,7 +1114,7 @@ class LLMClient:
     async def invoke(self, request: LLMRequest) -> LLMResponse:
         session_id = request.session_id or str(uuid.uuid4())
         masked_request = await self._mask_request(request, session_id=session_id)
-        candidates = self._supported_candidates(request.task_type)
+        candidates = self._supported_candidates(request)
         last_error: Exception | None = None
 
         for model_type in candidates:
@@ -989,7 +1133,7 @@ class LLMClient:
     async def invoke_stream(self, request: LLMRequest) -> AsyncIterator[str]:
         session_id = request.session_id or str(uuid.uuid4())
         masked_request = await self._mask_request(request, session_id=session_id)
-        candidates = self._supported_candidates(request.task_type)
+        candidates = self._supported_candidates(request)
         last_error: Exception | None = None
 
         for model_type in candidates:
@@ -1016,18 +1160,19 @@ class LLMClient:
         )
         return replace(request, user_prompt=masked.masked_text, session_id=session_id)
 
-    def _supported_candidates(self, task_type: TaskType) -> list[ModelType]:
+    def _supported_candidates(self, request: LLMRequest) -> list[ModelType]:
         candidates = [
             model_type
-            for model_type in self._model_candidates(task_type)
+            for model_type in self._model_candidates(request)
             if self.provider.supports_model(model_type)
         ]
         if candidates:
             return candidates
-        return self._model_candidates(task_type)
+        return self._model_candidates(request)
 
     @staticmethod
-    def _model_candidates(task_type: TaskType) -> list[ModelType]:
+    def _model_candidates(request: LLMRequest) -> list[ModelType]:
+        task_type = request.task_type
         primary = ROUTING_TABLE.get(task_type, ModelType.QWEN)
         fallback = FALLBACK_TABLE.get(primary)
         ordered = [primary]
@@ -1039,6 +1184,8 @@ class LLMClient:
             ordered.append(ModelType.AZURE)
         if ModelType.OPENAI not in ordered:
             ordered.append(ModelType.OPENAI)
+        if request.input_images and task_type in {TaskType.ASSET_REVIEW, TaskType.ASSET_SUMMARY, TaskType.ASSET_RERANK}:
+            ordered = [ModelType.VISION, *[model_type for model_type in ordered if model_type != ModelType.VISION]]
         return ordered
 
 
@@ -1077,6 +1224,22 @@ def _normalize_openai_base_url(base_url: str) -> str:
         path = "/v1"
     normalized = parsed._replace(path=path)
     return urlunparse(normalized).rstrip("/")
+
+
+def _resolve_openai_api_style(*, api_style: str, base_url: str) -> str:
+    normalized_style = str(api_style or "auto").strip().lower()
+    if normalized_style in {"responses", "chat_completions"}:
+        return normalized_style
+    return "responses" if _is_official_openai_base_url(base_url) else "chat_completions"
+
+
+def _is_official_openai_base_url(base_url: str) -> bool:
+    host = (urlparse(base_url).hostname or "").strip().lower()
+    return host == "api.openai.com"
+
+
+def _endpoint_path_for_api_style(api_style: str) -> str:
+    return "/responses" if api_style == "responses" else "/chat/completions"
 
 
 def _extract_responses_output_text(data: dict[str, Any]) -> str:

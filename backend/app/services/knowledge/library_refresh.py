@@ -567,12 +567,12 @@ def _build_uploaded_document_sample_entry(*, document: Any) -> dict[str, Any]:
     profile_metadata = dict(metadata.get("document_profile") or {})
     profile_name = str(profile_metadata.get("name") or "").strip()
     sample_entry = {
-        "sample_id": f"uploaded-{document.id}",
+        "sample_id": str(metadata.get("sample_id") or "").strip() or f"uploaded-{document.id}",
         "file_name": str(getattr(document, "filename", "") or ""),
         "file_format": str(getattr(document, "file_type", "") or ""),
-        "phase_b_track": DEFAULT_LIBRARY_TRACK,
-        "library_track": DEFAULT_LIBRARY_TRACK,
-        "track": DEFAULT_LIBRARY_TRACK,
+        "phase_b_track": str(metadata.get("phase_b_track") or metadata.get("library_track") or DEFAULT_LIBRARY_TRACK),
+        "library_track": str(metadata.get("library_track") or metadata.get("phase_b_track") or DEFAULT_LIBRARY_TRACK),
+        "track": str(metadata.get("library_track") or metadata.get("phase_b_track") or DEFAULT_LIBRARY_TRACK),
         "source": UPLOADED_DOCUMENT_SOURCE,
         "ingestion_recommendation": metadata.get("ingestion_recommendation"),
         "parse_gate_status": metadata.get("parse_gate_status"),

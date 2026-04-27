@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, FolderOpen, Settings, HelpCircle } from 'lucide-react';
+import { Home, FolderOpen, Settings, HelpCircle, Library } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 type SidebarProps = {
@@ -36,6 +36,15 @@ export function Sidebar({ className }: SidebarProps) {
               )}>
                 <FolderOpen className="mr-2 h-4 w-4" />
                 Projects
+              </span>
+            </Link>
+            <Link href="/library/materials">
+              <span className={cn(
+                "flex items-center rounded-md px-3 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground",
+                pathname.startsWith('/library') ? "bg-accent" : "transparent"
+              )}>
+                <Library className="mr-2 h-4 w-4" />
+                Historical Library
               </span>
             </Link>
           </div>

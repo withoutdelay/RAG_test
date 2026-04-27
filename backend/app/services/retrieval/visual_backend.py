@@ -59,6 +59,8 @@ class VisualEmbeddingCacheEntry:
 
 
 VISUAL_INDEX_CHANNELS = ("image", "text_proxy")
+MIN_REUSABLE_FIGURE_DIMENSION = 80
+MIN_REUSABLE_FIGURE_AREA = 12000
 
 
 def _utc_now_iso() -> str:
@@ -296,7 +298,37 @@ async def collect_visual_cache_asset_rows(
         if limit > 0:
             stmt = stmt.limit(limit)
         rows = await session.execute(stmt)
-        return list(rows.all())
+        return [
+            (asset, raw_document)
+            for asset, raw_document in rows.all()
+            if _should_include_visual_cache_asset(asset)
+        ]
+
+
+def _should_include_visual_cache_asset(asset: FigureAsset) -> bool:
+    if asset.asset_type != "figure":
+        return True
+    metadata = asset.meta if isinstance(asset.meta, dict) else {}
+    if str(metadata.get("asset_audit_status") or "").strip().lower() == "rejected":
+        return False
+    if metadata.get("preserve_in_vector_db") is False:
+        return False
+    visual_role = str(metadata.get("visual_role") or "").strip().lower()
+    if visual_role in {"page_furniture", "asset_fragment", "text_fragment"}:
+        return False
+    raw_width = metadata.get("width") or metadata.get("image_width") or metadata.get("pixel_width")
+    raw_height = metadata.get("height") or metadata.get("image_height") or metadata.get("pixel_height")
+    try:
+        image_width = int(raw_width or 0)
+        image_height = int(raw_height or 0)
+    except (TypeError, ValueError):
+        return True
+    if image_width <= 0 or image_height <= 0:
+        return True
+    area = image_width * image_height
+    if min(image_width, image_height) < MIN_REUSABLE_FIGURE_DIMENSION:
+        return False
+    return not (area < MIN_REUSABLE_FIGURE_AREA and max(image_width, image_height) < MIN_REUSABLE_FIGURE_DIMENSION * 2)
 
 
 async def build_visual_embedding_cache_snapshot(

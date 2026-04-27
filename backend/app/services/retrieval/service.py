@@ -265,6 +265,7 @@ def build_evidence_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "source_chunk_id": str(result.get("chunk_id")),
                 "source_chunk_type": chunk_type,
                 "source_doc_id": str(result.get("document_id")),
+                "sample_id": metadata.get("sample_id"),
                 "source_title": result.get("document_name"),
                 "page_range": [],
                 "heading_path": path_segments,
@@ -353,10 +354,24 @@ class EvidenceBundleService:
         requirement_card_id: UUID | None = None,
         top_k: int = 6,
         doc_type: str | None = None,
+        job_id: UUID | None = None,
     ) -> tuple[Job, EvidenceBundle]:
         project = await session.get(Project, project_id)
         if not project:
             raise ArtifactNotFoundError("Project not found")
+
+        job: Job | None = None
+        if job_id is not None:
+            job = await session.get(Job, job_id)
+            if job is None:
+                raise ArtifactNotFoundError("Job not found")
+            job.status = "running"
+            job.started_at = job.started_at or datetime.now(timezone.utc)
+            job.output_ref = {
+                **(job.output_ref or {}),
+                "progress": {"stage": "resolving_requirement"},
+            }
+            await session.commit()
 
         card = await self._resolve_requirement_card(
             session=session,
@@ -366,16 +381,31 @@ class EvidenceBundleService:
         if any(item.get("status") != "resolved" for item in (card.blocking_items or [])):
             raise ArtifactValidationError("Requirement card still has unresolved blocking items")
 
-        job = Job(
-            project_id=project_id,
-            job_type="retrieve",
-            status="running",
-            trace_id=uuid.uuid4().hex,
-            input_ref={"project_id": str(project_id), "requirement_card_id": str(card.id)},
-            started_at=datetime.now(timezone.utc),
-        )
-        session.add(job)
-        await session.flush()
+        if job is None:
+            job = Job(
+                project_id=project_id,
+                job_type="retrieve",
+                status="running",
+                trace_id=uuid.uuid4().hex,
+                input_ref={"project_id": str(project_id), "requirement_card_id": str(card.id)},
+                output_ref={"progress": {"stage": "retrieving"}},
+                started_at=datetime.now(timezone.utc),
+            )
+            session.add(job)
+            await session.flush()
+        else:
+            job.input_ref = {
+                **(job.input_ref or {}),
+                "project_id": str(project_id),
+                "requirement_card_id": str(card.id),
+                "top_k": top_k,
+                "doc_type": doc_type,
+            }
+            job.output_ref = {
+                **(job.output_ref or {}),
+                "progress": {"stage": "retrieving"},
+            }
+            await session.commit()
 
         query = build_requirement_query(card.content or {})
         resolved_doc_type = doc_type or "historical_proposal"
@@ -423,9 +453,14 @@ class EvidenceBundleService:
                 break
         evidence_items = build_evidence_items(results)
         fallback_items = build_case_fallback_evidence_items(case_candidates, limit=min(top_k, 3)) if not evidence_items else []
-        bundle_results = evidence_items or fallback_items
-        quality_source = "retrieval_results" if evidence_items else ("case_fallback" if fallback_items else "empty")
-        quality_score = self._compute_quality_score(bundle_results, quality_source=quality_source)
+        # Case-level fallbacks are diagnostics only. They can explain why a case was considered,
+        # but they are not concrete reusable evidence and must not be fed as section source blocks.
+        bundle_results = evidence_items
+        quality_source = "retrieval_results" if evidence_items else ("case_fallback_diagnostic" if fallback_items else "empty")
+        quality_score = self._compute_quality_score(
+            bundle_results if bundle_results else fallback_items,
+            quality_source=quality_source,
+        )
         quality_trace = {
             "query": query,
             "query_hints": _extract_requirement_query_hints(card.content or {}),
@@ -460,7 +495,11 @@ class EvidenceBundleService:
 
         project.status = "EVIDENCE_READY"
         job.status = "succeeded"
-        job.output_ref = {"evidence_bundle_id": str(bundle.id)}
+        job.output_ref = {
+            **(job.output_ref or {}),
+            "evidence_bundle_id": str(bundle.id),
+            "progress": {"stage": "completed"},
+        }
         job.completed_at = datetime.now(timezone.utc)
 
         await session.commit()
@@ -527,7 +566,7 @@ class EvidenceBundleService:
             for item in results[:3]
         ]
         base_score = sum(score_values) / min(len(score_values), 3)
-        if quality_source == "case_fallback":
+        if quality_source in {"case_fallback", "case_fallback_diagnostic"}:
             bounded = min(max(0.39 + (base_score * 0.35) + (min(len(score_values), 3) * 0.03), 0.0), 0.79)
         else:
             bounded = min(max(base_score, 0.0), 1.0)

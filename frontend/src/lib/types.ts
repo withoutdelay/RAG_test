@@ -291,6 +291,7 @@ export interface ReusePack {
   reuse_level?: string;
   reusable_blocks?: ReuseBlockLike[];
   recommended_assets?: RecommendedAsset[];
+  asset_candidates?: RecommendedAsset[];
   must_replace_fields?: string[];
   banned_terms?: string[];
   replacement_hints?: Record<string, unknown>;
@@ -317,6 +318,7 @@ export interface SectionGenerationDetails {
 
 export interface SectionValidatorResult {
   recommended_assets?: RecommendedAsset[];
+  asset_candidates?: RecommendedAsset[];
   generation_mode?: string;
   reuse_pack?: ReusePack;
   generation_details?: SectionGenerationDetails;
@@ -338,9 +340,152 @@ export interface SectionDraft {
   reuse_level?: string;
   asset_required?: boolean;
   recommended_assets?: RecommendedAsset[];
+  asset_candidates?: RecommendedAsset[];
   validator_result?: SectionValidatorResult;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface JobProgress {
+  stage?: string;
+  completed_sections?: number;
+  total_sections?: number;
+  current_section_index?: number;
+  current_section_id?: string;
+  current_section_title?: string;
+  elapsed_ms?: number;
+  completed_materials?: number;
+  total_materials?: number;
+  current_sample_id?: string;
+  current_file_name?: string;
+}
+
+export interface JobRead {
+  id: string;
+  project_id?: string | null;
+  job_type: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | string;
+  input_ref: Record<string, unknown>;
+  output_ref: {
+    progress?: JobProgress;
+    error?: string;
+    [key: string]: unknown;
+  };
+  retry_count: number;
+  error_code?: string | null;
+  trace_id: string;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface JobAccepted {
+  job_id: string;
+  status: string;
+  resource_id?: string | null;
+  next_poll: string;
+}
+
+export type MaterialRoute =
+  | 'main_indexed'
+  | 'review_pending'
+  | 'holdout_eval'
+  | 'conversion_required'
+  | 'conversion_failed'
+  | 'excluded';
+
+export interface LibraryMaterial {
+  sample_id: string;
+  file_name: string;
+  file_format: string;
+  file_size_bytes: number;
+  source_path: string;
+  source_exists: boolean;
+  phase_b_track?: string | null;
+  suggested_track?: string | null;
+  route: MaterialRoute;
+  route_reason?: string | null;
+  route_updated_at?: string | null;
+  detected_profile?: string | null;
+  ingestion_recommendation?: string | null;
+  manifest_metrics: Record<string, unknown>;
+  high_risk_content_flags: string[];
+  document_id?: string | null;
+  raw_document_id?: string | null;
+  doc_type?: string | null;
+  parse_status: string;
+  parser_backend?: string | null;
+  parse_gate_status?: string | null;
+  parse_gate_reason?: string | null;
+  chunk_count: number;
+  indexed_chunk_count: number;
+  skipped_chunk_count: number;
+  figure_asset_count: number;
+  storage_fallback_asset_count: number;
+  image_count: number;
+  table_count: number;
+  quality_flags: string[];
+}
+
+export interface LibraryMaterialAsset {
+  id: string;
+  asset_type: string;
+  title?: string | null;
+  caption?: string | null;
+  page_no?: number | null;
+  asset_uri: string;
+  reuse_mode: string;
+  parse_confidence?: string | null;
+  created_at?: string | null;
+  visual_role?: string | null;
+  width?: number | string | null;
+  height?: number | string | null;
+  source_ref?: string | null;
+  source_section_id?: string | null;
+  heading_path?: string | null;
+  section_path?: string | null;
+  storage_fallback: boolean;
+  preserve_in_vector_db?: boolean;
+  review_required: boolean;
+  asset_audit_status?: string | null;
+  asset_quality_score?: number | string | null;
+  asset_audit_reasons?: string[];
+  quality_flags: string[];
+  raw_table_markdown?: string | null;
+  table_profile?: Record<string, unknown> | null;
+  semantic_summary?: Record<string, unknown> | null;
+  context_before?: string | null;
+  context_after?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface LibraryMaterialChunk {
+  id: string;
+  chunk_index: number;
+  chunk_type: string;
+  heading_path?: string | null;
+  token_count?: number | null;
+  indexed: boolean;
+  qdrant_point_id?: string | null;
+  content_preview: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface LibraryMaterialDetail extends LibraryMaterial {
+  assets: LibraryMaterialAsset[];
+  chunks: LibraryMaterialChunk[];
+}
+
+export interface LibraryMaterialsResponse {
+  items: LibraryMaterial[];
+  summary: {
+    total: number;
+    route_counts: Record<string, number>;
+    ingested_count: number;
+    main_indexed_count: number;
+    figure_asset_count: number;
+    indexed_chunk_count: number;
+  };
 }
 
 export interface ReviewTask {

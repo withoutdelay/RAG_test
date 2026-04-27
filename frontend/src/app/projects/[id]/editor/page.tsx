@@ -7,8 +7,43 @@ import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { SectionBlock } from '@/components/editor/SectionBlock';
 import api, { getApiErrorMessage, isNotFoundError } from '@/lib/api';
-import { EvidenceBundle, EvidenceCard, SectionDraft } from '@/lib/types';
+import { EvidenceBundle, EvidenceCard, JobAccepted, JobRead, SectionDraft } from '@/lib/types';
 import { toast } from 'sonner';
+
+const GENERATION_POLL_INTERVAL_MS = 3000;
+const GENERATION_POLL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function normalizePollPath(nextPoll: string): string {
+  if (nextPoll.startsWith('/api/v1/')) {
+    return nextPoll.slice('/api/v1'.length);
+  }
+  return nextPoll;
+}
+
+function formatGenerationProgress(job: JobRead): string {
+  const progress = job.output_ref?.progress;
+  const completed = progress?.completed_sections;
+  const total = progress?.total_sections;
+  const title = progress?.current_section_title;
+
+  if (job.status === 'queued') {
+    return 'Generation queued. Waiting for backend worker...';
+  }
+  if (typeof completed === 'number' && typeof total === 'number' && total > 0) {
+    const current = title ? `: ${title}` : '';
+    return `Generating ${Math.min(completed, total)} / ${total}${current}`;
+  }
+  if (job.status === 'running') {
+    return 'Generation running. Waiting for the current LLM call...';
+  }
+  return `Generation status: ${job.status}`;
+}
 
 export default function EditorPage() {
   const params = useParams();
@@ -18,6 +53,7 @@ export default function EditorPage() {
   const [evidenceMap, setEvidenceMap] = useState<Record<string, EvidenceCard>>({});
   const [loading, setLoading] = useState(true);
   const [generatingAll, setGeneratingAll] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState<string | null>(null);
 
   const fetchSections = useCallback(async () => {
     try {
@@ -57,14 +93,42 @@ export default function EditorPage() {
     }
   }, [fetchSections, projectId]);
 
+  const waitForGenerationJob = useCallback(async (nextPoll: string): Promise<JobRead> => {
+    const pollPath = normalizePollPath(nextPoll);
+    const deadline = Date.now() + GENERATION_POLL_TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+      const jobResponse = (await api.get(pollPath)) as { data: JobRead };
+      const job = jobResponse.data;
+      setGenerationProgress(formatGenerationProgress(job));
+
+      if (job.status === 'succeeded') {
+        return job;
+      }
+      if (job.status === 'failed') {
+        const detail = job.output_ref?.error || job.error_code || 'Generation job failed';
+        throw new Error(String(detail));
+      }
+
+      await sleep(GENERATION_POLL_INTERVAL_MS);
+    }
+
+    throw new Error('Generation is still running after the local polling window. Refresh this page later to load completed drafts.');
+  }, []);
+
   const handleGenerateAll = async () => {
     setGeneratingAll(true);
+    setGenerationProgress('Submitting generation job...');
     try {
-      await api.post(`/projects/${projectId}/generate-sections`, {});
+      const acceptedResponse = (await api.post(`/projects/${projectId}/generate-sections`, {})) as { data: JobAccepted };
+      setGenerationProgress('Generation job accepted. Waiting for progress...');
+      await waitForGenerationJob(acceptedResponse.data.next_poll);
       toast.success('Section drafts generated');
       await fetchSections();
+      setGenerationProgress(null);
     } catch (error: unknown) {
       toast.error(getApiErrorMessage(error, 'Error generating sections'));
+      setGenerationProgress(getApiErrorMessage(error, 'Generation failed. Check the backend log for details.'));
     } finally {
       setGeneratingAll(false);
     }
@@ -88,18 +152,23 @@ export default function EditorPage() {
             Review the customer-facing draft, steer it with citations, and refine it without diving into raw Markdown by default.
           </p>
         </div>
-        <div className="flex space-x-3">
-          <Button variant="outline" onClick={() => void fetchSections()} disabled={loading || generatingAll}>
-            Refresh
-          </Button>
-          <Button onClick={handleGenerateAll} disabled={generatingAll || loading}>
-            {generatingAll ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlayCircle className="mr-2 h-4 w-4" />}
-            {generatingAll ? 'Generating...' : 'Generate All Drafts'}
-          </Button>
-          {canProceedToValidation && (
-            <Button onClick={() => router.push(`/projects/${projectId}/validation`)} className="bg-green-600 hover:bg-green-700">
-              Proceed to Validation <ArrowRight className="ml-2 h-4 w-4" />
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex space-x-3">
+            <Button variant="outline" onClick={() => void fetchSections()} disabled={loading || generatingAll}>
+              Refresh
             </Button>
+            <Button onClick={handleGenerateAll} disabled={generatingAll || loading}>
+              {generatingAll ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlayCircle className="mr-2 h-4 w-4" />}
+              {generatingAll ? 'Generating...' : 'Generate All Drafts'}
+            </Button>
+            {canProceedToValidation && (
+              <Button onClick={() => router.push(`/projects/${projectId}/validation`)} className="bg-green-600 hover:bg-green-700">
+                Proceed to Validation <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            )}
+          </div>
+          {generationProgress && (
+            <p className="max-w-md text-right text-xs text-muted-foreground">{generationProgress}</p>
           )}
         </div>
       </div>

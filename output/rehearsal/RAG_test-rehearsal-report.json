@@ -1,0 +1,94 @@
+{
+  "project_name": "RAG_test",
+  "generated_at": "2026-04-20T05:09:27.613643+00:00",
+  "score": 100,
+  "passed": true,
+  "threshold": 80,
+  "failed_checks": [],
+  "checks": [
+    {
+      "name": "Redteam Report",
+      "passed": true,
+      "detail": "RAG_test-redteam.json, score=70/70, critical=0",
+      "severity": "low"
+    },
+    {
+      "name": "Quality Gate",
+      "passed": true,
+      "detail": "quality score=82",
+      "severity": "medium"
+    },
+    {
+      "name": "Pipeline Metrics",
+      "passed": true,
+      "detail": "success_rate=100",
+      "severity": "low"
+    },
+    {
+      "name": "Delivery Manifest",
+      "passed": true,
+      "detail": "status=ready",
+      "severity": "low"
+    },
+    {
+      "name": "Rehearsal Documents",
+      "passed": true,
+      "detail": "launch/rollback/smoke docs ready",
+      "severity": "low"
+    },
+    {
+      "name": "Migration Files",
+      "passed": true,
+      "detail": "2 migration files",
+      "severity": "low"
+    },
+    {
+      "name": "CI/CD Files",
+      "passed": true,
+      "detail": "2 files found",
+      "severity": "medium"
+    },
+    {
+      "name": "Governance Status",
+      "passed": true,
+      "detail": "report=governance-report-20260420.md; validation=PASSED; knowledge_coverage=unknown",
+      "severity": "low"
+    },
+    {
+      "name": "DNS Reachability",
+      "passed": true,
+      "detail": "RAG_test.example.com -> 198.18.0.160",
+      "severity": "low"
+    },
+    {
+      "name": "SSL Certificate",
+      "passed": true,
+      "detail": "无法连接 RAG_test.example.com:443，跳过 SSL 检查 (placeholder domain)",
+      "severity": "low"
+    },
+    {
+      "name": "Port Conflicts",
+      "passed": true,
+      "detail": "端口已被占用: 5432, 6379, 6333 (确保部署环境端口可用)",
+      "severity": "low"
+    },
+    {
+      "name": "Rollback Readiness",
+      "passed": true,
+      "detail": "rollback-playbook.md found; DB rollback SQL: 20260420_release_hardening_rollback.sql; CI/CD rollback step in cd.yml",
+      "severity": "low"
+    },
+    {
+      "name": "Capacity Estimation",
+      "passed": true,
+      "detail": "tier=large; 219 files/53043 lines; cpu=1000m-2000m; memory=512Mi-1Gi; replicas=3-5; langs=[Python=47624L, TypeScript=5401L, SQL=13L, JavaScript=5L]; db=detected",
+      "severity": "low"
+    },
+    {
+      "name": "Release Risk Assessment",
+      "passed": true,
+      "detail": "risk_level=MINIMAL; risk_score=0/100; passed=13/13; critical_fail=0; high_fail=0; medium_fail=0; recommendation=可以发布：风险极低",
+      "severity": "low"
+    }
+  ]
+}

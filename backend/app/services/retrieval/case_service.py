@@ -259,6 +259,12 @@ def _tokenize(text: str, *, term_lexicon: dict[str, tuple[str, ...]] | None = No
     return tokens
 
 
+def _normalize_file_name_for_lookup(value: Any) -> str:
+    text = str(value or "").strip().casefold()
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
 def _dedupe_keep_order(values: list[str]) -> list[str]:
     seen: set[str] = set()
     deduped: list[str] = []
@@ -1337,12 +1343,24 @@ class CaseLibraryService:
         block_library_path: str | Path | None = None,
         semantic_scorer: SemanticScorer | None = None,
         reranker: Reranker | None = None,
+        section_scope_rerank_enabled: bool | None = None,
+        section_scope_semantic_enabled: bool | None = None,
     ) -> None:
         settings = get_settings()
         self.outline_library_path = Path(outline_library_path or settings.case_library_outline_path)
         self.block_library_path = Path(block_library_path or settings.case_library_block_path)
         self.semantic_scorer = semantic_scorer or EmbeddingSemanticScorer()
         self.reranker = reranker or build_default_reranker()
+        self.section_scope_rerank_enabled = (
+            bool(settings.case_library_section_rerank_enabled)
+            if section_scope_rerank_enabled is None
+            else bool(section_scope_rerank_enabled)
+        )
+        self.section_scope_semantic_enabled = (
+            bool(settings.case_library_section_semantic_enabled)
+            if section_scope_semantic_enabled is None
+            else bool(section_scope_semantic_enabled)
+        )
         self._outline_payload_cache: dict[str, Any] | None = None
         self._block_payload_cache: dict[str, Any] | None = None
         self._term_lexicon_cache: dict[str, tuple[str, ...]] | None = None
@@ -1419,6 +1437,27 @@ class CaseLibraryService:
             result["retrieval_text"] = str(item.get("_retrieval_text") or "")
             results.append(result)
         return results
+
+    def resolve_sample_ids_by_file_names(
+        self,
+        file_names: set[str],
+        *,
+        library_tracks: set[str] | None = None,
+    ) -> set[str]:
+        normalized_names = {_normalize_file_name_for_lookup(item) for item in file_names if str(item or "").strip()}
+        if not normalized_names:
+            return set()
+        sample_ids: set[str] = set()
+        for entry in self._get_outline_entries():
+            track = str(entry.get("library_track") or "pilot_main")
+            if library_tracks and track not in library_tracks:
+                continue
+            entry_file_name = _normalize_file_name_for_lookup(str(entry.get("file_name") or ""))
+            if entry_file_name in normalized_names:
+                sample_id = str(entry.get("sample_id") or "").strip()
+                if sample_id:
+                    sample_ids.add(sample_id)
+        return sample_ids
 
     def retrieve_blocks(
         self,
@@ -1582,6 +1621,71 @@ class CaseLibraryService:
                 break
         return results
 
+    def retrieve_section_blocks(
+        self,
+        *,
+        sample_id: str,
+        section_id: str | None = None,
+        section_path: str | None = None,
+        file_name: str | None = None,
+        library_tracks: set[str] | None = None,
+        top_k: int = 32,
+        base_score: float = 0.75,
+    ) -> list[dict[str, Any]]:
+        normalized_sample_id = str(sample_id or "").strip()
+        normalized_section_id = str(section_id or "").strip()
+        normalized_section_path = str(section_path or "").strip()
+        normalized_file_name = str(file_name or "").strip()
+        if not normalized_sample_id and not normalized_file_name:
+            return []
+
+        matches: list[dict[str, Any]] = []
+        for entry in self._get_block_entries():
+            track = str(entry.get("library_track") or "pilot_main")
+            if library_tracks and track not in library_tracks:
+                continue
+            entry_sample_id = str(entry.get("sample_id") or "").strip()
+            entry_file_name = str(entry.get("file_name") or "").strip()
+            if normalized_sample_id and entry_sample_id != normalized_sample_id:
+                continue
+            if normalized_file_name and entry_file_name and entry_file_name != normalized_file_name:
+                continue
+            entry_section_id = str(entry.get("source_section_id") or "").strip()
+            entry_section_path = str(entry.get("section_path") or entry.get("heading_path") or "").strip()
+            section_id_matched = bool(normalized_section_id and entry_section_id == normalized_section_id)
+            section_path_matched = bool(
+                normalized_section_path
+                and (
+                    entry_section_path == normalized_section_path
+                    or entry_section_path.startswith(f"{normalized_section_path} >")
+                )
+            )
+            if normalized_section_id or normalized_section_path:
+                if not section_id_matched and not section_path_matched:
+                    continue
+            result = dict(entry)
+            result["score"] = round(float(base_score or 0.75), 4)
+            result["reason"] = "full_section_source_block"
+            result["reason_trace"] = ["full_section_source_block"]
+            matches.append(result)
+
+        def _order_key(item: dict[str, Any]) -> tuple[int, int, int, str]:
+            def _int_value(value: Any, default: int = 0) -> int:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return default
+
+            return (
+                _int_value(item.get("page_no"), 0),
+                _int_value(item.get("chunk_index"), 0),
+                _int_value(item.get("subchunk_index"), 0),
+                str(item.get("heading_path") or item.get("section_path") or ""),
+            )
+
+        matches.sort(key=_order_key)
+        return matches[: max(1, int(top_k or 1))]
+
     def _collect_block_candidates(
         self,
         *,
@@ -1694,6 +1798,7 @@ class CaseLibraryService:
                     section=section,
                     term_lexicon=term_lexicon,
                     target_taxonomy=target_taxonomy,
+                    use_semantic=self.section_scope_semantic_enabled,
                 )
                 if score <= 0:
                     continue
@@ -1720,20 +1825,22 @@ class CaseLibraryService:
                         "_retrieval_text": retrieval_text,
                     }
                 )
-        self._apply_hybrid_rrf_boost(
-            candidates=candidates,
-            query_text="\n".join(part for part in (section_title or "", query) if part).strip(),
-            query_terms=_dedupe_keep_order([*title_terms, *query_terms]),
-            term_lexicon=term_lexicon,
-            text_builder=lambda item: str(item.get("_retrieval_text") or ""),
-            max_boost=HYBRID_RRF_MAX_SECTION_BOOST,
-        )
-        self._apply_hybrid_rerank_boost(
-            candidates=candidates,
-            query_text="\n".join(part for part in (section_title or "", query) if part).strip(),
-            text_builder=lambda item: str(item.get("_retrieval_text") or ""),
-            max_boost=HYBRID_RERANK_MAX_SECTION_BOOST,
-        )
+        if self.section_scope_semantic_enabled:
+            self._apply_hybrid_rrf_boost(
+                candidates=candidates,
+                query_text="\n".join(part for part in (section_title or "", query) if part).strip(),
+                query_terms=_dedupe_keep_order([*title_terms, *query_terms]),
+                term_lexicon=term_lexicon,
+                text_builder=lambda item: str(item.get("_retrieval_text") or ""),
+                max_boost=HYBRID_RRF_MAX_SECTION_BOOST,
+            )
+        if self.section_scope_rerank_enabled:
+            self._apply_hybrid_rerank_boost(
+                candidates=candidates,
+                query_text="\n".join(part for part in (section_title or "", query) if part).strip(),
+                text_builder=lambda item: str(item.get("_retrieval_text") or ""),
+                max_boost=HYBRID_RERANK_MAX_SECTION_BOOST,
+            )
         candidates.sort(
             key=lambda item: (
                 float(item.get("_score") or 0),
@@ -2254,6 +2361,7 @@ class CaseLibraryService:
         section: dict[str, Any],
         term_lexicon: dict[str, tuple[str, ...]] | None = None,
         target_taxonomy: dict[str, Any] | None = None,
+        use_semantic: bool = True,
     ) -> tuple[float, list[str]]:
         heading_path = str(section.get("heading_path") or section.get("section_path") or section.get("title") or "")
         normalized_heading = str(section.get("normalized_heading") or normalize_section_heading(heading_path))
@@ -2352,10 +2460,16 @@ class CaseLibraryService:
         if heading_looks_like_document_title(heading_path):
             score -= 0.22
             reasons.append("document_title_penalty")
-        candidate_text = self._build_section_retrieval_text(section)
-        semantic_query = "\n".join(part for part in (section_title, query) if part).strip()
-        semantic_weight = 0.28 if not detail_overlap else 0.12
-        score += self._semantic_score_adjustment(query=semantic_query, candidate_text=candidate_text, reasons=reasons, weight=semantic_weight)
+        if use_semantic:
+            candidate_text = self._build_section_retrieval_text(section)
+            semantic_query = "\n".join(part for part in (section_title, query) if part).strip()
+            semantic_weight = 0.28 if not detail_overlap else 0.12
+            score += self._semantic_score_adjustment(
+                query=semantic_query,
+                candidate_text=candidate_text,
+                reasons=reasons,
+                weight=semantic_weight,
+            )
         return score, reasons
 
     def _semantic_score_adjustment(

@@ -45,3 +45,11 @@ class SectionDraft(Base):
             if isinstance(assets, list):
                 return assets
         return []
+
+    @property
+    def asset_candidates(self) -> list:
+        if isinstance(self.validator_result, dict):
+            assets = self.validator_result.get("asset_candidates")
+            if isinstance(assets, list):
+                return assets
+        return []

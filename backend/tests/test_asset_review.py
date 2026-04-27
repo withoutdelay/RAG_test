@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from app.config import get_settings
 from app.services.llm.client import BaseLLMProvider, LLMClient, LLMRequest, LLMResponse, ModelType
-from app.services.parsing.asset_review import AssetReviewService
+from app.services.parsing.asset_review import AssetReviewService, _build_system_prompt, _build_user_prompt
 from app.services.parsing.docling_parser import ParsedAsset
 
 
@@ -100,6 +100,27 @@ class AssetReviewServiceTests(unittest.TestCase):
         self.assertIsNotNone(provider.seen_request)
         self.assertEqual(len(provider.seen_request.input_images), 1)
         self.assertTrue(provider.seen_request.input_images[0].image_url.startswith("data:image/png;base64,"))
+
+    def test_asset_review_prompt_uses_general_visual_evidence_rules(self) -> None:
+        system_prompt = _build_system_prompt()
+        user_prompt = _build_user_prompt(
+            [
+                (
+                    0,
+                    {
+                        "candidate_index": 0,
+                        "title": "主接线图",
+                        "current_visual_role": "engineering_figure",
+                    },
+                )
+            ],
+            vision_candidate_indices=[0],
+        )
+
+        self.assertIn("视觉内容与标题/上下文冲突", system_prompt)
+        self.assertIn("标题、caption、heading_path 和邻近正文都可能来自 OCR", system_prompt)
+        self.assertIn("不具备工程图结构", system_prompt)
+        self.assertIn("title、heading_path、caption、context_before、context_after 只是弱证据", user_prompt)
 
 
 if __name__ == "__main__":

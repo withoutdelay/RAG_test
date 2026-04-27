@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import dataclass, field
 import json
@@ -30,7 +31,15 @@ ASSET_REVIEW_SCHEMA: dict[str, Any] = {
                     "candidate_index": {"type": "integer"},
                     "visual_role": {
                         "type": "string",
-                        "enum": ["engineering_figure", "page_furniture", "illustration"],
+                        "enum": [
+                            "engineering_figure",
+                            "page_furniture",
+                            "illustration",
+                            "layout_drawing",
+                            "product_photo",
+                            "asset_fragment",
+                            "text_fragment",
+                        ],
                     },
                     "confidence": {"type": "number"},
                     "reason": {"type": "string"},
@@ -89,7 +98,9 @@ class AssetReviewService:
         )
 
         try:
-            response = await self.llm_client.invoke(request)
+            timeout_seconds = max(1.0, float(self.settings.parser_llm_asset_review_timeout_seconds))
+            async with asyncio.timeout(timeout_seconds):
+                response = await self.llm_client.invoke(request)
             payload = json.loads(response.content)
         except Exception as exc:
             stats.error = str(exc)
@@ -104,7 +115,7 @@ class AssetReviewService:
                 }
             return assets, stats
 
-        decisions = payload.get("items") or []
+        decisions = _extract_items(payload)
         for decision in decisions:
             try:
                 asset_index = int(decision.get("candidate_index"))
@@ -145,18 +156,18 @@ class AssetReviewService:
         return assets, stats
 
     def _collect_candidates(self, assets: list[ParsedAsset]) -> list[tuple[int, dict[str, Any]]]:
-        candidates: list[tuple[int, dict[str, Any]]] = []
+        candidates: list[tuple[int, int, dict[str, Any]]] = []
         limit = max(0, int(self.settings.parser_llm_asset_review_max_assets))
         if limit <= 0:
-            return candidates
+            return []
 
         for index, asset in enumerate(assets):
-            if len(candidates) >= limit:
-                break
-            if not self._should_review_asset(asset):
+            priority = self._review_priority(asset)
+            if priority <= 0:
                 continue
-            candidates.append((index, _build_candidate_payload(index=index, asset=asset)))
-        return candidates
+            candidates.append((priority, index, _build_candidate_payload(index=index, asset=asset)))
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        return [(index, payload) for _priority, index, payload in candidates[:limit]]
 
     def _build_input_images(self, candidates: list[tuple[int, dict[str, Any]]]) -> tuple[list[LLMInputImage], list[int]]:
         if not self.settings.parser_llm_asset_review_use_vision:
@@ -183,8 +194,11 @@ class AssetReviewService:
         return input_images, candidate_indices
 
     def _should_review_asset(self, asset: ParsedAsset) -> bool:
+        return self._review_priority(asset) > 0
+
+    def _review_priority(self, asset: ParsedAsset) -> int:
         if asset.asset_type != "figure":
-            return False
+            return 0
 
         metadata = dict(asset.meta or {})
         current_role = str(metadata.get("visual_role") or "")
@@ -194,33 +208,66 @@ class AssetReviewService:
             if isinstance(value, str) and value
         )
 
+        if (
+            self.settings.parser_llm_asset_review_use_vision
+            and asset.image_bytes
+            and current_role in {"engineering_figure", "illustration", "reference_figure", "layout_drawing"}
+        ):
+            if current_role == "engineering_figure":
+                return 100
+            return 80
         if _looks_like_page_banner(metadata) and current_role != "page_furniture":
-            return True
+            return 95
         if PAGE_FURNITURE_HINT_PATTERN.search(combined) and current_role != "page_furniture":
-            return True
+            return 90
         if _should_replace_title(asset.title):
-            return True
+            return 70
         if current_role in {"illustration", "reference_figure"} and FIGURE_HINT_PATTERN.search(combined):
-            return True
+            return 75
         if current_role == "engineering_figure" and not FIGURE_HINT_PATTERN.search(combined):
-            return True
-        return False
+            return 85
+        return 0
 
 
 def _build_system_prompt() -> str:
     return (
-        "你是 PDF 图资产复核器。请基于标题、上下文、页面几何信息，判断图片资产属于哪一类：\n"
+        "你是 PDF 图资产复核器。请基于图片本体、页面几何信息、标题和上下文，判断图片资产属于哪一类。\n"
+        "核心原则：先判断视觉本体是什么，再参考标题和上下文；标题、caption、heading_path 和邻近正文都可能来自 OCR、"
+        "版面抽取或人工编号，不能单独决定图片类型。\n\n"
+        "视觉类别：\n"
         "1. engineering_figure: 真实工程示意图、原理图、接线图、波形图、系统图。\n"
         "2. page_furniture: 页眉页脚、公司 logo、页码条、目录装饰、版权或边角装饰图。\n"
-        "3. illustration: 普通插图、外形图、说明性配图，但不是页眉页脚噪声。\n\n"
+        "3. illustration: 普通插图或说明性配图，但不是产品照片、页面噪声或工程图。\n"
+        "4. layout_drawing: 平面布置、房间布置、柜体外形尺寸、安装间距、检修通道等布局/外形图。\n"
+        "5. product_photo: 产品照片、设备实拍、展台照片、机柜照片，不是一次主接线或拓扑图。\n"
+        "6. asset_fragment: 箭头、局部符号、小图标、被裁断的碎片。\n"
+        "7. text_fragment: 标题文字截图、正文截图、只有文字且不构成表格/图纸的图片。\n\n"
         "判定原则：\n"
-        "- 页面顶部/底部的细长小图、banner、logo，优先判为 page_furniture。\n"
-        "- 只有在上下文明确显示原理图/接线图/波形图/系统结构图时，才判为 engineering_figure。\n"
-        "- 不要因为上下文里出现“如下图所示”就把页脚 logo 判成工程图。\n"
-        "- 如果同时提供了图片，请优先根据图片视觉内容判定；文字上下文仅作为辅助。\n"
+        "- 如果提供了图片，视觉内容优先；文字上下文仅用于辅助命名和理解用途。\n"
+        "- 当视觉内容与标题/上下文冲突时，以视觉内容为准，并在 reason 中写明冲突类型。\n"
+        "- 只有图片本体呈现电气拓扑、回路连接、控制逻辑、曲线波形或系统结构关系时，才判为 engineering_figure。\n"
+        "- 图片本体若是实物照片、产品渲染、现场照片、柜体照片或展台照片，判为 product_photo，不要按标题推断成拓扑图。\n"
+        "- 图片本体若是平面布置、房间布置、安装尺寸、柜体外形、间距/通道/基础示意，判为 layout_drawing，不要推断成主回路或系统拓扑。\n"
+        "- 图片本体若只有局部箭头、符号、小图标、裁断块、残缺曲线或孤立装饰元素，判为 asset_fragment。\n"
+        "- 图片本体若主要是标题、段落、页眉页脚文字截图，判为 text_fragment 或 page_furniture。\n"
+        "- 页面顶部/底部的细长小图、banner、logo、页码或公司标识，优先判为 page_furniture。\n"
+        "- 不要因为上下文里出现“如下图所示”“示意图”“接线图”等词，就把不具备工程图结构的图片判为工程图。\n"
+        "- 如果图片缺失、过小、模糊或无法确认视觉本体，降低 confidence，并给出保守类别。\n"
         "- title_hint 只输出短标题；如果无法改进，就返回空字符串。\n"
         "- 只返回 JSON。"
     )
+
+
+def _extract_items(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        items = payload.get("items") or []
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        return []
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
 
 
 def _build_user_prompt(candidates: list[tuple[int, dict[str, Any]]], *, vision_candidate_indices: list[int]) -> str:
@@ -230,6 +277,8 @@ def _build_user_prompt(candidates: list[tuple[int, dict[str, Any]]], *, vision_c
     return (
         "请审核以下 PDF 图片资产候选，并输出 JSON。\n"
         "如果附带图片输入，则图片顺序与 vision_candidate_indices 中列出的 candidate_index 顺序完全一致。\n\n"
+        "注意：候选中的 title、heading_path、caption、context_before、context_after 只是弱证据；"
+        "它们可能描述相邻段落而不是图片本身。请先判断图片本体，再决定 visual_role。\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
 

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_db_session
+from app.db import get_db_session, get_session_factory
+from app.models.job import Job
+from app.models.project import Project
 from app.schemas.artifacts import (
     ClarificationResolveRequest,
     EvidenceBundleRead,
@@ -36,11 +42,13 @@ from app.services.export import ExportService
 from app.services.jobs import JobService
 from app.services.requirement import RequirementService
 from app.services.retrieval import EvidenceBundleService
+from app.services.task_queue import get_background_task_queue
 from app.services.validation import ValidationService
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def get_requirement_service() -> RequirementService:
@@ -69,6 +77,155 @@ def get_validation_service() -> ValidationService:
 
 def get_export_service() -> ExportService:
     return ExportService()
+
+
+async def _run_generate_sections_job(
+    service: SectionDraftService,
+    job_id: UUID,
+    project_id: UUID,
+    outline_id: UUID | None,
+) -> None:
+    async with get_session_factory()() as session:
+        try:
+            await service.generate_sections(
+                session=session,
+                project_id=project_id,
+                outline_id=outline_id,
+                job_id=job_id,
+            )
+        except Exception as exc:
+            await session.rollback()
+            logger.exception("Section generation job failed", extra={"job_id": str(job_id), "project_id": str(project_id)})
+            job = await session.get(Job, job_id)
+            if job is not None:
+                job.status = "failed"
+                job.error_code = exc.__class__.__name__[:50]
+                job.output_ref = {
+                    **(job.output_ref or {}),
+                    "error": str(exc),
+                    "progress": {
+                        **((job.output_ref or {}).get("progress") or {}),
+                        "stage": "failed",
+                    },
+                }
+                job.completed_at = datetime.now(timezone.utc)
+                await session.commit()
+
+
+async def _run_generate_outline_job(
+    service: OutlineService,
+    job_id: UUID,
+    project_id: UUID,
+    requirement_card_id: UUID | None,
+    evidence_bundle_id: UUID | None,
+    instructions: str | None,
+) -> None:
+    async with get_session_factory()() as session:
+        job = await session.get(Job, job_id)
+        if job is not None:
+            job.status = "running"
+            job.started_at = datetime.now(timezone.utc)
+            job.output_ref = {"progress": {"stage": "running"}}
+            await session.commit()
+        try:
+            delegated_job, outline = await service.generate_outline(
+                session=session,
+                project_id=project_id,
+                requirement_card_id=requirement_card_id,
+                evidence_bundle_id=evidence_bundle_id,
+                instructions=instructions,
+            )
+            job = await session.get(Job, job_id)
+            if job is not None:
+                job.status = "succeeded"
+                job.output_ref = {
+                    "outline_id": str(outline.id),
+                    "delegated_job_id": str(delegated_job.id),
+                    "progress": {"stage": "completed"},
+                }
+                job.completed_at = datetime.now(timezone.utc)
+                await session.commit()
+        except Exception as exc:
+            await session.rollback()
+            logger.exception("Outline generation job failed", extra={"job_id": str(job_id), "project_id": str(project_id)})
+            job = await session.get(Job, job_id)
+            if job is not None:
+                job.status = "failed"
+                job.error_code = exc.__class__.__name__[:50]
+                job.output_ref = {
+                    **(job.output_ref or {}),
+                    "error": str(exc),
+                    "progress": {"stage": "failed"},
+                }
+                job.completed_at = datetime.now(timezone.utc)
+                await session.commit()
+
+
+async def _mark_job_failed(session: AsyncSession, job_id: UUID, exc: Exception) -> None:
+    job = await session.get(Job, job_id)
+    if job is None:
+        return
+    job.status = "failed"
+    job.error_code = exc.__class__.__name__[:50]
+    job.output_ref = {
+        **(job.output_ref or {}),
+        "error": str(exc),
+        "progress": {
+            **((job.output_ref or {}).get("progress") or {}),
+            "stage": "failed",
+        },
+    }
+    job.completed_at = datetime.now(timezone.utc)
+    await session.commit()
+
+
+async def _run_retrieve_evidence_job(
+    job_id: UUID,
+    project_id: UUID,
+    requirement_card_id: UUID | None,
+    top_k: int,
+    doc_type: str | None,
+) -> None:
+    async with get_session_factory()() as session:
+        try:
+            await EvidenceBundleService().retrieve_evidence(
+                session=session,
+                project_id=project_id,
+                requirement_card_id=requirement_card_id,
+                top_k=top_k,
+                doc_type=doc_type,
+                job_id=job_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            logger.exception("Evidence retrieval job failed", extra={"job_id": str(job_id), "project_id": str(project_id)})
+            await _mark_job_failed(session, job_id, exc)
+
+
+async def _run_regenerate_section_job(
+    job_id: UUID,
+    project_id: UUID,
+    section_id: str,
+    outline_id: UUID | None,
+    preferred_citation_ids: list[str] | None,
+) -> None:
+    async with get_session_factory()() as session:
+        try:
+            await SectionDraftService().regenerate_section(
+                session=session,
+                project_id=project_id,
+                section_id=section_id,
+                outline_id=outline_id,
+                preferred_citation_ids=preferred_citation_ids,
+                job_id=job_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            logger.exception(
+                "Section regeneration job failed",
+                extra={"job_id": str(job_id), "project_id": str(project_id), "section_id": section_id},
+            )
+            await _mark_job_failed(session, job_id, exc)
 
 
 @router.post(
@@ -175,20 +332,85 @@ async def retrieve_evidence(
     project_id: UUID,
     payload: EvidenceRetrieveRequest,
     session: AsyncSession = Depends(get_db_session),
-    service: EvidenceBundleService = Depends(get_evidence_bundle_service),
 ) -> APIResponse[JobAcceptedData]:
-    try:
-        job, bundle = await service.retrieve_evidence(
-            session=session,
-            project_id=project_id,
-            requirement_card_id=payload.requirement_card_id,
-            top_k=payload.top_k,
-            doc_type=payload.doc_type,
-        )
-    except ArtifactNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except ArtifactValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    queue = get_background_task_queue()
+    dedupe_key = (
+        f"retrieve:{project_id}:"
+        f"{payload.requirement_card_id or 'latest'}:"
+        f"{payload.doc_type or 'historical_proposal'}:"
+        f"{payload.top_k}"
+    )
+    active_job_id = queue.active_job_id(dedupe_key)
+    if active_job_id is not None:
+        active_job = await session.get(Job, active_job_id)
+        if active_job is not None and active_job.status in {"queued", "running"}:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=JobAcceptedData(
+                    job_id=active_job.id,
+                    status=active_job.status,
+                    resource_id=None,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
+
+    job = Job(
+        project_id=project_id,
+        job_type="retrieve",
+        status="queued",
+        trace_id=uuid.uuid4().hex,
+        input_ref={
+            "project_id": str(project_id),
+            "requirement_card_id": str(payload.requirement_card_id) if payload.requirement_card_id else None,
+            "top_k": payload.top_k,
+            "doc_type": payload.doc_type,
+        },
+        output_ref={"progress": {"stage": "queued"}},
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+    submitted_job_id = queue.submit(
+        job_id=job.id,
+        job_type="retrieve",
+        label=f"retrieve:{project_id}",
+        dedupe_key=dedupe_key,
+        priority=20,
+        run=lambda: _run_retrieve_evidence_job(
+            job.id,
+            project_id,
+            payload.requirement_card_id,
+            payload.top_k,
+            payload.doc_type,
+        ),
+    )
+    if submitted_job_id != job.id:
+        job.status = "failed"
+        job.error_code = "DuplicateQueuedJob"
+        job.output_ref = {
+            **(job.output_ref or {}),
+            "error": f"Duplicate retrieval job already active: {submitted_job_id}",
+            "progress": {"stage": "deduplicated"},
+        }
+        job.completed_at = datetime.now(timezone.utc)
+        await session.commit()
+        active_job = await session.get(Job, submitted_job_id)
+        if active_job is not None:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=JobAcceptedData(
+                    job_id=active_job.id,
+                    status=active_job.status,
+                    resource_id=None,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
 
     return APIResponse(
         code=202,
@@ -196,7 +418,7 @@ async def retrieve_evidence(
         data=JobAcceptedData(
             job_id=job.id,
             status=job.status,
-            resource_id=bundle.id,
+            resource_id=None,
             next_poll=f"/api/v1/jobs/{job.id}",
         ),
     )
@@ -223,28 +445,44 @@ async def get_latest_evidence_bundle(
 async def generate_outline(
     project_id: UUID,
     payload: OutlineGenerateRequest,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db_session),
     service: OutlineService = Depends(get_outline_service),
 ) -> APIResponse[JobAcceptedData]:
-    try:
-        job, outline = await service.generate_outline(
-            session=session,
-            project_id=project_id,
-            requirement_card_id=payload.requirement_card_id,
-            evidence_bundle_id=payload.evidence_bundle_id,
-            instructions=payload.instructions,
-        )
-    except ArtifactNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except ArtifactValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    job = Job(
+        project_id=project_id,
+        job_type="outline",
+        status="queued",
+        trace_id=uuid.uuid4().hex,
+        input_ref={
+            "project_id": str(project_id),
+            "requirement_card_id": str(payload.requirement_card_id) if payload.requirement_card_id else None,
+            "evidence_bundle_id": str(payload.evidence_bundle_id) if payload.evidence_bundle_id else None,
+        },
+        output_ref={"progress": {"stage": "queued"}},
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+    background_tasks.add_task(
+        _run_generate_outline_job,
+        service,
+        job.id,
+        project_id,
+        payload.requirement_card_id,
+        payload.evidence_bundle_id,
+        payload.instructions,
+    )
     return APIResponse(
         code=202,
         message="success",
         data=JobAcceptedData(
             job_id=job.id,
             status=job.status,
-            resource_id=outline.id,
+            resource_id=None,
             next_poll=f"/api/v1/jobs/{job.id}",
         ),
     )
@@ -317,11 +555,12 @@ async def approve_outline(
 async def generate_sections(
     project_id: UUID,
     payload: SectionGenerateRequest,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db_session),
     service: SectionDraftService = Depends(get_section_draft_service),
 ) -> APIResponse[JobAcceptedData]:
     try:
-        job, drafts = await service.generate_sections(
+        job = await service.create_generate_sections_job(
             session=session,
             project_id=project_id,
             outline_id=payload.outline_id,
@@ -330,14 +569,14 @@ async def generate_sections(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ArtifactValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    resource_id = drafts[0].id if drafts else None
+    background_tasks.add_task(_run_generate_sections_job, service, job.id, project_id, payload.outline_id)
     return APIResponse(
         code=202,
         message="success",
         data=JobAcceptedData(
             job_id=job.id,
             status=job.status,
-            resource_id=resource_id,
+            resource_id=None,
             next_poll=f"/api/v1/jobs/{job.id}",
         ),
     )
@@ -375,8 +614,25 @@ async def regenerate_section(
     session: AsyncSession = Depends(get_db_session),
     service: SectionDraftService = Depends(get_section_draft_service),
 ) -> APIResponse[JobAcceptedData]:
+    queue = get_background_task_queue()
+    dedupe_key = f"generate-section:{project_id}:{section_id}"
+    active_job_id = queue.active_job_id(dedupe_key)
+    if active_job_id is not None:
+        active_job = await session.get(Job, active_job_id)
+        if active_job is not None and active_job.status in {"queued", "running"}:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=JobAcceptedData(
+                    job_id=active_job.id,
+                    status=active_job.status,
+                    resource_id=None,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
+
     try:
-        job, draft = await service.regenerate_section(
+        job = await service.create_regenerate_section_job(
             session=session,
             project_id=project_id,
             section_id=section_id,
@@ -387,13 +643,51 @@ async def regenerate_section(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ArtifactValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    submitted_job_id = queue.submit(
+        job_id=job.id,
+        job_type="generate_section",
+        label=f"generate-section:{project_id}:{section_id}",
+        dedupe_key=dedupe_key,
+        priority=10,
+        run=lambda: _run_regenerate_section_job(
+            job.id,
+            project_id,
+            section_id,
+            payload.outline_id,
+            payload.preferred_citation_ids,
+        ),
+    )
+    if submitted_job_id != job.id:
+        job.status = "failed"
+        job.error_code = "DuplicateQueuedJob"
+        job.output_ref = {
+            **(job.output_ref or {}),
+            "error": f"Duplicate section regeneration job already active: {submitted_job_id}",
+            "progress": {"stage": "deduplicated"},
+        }
+        job.completed_at = datetime.now(timezone.utc)
+        await session.commit()
+        active_job = await session.get(Job, submitted_job_id)
+        if active_job is not None:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=JobAcceptedData(
+                    job_id=active_job.id,
+                    status=active_job.status,
+                    resource_id=None,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
+
     return APIResponse(
         code=202,
         message="success",
         data=JobAcceptedData(
             job_id=job.id,
             status=job.status,
-            resource_id=draft.id,
+            resource_id=None,
             next_poll=f"/api/v1/jobs/{job.id}",
         ),
     )
@@ -551,6 +845,11 @@ async def get_latest_export(
     except ArtifactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(code=200, message="success", data=ExportRead.model_validate(export_record))
+
+
+@router.get("/jobs/queue", response_model=APIResponse[dict[str, Any]])
+async def get_job_queue_status() -> APIResponse[dict[str, Any]]:
+    return APIResponse(code=200, message="success", data=get_background_task_queue().status())
 
 
 @router.get("/jobs/{job_id}", response_model=APIResponse[JobRead])

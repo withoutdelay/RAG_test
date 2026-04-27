@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.config import get_settings
 from app.services.parsing.asset_review import AssetReviewService, AssetReviewStats
+from app.services.parsing.asset_quality import apply_asset_quality_gate
 from app.services.parsing.asset_semantic_summary import AssetSemanticSummaryService, AssetSemanticSummaryStats
 from app.services.parsing.document_profile import build_document_profile
 from app.services.parsing.docling_parser import DoclingParser, ParsedDocument
@@ -35,6 +36,11 @@ class ParserService:
         if include_asset_enrichment:
             assets, asset_review_stats = await self.asset_review_service.review_assets(assets)
             assets, asset_summary_stats = await self.asset_summary_service.summarize_assets(assets)
+            if self.settings.parser_asset_quality_gate_enabled:
+                assets = apply_asset_quality_gate(
+                    assets,
+                    confidence_threshold=self.settings.parser_llm_asset_review_confidence_threshold,
+                )
         else:
             asset_review_stats = AssetReviewStats()
             asset_summary_stats = AssetSemanticSummaryStats()

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from app.config import get_settings
 from app.services.llm.client import BaseLLMProvider, LLMClient, LLMRequest, LLMResponse, ModelType
-from app.services.parsing.asset_semantic_summary import AssetSemanticSummaryService
+from app.services.parsing.asset_semantic_summary import AssetSemanticSummaryService, _build_system_prompt, _build_user_prompt
 from app.services.parsing.docling_parser import ParsedAsset
 
 
@@ -198,6 +198,27 @@ class AssetSemanticSummaryServiceTests(unittest.TestCase):
         self.assertGreaterEqual(provider.request_sizes.count(2), 1)
         self.assertEqual(summarized_assets[0].meta["semantic_summary"]["status"], "summarized")
         self.assertEqual(summarized_assets[1].meta["semantic_summary"]["status"], "summarized")
+
+    def test_summary_prompt_requires_visual_evidence_over_title(self) -> None:
+        system_prompt = _build_system_prompt()
+        user_prompt = _build_user_prompt(
+            [
+                (
+                    0,
+                    {
+                        "candidate_index": 0,
+                        "title": "系统拓扑图",
+                        "current_visual_role": "engineering_figure",
+                    },
+                )
+            ],
+            vision_candidate_indices=[0],
+        )
+
+        self.assertIn("标题、caption、heading_path、前后文只是弱证据", system_prompt)
+        self.assertIn("不要把产品照片、布局图、文字截图或碎片摘要成主接线图", system_prompt)
+        self.assertIn("视觉内容与文字上下文冲突", system_prompt)
+        self.assertIn("宁可保守标注待人工确认", user_prompt)
 
 
 if __name__ == "__main__":

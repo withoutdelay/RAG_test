@@ -37,6 +37,10 @@ DOC_LING_TEXT_TYPES = tuple(item for item in (TextItem, SectionHeaderItem) if it
 DOC_LING_ASSET_TYPES = tuple(item for item in (PictureItem, TableItem) if item is not None)
 DOC_LING_HEADING_TYPES = tuple(item for item in (SectionHeaderItem, TextItem) if item is not None)
 
+MIN_REUSABLE_FIGURE_DIMENSION = 80
+MIN_REUSABLE_FIGURE_AREA = 12000
+LAYOUT_DRAWING_MARKERS = ("外观图", "高度关系", "平面间距", "间距示意", "外形", "柜体分段", "顶部通风", "布置图", "尺寸图", "检修通道")
+
 
 @dataclass
 class ParsedAsset:
@@ -301,6 +305,11 @@ class DoclingParser:
                 page_size=page_size,
                 image_size=image_size,
             )
+            quality_flags = []
+            preserve_in_vector_db = True
+            if asset_type == "figure" and visual_role == "asset_fragment":
+                quality_flags.append("tiny_visual_fragment")
+                preserve_in_vector_db = False
 
             assets.append(
                 ParsedAsset(
@@ -322,6 +331,8 @@ class DoclingParser:
                         "label": str(getattr(element, "label", "") or ""),
                         "caption": caption,
                         "visual_role": visual_role,
+                        "quality_flags": quality_flags,
+                        "preserve_in_vector_db": preserve_in_vector_db,
                     },
                 )
             )
@@ -493,6 +504,16 @@ class DoclingParser:
         ):
             return "page_furniture"
 
+        if self._looks_like_tiny_visual_fragment(
+            bbox=bbox,
+            page_size=page_size,
+            image_size=image_size,
+        ):
+            return "asset_fragment"
+
+        if any(marker in joined_context for marker in LAYOUT_DRAWING_MARKERS):
+            return "layout_drawing"
+
         if any(
             marker in joined_context
             for marker in ("原理图", "接线图", "示意图", "波形", "电压", "电流", "circuit", "waveform", "schematic")
@@ -515,6 +536,41 @@ class DoclingParser:
             return "engineering_figure"
 
         return "illustration"
+
+    def _looks_like_tiny_visual_fragment(
+        self,
+        *,
+        bbox: Any | None,
+        page_size: tuple[float, float] | None,
+        image_size: tuple[int, int] | None,
+    ) -> bool:
+        if image_size is not None:
+            width, height = int(image_size[0] or 0), int(image_size[1] or 0)
+            if width <= 0 or height <= 0:
+                return False
+            area = width * height
+            if min(width, height) < MIN_REUSABLE_FIGURE_DIMENSION:
+                return True
+            if area < MIN_REUSABLE_FIGURE_AREA and max(width, height) < MIN_REUSABLE_FIGURE_DIMENSION * 2:
+                return True
+
+        if bbox is None or page_size is None:
+            return False
+
+        page_width, page_height = page_size
+        if page_width <= 0 or page_height <= 0:
+            return False
+        try:
+            box_width = max(0.0, float(bbox.r) - float(bbox.l))
+            box_height = max(0.0, float(bbox.t) - float(bbox.b))
+        except (TypeError, ValueError):
+            return False
+        if box_width <= 0 or box_height <= 0:
+            return False
+
+        box_area = box_width * box_height
+        page_area = page_width * page_height
+        return box_area <= page_area * 0.005 and min(box_width, box_height) <= min(page_width, page_height) * 0.08
 
     def _looks_like_page_furniture_asset(
         self,

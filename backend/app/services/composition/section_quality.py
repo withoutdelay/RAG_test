@@ -12,6 +12,7 @@ from app.services.agents.executor import ExecutorAgent
 from app.services.knowledge import KnowledgeWikiContextProvider
 from app.services.llm.client import LLMClient, LLMRequest, TaskType
 from app.services.llm.prompts import SECTION_QUALITY_REVIEW_SCHEMA, build_section_quality_prompts
+from app.services.vectorstore.block_taxonomy import infer_target_taxonomy
 
 
 INTERNAL_HEADING_PATTERNS = (
@@ -57,6 +58,41 @@ TECHNICAL_SECTION_CLASSES = {"architecture", "configuration", "implementation", 
 LEGACY_PROCESS_SCENARIO_TOKENS = ("高浓磨机", "磨机", "高炉鼓风机", "鼓风机", "压缩机", "油站", "冷却器")
 LEGACY_LCI_SEQUENCE_TOKENS = ("lci", "sfc", "变频软起", "软起动", "软启动", "纯加速", "换相", "同步切换", "工频切换", "励磁柜", "总启动时间")
 LEGACY_LCI_ALLOWED_SECTION_TOKENS = ("lci", "sfc", "变频软起", "软起动", "软启动", "同步切换", "工频切换", "启动时间", "启动过程", "同步电机")
+TECHNICAL_SCHEME_SECTION_TYPES = {
+    "overall_solution",
+    "main_circuit_scheme",
+    "vfd_spec",
+    "starter_spec",
+    "motor_spec",
+    "transformer_spec",
+    "control_logic",
+    "communication_interface",
+    "protection_interlock",
+}
+TECHNICAL_SCOPE_DRIFT_HEADING_TOKENS = (
+    "培训",
+    "售后",
+    "维保",
+    "质保",
+    "巡检",
+    "备品备件",
+    "配件及工具",
+    "建设、经营",
+    "建设经营",
+    "经营方案",
+    "运营模式",
+    "项目建设",
+    "项目实施",
+    "实施进度",
+    "进度规划",
+    "进度计划",
+    "进度安排",
+    "施工进度",
+    "节能效益分享",
+    "收益回收",
+    "所有权",
+    "合同期满",
+)
 METADATA_ONLY_ISSUE_CODES = {
     "INTERNAL_METADATA_PRESENT",
     "INTERNAL_HINT",
@@ -410,18 +446,7 @@ class SectionQualityGateService:
                 source="rule_fallback",
             )
 
-        llm_issues: list[SectionQualityIssue] = []
-        for item in payload.get("issues") or []:
-            llm_issues.append(
-                SectionQualityIssue(
-                    code=str(item.get("code") or "SQLLM"),
-                    severity=_normalize_severity(item.get("severity")),
-                    target=str(item.get("target") or "章节整体").strip() or "章节整体",
-                    message=str(item.get("message") or "").strip() or "章节质量需人工确认。",
-                    suggested_fix=str(item.get("suggested_fix") or "").strip() or "请按章节目标重写并统一标题风格。",
-                    source="llm",
-                )
-            )
+        llm_issues = _coerce_llm_quality_issues(payload.get("issues"))
 
         return SectionQualityReview(
             passed=bool(payload.get("pass")),
@@ -431,6 +456,45 @@ class SectionQualityGateService:
             rewrite_instruction=str(payload.get("rewrite_instruction") or "").strip(),
             source="llm",
         )
+
+
+def _coerce_llm_quality_issues(raw_issues: Any) -> list[SectionQualityIssue]:
+    if raw_issues is None:
+        return []
+    if isinstance(raw_issues, list):
+        issue_items = raw_issues
+    else:
+        issue_items = [raw_issues]
+
+    issues: list[SectionQualityIssue] = []
+    for item in issue_items:
+        if isinstance(item, dict):
+            issues.append(
+                SectionQualityIssue(
+                    code=str(item.get("code") or "SQLLM"),
+                    severity=_normalize_severity(item.get("severity")),
+                    target=str(item.get("target") or "章节整体").strip() or "章节整体",
+                    message=str(item.get("message") or "").strip() or "章节质量需人工确认。",
+                    suggested_fix=str(item.get("suggested_fix") or "").strip() or "请按章节目标重写并统一标题风格。",
+                    source="llm",
+                )
+            )
+            continue
+
+        message = str(item or "").strip()
+        if not message:
+            continue
+        issues.append(
+            SectionQualityIssue(
+                code="SQLLM",
+                severity="low",
+                target="章节整体",
+                message=message,
+                suggested_fix="请人工复核该模型质检建议，并按章节目标修订。",
+                source="llm",
+            )
+        )
+    return issues
 
 
 def analyze_section_heading_quality(*, section_title: str, content_md: str) -> list[SectionQualityIssue]:
@@ -535,6 +599,9 @@ def analyze_section_content_quality(
     scenario_issue = _detect_legacy_scenario_drift(section=section, body_text=body_text, global_params=global_params or {})
     if scenario_issue:
         issues.append(scenario_issue)
+    scope_drift_issue = _detect_technical_scope_drift(section=section, content_md=content_md)
+    if scope_drift_issue:
+        issues.append(scope_drift_issue)
 
     issues.extend(_detect_repeated_paragraph_issues(paragraphs))
     issues.extend(_detect_knowledge_wiki_quality_issues(body_text=body_text, knowledge_review_bundle=knowledge_review_bundle or {}))
@@ -696,6 +763,25 @@ def _detect_legacy_scenario_drift(
             target="、".join(lci_hits[:4]),
             message="正文混入 LCI 软起/同步切换等历史方案专用过程，超出当前章节边界。",
             suggested_fix="如果当前项目未明确采用 LCI 软起或同步切换，不得复用历史启动时序、励磁等待、换相模式和工频切换参数。",
+        )
+    return None
+
+
+def _detect_technical_scope_drift(*, section: dict[str, Any], content_md: str) -> SectionQualityIssue | None:
+    section_type = str(infer_target_taxonomy(section).get("section_type") or "unknown").lower()
+    if section_type not in TECHNICAL_SCHEME_SECTION_TYPES:
+        return None
+    for level, heading in _extract_markdown_headings(content_md):
+        if level <= 2:
+            continue
+        if not _contains_any_quality_token(heading, TECHNICAL_SCOPE_DRIFT_HEADING_TOKENS):
+            continue
+        return SectionQualityIssue(
+            code="SQ015",
+            severity="high",
+            target=heading,
+            message=f"技术章节出现离题小标题“{heading}”，疑似混入培训、服务、经营或实施计划内容。",
+            suggested_fix="删除该离题小节，改为围绕本章节目标补充主回路、系统架构、设备构成、控制边界或参数证据。",
         )
     return None
 

@@ -2,24 +2,24 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: copilot_db
-      POSTGRES_USER: copilot
-      POSTGRES_PASSWORD: copilot
+      POSTGRES_DB: ${POSTGRES_DB:-copilot_db}
+      POSTGRES_USER: ${POSTGRES_USER:-copilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-copilot}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
 
   qdrant:
     image: qdrant/qdrant:v1.12.4
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant_data:/qdrant/storage
 
@@ -30,18 +30,18 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
 
   gateway:
     build: ./gateway
     ports:
-      - "8001:8001"
+      - "${GATEWAY_PORT:-8001}:8001"
     environment:
       REDIS_ENABLED: "true"
-      REDIS_URL: redis://redis:6379/1
+      REDIS_URL: ${GATEWAY_REDIS_URL:-redis://redis:6379/1}
     depends_on:
       - redis
 
@@ -51,12 +51,12 @@ services:
       args:
         BACKEND_EXTRAS: ${BACKEND_EXTRAS:-}
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://copilot:copilot@postgres:5432/copilot_db
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${CONTAINER_DATABASE_URL:-postgresql+asyncpg://copilot:copilot@postgres:5432/copilot_db}
+      REDIS_URL: ${CONTAINER_REDIS_URL:-redis://redis:6379/0}
       QDRANT_HOST: qdrant
       MINIO_ENDPOINT: minio:9000
       GATEWAY_URL: http://gateway:8001
@@ -70,7 +70,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "3000:3000"
+      - "${FRONTEND_PORT:-3000}:3000"
     environment:
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api/v1
     depends_on:

@@ -1,0 +1,912 @@
+{
+  "project_id": "aed0611f-80b1-4988-8c42-51ad08113fa7",
+  "project_name": "Holdout Eval - 湛江中纸高浓磨机缓存输入",
+  "baseline_document": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+  "outline_id": "6345c539-f029-4896-828b-39d1965e77f1",
+  "draft_version": 1,
+  "baseline_heading_count": 40,
+  "generated_outline_count": 15,
+  "outline_eval": {
+    "coverage": 0.05,
+    "weak_or_missing_count": 29,
+    "weak_or_missing": [
+      {
+        "baseline": {
+          "section_id": "1.1",
+          "title": "1.1 自然环境",
+          "order": 2
+        },
+        "best_generated": {
+          "section_id": "2",
+          "title": "工厂设计环境条件",
+          "score": 0.1111111111111111
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "1.2",
+          "title": "1.2 供电条件",
+          "order": 4
+        },
+        "best_generated": {
+          "section_id": "14",
+          "title": "调试与投运条件",
+          "score": 0.125
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "3",
+          "title": "3 高浓磨机电机控制及电机辅助设备监控系统方案",
+          "order": 11
+        },
+        "best_generated": {
+          "section_id": "3",
+          "title": "供电与辅助电源系统",
+          "score": 0.08
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.2",
+          "title": "4.2 启动和同步过程描述",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "6",
+          "title": "启动与同步控制逻辑",
+          "score": 0.14285714285714285
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.3",
+          "title": "4.3 本地控制单元 PLC 对电机辅助设备监控功能描述",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "7",
+          "title": "本地控制单元（LCU）功能规范",
+          "score": 0.2692307692307692
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.4",
+          "title": "4.4 LCI 变频启动特性",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "5",
+          "title": "LCI变频软起动系统架构",
+          "score": 0.3333333333333333
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.4.1",
+          "title": "4.4.1 负载数据",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "8",
+          "title": "电机与负载特性参数",
+          "score": 0.1
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.4.2",
+          "title": "4.4.2 变频启动曲线",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.1
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1",
+          "title": "5.1 变频器配置",
+          "order": 15
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.25
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1.1",
+          "title": "5.1.1 变频器系统示意图",
+          "order": 15
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.18181818181818182
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1.2",
+          "title": "5.1.2 变频器主要数据",
+          "order": 15
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.2
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1.3",
+          "title": "5.1.3 变频器其他功能",
+          "order": 22
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.2
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1.4",
+          "title": "5.1.4 变频器遵循的标准和认证",
+          "order": 22
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.14285714285714285
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1.5",
+          "title": "5.1.5 变频器外形图",
+          "order": 22
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.2222222222222222
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "7",
+          "title": "7 电机技术规范（ TBD ）",
+          "order": 32
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.16666666666666666
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "9",
+          "title": "9 高压开关柜（ TBD ，以下由大禹电气建议，由上电供应商确定）",
+          "order": 72
+        },
+        "best_generated": {
+          "section_id": "11",
+          "title": "高压开关柜配置方案",
+          "score": 0.14285714285714285
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "9.2",
+          "title": "9.2 开关柜参数",
+          "order": 72
+        },
+        "best_generated": {
+          "section_id": "11",
+          "title": "高压开关柜配置方案",
+          "score": 0.2
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "10",
+          "title": "10 低压开关柜",
+          "order": 80
+        },
+        "best_generated": {
+          "section_id": "11",
+          "title": "高压开关柜配置方案",
+          "score": 0.3333333333333333
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "10.2",
+          "title": "10.2 开关柜参数",
+          "order": 80
+        },
+        "best_generated": {
+          "section_id": "11",
+          "title": "高压开关柜配置方案",
+          "score": 0.2
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "11.3",
+          "title": "11.3 外形尺寸( TBD ,由上电供应商确定)",
+          "order": 86
+        },
+        "best_generated": {
+          "section_id": "1",
+          "title": "项目概述",
+          "score": 0.0
+        }
+      }
+    ],
+    "matches": [
+      {
+        "baseline": {
+          "section_id": "1",
+          "title": "1 工厂设计环境",
+          "order": 2
+        },
+        "best_generated": {
+          "section_id": "2",
+          "title": "工厂设计环境条件",
+          "score": 0.7142857142857143
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "1.1",
+          "title": "1.1 自然环境",
+          "order": 2
+        },
+        "best_generated": {
+          "section_id": "2",
+          "title": "工厂设计环境条件",
+          "score": 0.1111111111111111
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "1.2",
+          "title": "1.2 供电条件",
+          "order": 4
+        },
+        "best_generated": {
+          "section_id": "14",
+          "title": "调试与投运条件",
+          "score": 0.125
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "2",
+          "title": "2 供货范围",
+          "order": 8
+        },
+        "best_generated": {
+          "section_id": "4",
+          "title": "供货范围与设备清单",
+          "score": 0.375
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "3",
+          "title": "3 高浓磨机电机控制及电机辅助设备监控系统方案",
+          "order": 11
+        },
+        "best_generated": {
+          "section_id": "3",
+          "title": "供电与辅助电源系统",
+          "score": 0.08
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.1",
+          "title": "4.1 LCI 变频软起系统方案",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "5",
+          "title": "LCI变频软起动系统架构",
+          "score": 0.5
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4",
+          "title": "4 LCI 变频软起系统方案",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "5",
+          "title": "LCI变频软起动系统架构",
+          "score": 0.5
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.2",
+          "title": "4.2 启动和同步过程描述",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "6",
+          "title": "启动与同步控制逻辑",
+          "score": 0.14285714285714285
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.3",
+          "title": "4.3 本地控制单元 PLC 对电机辅助设备监控功能描述",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "7",
+          "title": "本地控制单元（LCU）功能规范",
+          "score": 0.2692307692307692
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.4",
+          "title": "4.4 LCI 变频启动特性",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "5",
+          "title": "LCI变频软起动系统架构",
+          "score": 0.3333333333333333
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.4.1",
+          "title": "4.4.1 负载数据",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "8",
+          "title": "电机与负载特性参数",
+          "score": 0.1
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "4.4.2",
+          "title": "4.4.2 变频启动曲线",
+          "order": 13
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.1
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5",
+          "title": "5 变频器技术数据",
+          "order": 15
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.5
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1",
+          "title": "5.1 变频器配置",
+          "order": 15
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.25
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1.1",
+          "title": "5.1.1 变频器系统示意图",
+          "order": 15
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.18181818181818182
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1.2",
+          "title": "5.1.2 变频器主要数据",
+          "order": 15
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.2
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1.3",
+          "title": "5.1.3 变频器其他功能",
+          "order": 22
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.2
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1.4",
+          "title": "5.1.4 变频器遵循的标准和认证",
+          "order": 22
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.14285714285714285
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "5.1.5",
+          "title": "5.1.5 变频器外形图",
+          "order": 22
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.2222222222222222
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "6",
+          "title": "6 变压器技术规范",
+          "order": 26
+        },
+        "best_generated": {
+          "section_id": "10",
+          "title": "输入与输出干式变压器技术规范",
+          "score": 0.46153846153846156
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "6.1",
+          "title": "6.1 输入变压器技术规范",
+          "order": 26
+        },
+        "best_generated": {
+          "section_id": "10",
+          "title": "输入与输出干式变压器技术规范",
+          "score": 0.5
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "6.2",
+          "title": "6.2 输出变压器技术规范",
+          "order": 28
+        },
+        "best_generated": {
+          "section_id": "10",
+          "title": "输入与输出干式变压器技术规范",
+          "score": 0.5
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "7",
+          "title": "7 电机技术规范（ TBD ）",
+          "order": 32
+        },
+        "best_generated": {
+          "section_id": "9",
+          "title": "变频器技术规格",
+          "score": 0.16666666666666666
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "8",
+          "title": "8 本地控制单元 PLC 功能规范",
+          "order": 57
+        },
+        "best_generated": {
+          "section_id": "7",
+          "title": "本地控制单元（LCU）功能规范",
+          "score": 0.6
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "9",
+          "title": "9 高压开关柜（ TBD ，以下由大禹电气建议，由上电供应商确定）",
+          "order": 72
+        },
+        "best_generated": {
+          "section_id": "11",
+          "title": "高压开关柜配置方案",
+          "score": 0.14285714285714285
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "9.1",
+          "title": "9.1 供货范围",
+          "order": 72
+        },
+        "best_generated": {
+          "section_id": "4",
+          "title": "供货范围与设备清单",
+          "score": 0.375
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "9.2",
+          "title": "9.2 开关柜参数",
+          "order": 72
+        },
+        "best_generated": {
+          "section_id": "11",
+          "title": "高压开关柜配置方案",
+          "score": 0.2
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "10",
+          "title": "10 低压开关柜",
+          "order": 80
+        },
+        "best_generated": {
+          "section_id": "11",
+          "title": "高压开关柜配置方案",
+          "score": 0.3333333333333333
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "10.1",
+          "title": "10.1 供货范围",
+          "order": 80
+        },
+        "best_generated": {
+          "section_id": "4",
+          "title": "供货范围与设备清单",
+          "score": 0.375
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "10.2",
+          "title": "10.2 开关柜参数",
+          "order": 80
+        },
+        "best_generated": {
+          "section_id": "11",
+          "title": "高压开关柜配置方案",
+          "score": 0.2
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "11.3",
+          "title": "11.3 外形尺寸( TBD ,由上电供应商确定)",
+          "order": 86
+        },
+        "best_generated": {
+          "section_id": "1",
+          "title": "项目概述",
+          "score": 0.0
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "12.3",
+          "title": "12.3 外形尺寸( TBD ,由上电供应商确定)",
+          "order": 88
+        },
+        "best_generated": {
+          "section_id": "1",
+          "title": "项目概述",
+          "score": 0.0
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "13",
+          "title": "13 偏差说明",
+          "order": 89
+        },
+        "best_generated": {
+          "section_id": "1",
+          "title": "项目概述",
+          "score": 0.0
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "14",
+          "title": "14 调试及运行备品备件清单",
+          "order": 90
+        },
+        "best_generated": {
+          "section_id": "14",
+          "title": "调试与投运条件",
+          "score": 0.06666666666666667
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "15",
+          "title": "15 提交资料",
+          "order": 93
+        },
+        "best_generated": {
+          "section_id": "1",
+          "title": "项目概述",
+          "score": 0.0
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "16",
+          "title": "16 资料提供及数量",
+          "order": 95
+        },
+        "best_generated": {
+          "section_id": "1",
+          "title": "项目概述",
+          "score": 0.0
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "17",
+          "title": "17 调试",
+          "order": 96
+        },
+        "best_generated": {
+          "section_id": "14",
+          "title": "调试与投运条件",
+          "score": 0.16666666666666666
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "18",
+          "title": "18 售后服务",
+          "order": 97
+        },
+        "best_generated": {
+          "section_id": "1",
+          "title": "项目概述",
+          "score": 0.0
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "19",
+          "title": "19 培训",
+          "order": 98
+        },
+        "best_generated": {
+          "section_id": "15",
+          "title": "培训与文档交付",
+          "score": 0.16666666666666666
+        }
+      },
+      {
+        "baseline": {
+          "section_id": "20",
+          "title": "20 版本信息",
+          "order": 99
+        },
+        "best_generated": {
+          "section_id": "1",
+          "title": "项目概述",
+          "score": 0.0
+        }
+      }
+    ]
+  },
+  "draft_eval": {
+    "section_count": 15,
+    "sections_with_placeholders": 0,
+    "asset_intent_without_recommendation": [],
+    "sections": [
+      {
+        "section_id": "1",
+        "title": "项目概述",
+        "best_baseline_score": 0.0,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 0,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "10",
+        "title": "输入与输出干式变压器技术规范",
+        "best_baseline_score": 0.5,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 0,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "11",
+        "title": "高压开关柜配置方案",
+        "best_baseline_score": 0.3333333333333333,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 3,
+        "recommended_figures": [
+          {
+            "asset_id": "4cf0fb6c-6f13-499a-b132-bd13854f53bd",
+            "title": "3.3.1 负载数据 Load data",
+            "document_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+            "score": 0.3446
+          },
+          {
+            "asset_id": "1ded5012-1670-44de-b9ff-fe87dde0c224",
+            "title": "3.3.2 变频启动曲线 Start curve by SFC",
+            "document_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+            "score": 0.2497
+          },
+          {
+            "asset_id": "03ae1831-cb69-4268-b766-355a687b7f07",
+            "title": "参考图",
+            "document_name": "宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+            "score": 0.1014
+          }
+        ],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "12",
+        "title": "励磁系统技术要求",
+        "best_baseline_score": 0.08333333333333333,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 2,
+        "recommended_figures": [
+          {
+            "asset_id": "99ac9bdc-71da-4559-9031-3590fa9e3614",
+            "title": "图1：空压机阻力矩曲线 图2：增压机阻力矩曲线",
+            "document_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+            "score": -0.1529
+          },
+          {
+            "asset_id": "d7b02428-f135-4fed-a1a2-fd6eb74aadee",
+            "title": "11.3.2 增压机：",
+            "document_name": "099-230101-001西安陕鼓（秦风气体）技术协议.pdf",
+            "score": -0.2577
+          }
+        ],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "13",
+        "title": "系统保护与联锁逻辑",
+        "best_baseline_score": 0.07142857142857142,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 0,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "14",
+        "title": "调试与投运条件",
+        "best_baseline_score": 0.16666666666666666,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 0,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "15",
+        "title": "培训与文档交付",
+        "best_baseline_score": 0.16666666666666666,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 0,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "2",
+        "title": "工厂设计环境条件",
+        "best_baseline_score": 0.7142857142857143,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 0,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "3",
+        "title": "供电与辅助电源系统",
+        "best_baseline_score": 0.1,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 3,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "4",
+        "title": "供货范围与设备清单",
+        "best_baseline_score": 0.375,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 1,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "5",
+        "title": "LCI变频软起动系统架构",
+        "best_baseline_score": 0.5,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 3,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "6",
+        "title": "启动与同步控制逻辑",
+        "best_baseline_score": 0.14285714285714285,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 0,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "7",
+        "title": "本地控制单元（LCU）功能规范",
+        "best_baseline_score": 0.6,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 0,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "8",
+        "title": "电机与负载特性参数",
+        "best_baseline_score": 0.1,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 3,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      },
+      {
+        "section_id": "9",
+        "title": "变频器技术规格",
+        "best_baseline_score": 0.5,
+        "asset_placeholder_count": 0,
+        "recommended_asset_count": 3,
+        "recommended_figures": [],
+        "asset_diagnostics": {}
+      }
+    ]
+  },
+  "outline_override_path": "/Volumes/thunder/code/RAG_test/output/holdout-eval-zhanjiang-outline-draft-split-outline-override.json"
+}
