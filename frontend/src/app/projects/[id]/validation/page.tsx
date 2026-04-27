@@ -113,7 +113,7 @@ export default function ValidationPage() {
   );
 
   return (
-    <div className="p-6 space-y-6 flex flex-col h-full overflow-hidden">
+    <div className="p-6 space-y-6 flex flex-col h-full overflow-y-auto">
       <div className="flex justify-between items-center shrink-0">
         <div>
           <h2 className="text-2xl font-bold flex items-center">
@@ -152,7 +152,7 @@ export default function ValidationPage() {
           </Button>
         </Card>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 overflow-hidden">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1">
           <div className="lg:col-span-1 space-y-6 overflow-y-auto">
             <Card>
               <CardHeader className="pb-3">
