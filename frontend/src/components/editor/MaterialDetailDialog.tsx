@@ -120,7 +120,7 @@ export function MaterialDetailDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-5xl">
+      <DialogContent className="sm:max-w-[80vw] md:max-w-4xl lg:max-w-5xl xl:max-w-6xl h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {type === 'citation' ? <FileText className="h-5 w-5 text-slate-500" /> : <ImageIcon className="h-5 w-5 text-slate-500" />}
@@ -140,7 +140,7 @@ export function MaterialDetailDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="max-h-[65vh] space-y-4 overflow-y-auto pr-1">
+        <div className="flex-1 space-y-4 overflow-y-auto pr-1">
           {/* Content preview */}
           {type === 'citation' && citationContent ? (
             <DetailSection title="内容预览">

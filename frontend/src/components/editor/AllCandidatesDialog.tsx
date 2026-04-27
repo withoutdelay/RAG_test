@@ -279,7 +279,7 @@ export function AllCandidatesDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-6xl">
+      <DialogContent className="sm:max-w-[90vw] xl:max-w-[1400px] h-[90vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Layers3 className="h-5 w-5 text-slate-500" />
@@ -291,7 +291,7 @@ export function AllCandidatesDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="max-h-[75vh] space-y-4 overflow-y-auto pr-1">
+        <div className="flex-1 space-y-4 overflow-y-auto pr-1">
           <CategorySection title="Citations" icon={FileText} count={citations.length}>
             <HorizontalScrollContainer>
               {citations.map((citation, index) => {
