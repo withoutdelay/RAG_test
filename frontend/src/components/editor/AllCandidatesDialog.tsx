@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { ChevronDown, ChevronRight, FileText, GalleryVerticalEnd, Layers3 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -21,6 +21,42 @@ import {
   resolveCitationSourceContent,
   buildAssetPlaceholder,
 } from './sectionBlockUtils';
+
+function HorizontalScrollContainer({ children }: { children: React.ReactNode }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      const isScrollable = container.scrollWidth > container.clientWidth;
+      if (!isScrollable) return;
+
+      // If scrolling mostly vertically
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        e.preventDefault();
+        container.scrollLeft += e.deltaY;
+      }
+    };
+
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    
+    return () => {
+      container.removeEventListener('wheel', handleWheel);
+    };
+  }, []);
+
+  return (
+    <div
+      ref={containerRef}
+      className="flex items-start gap-4 overflow-x-auto pb-4 px-1 snap-x scroll-smooth"
+      style={{ scrollbarWidth: 'thin' }}
+    >
+      {children}
+    </div>
+  );
+}
 
 
 interface AllCandidatesDialogProps {
@@ -105,7 +141,7 @@ function CitationRow({
 
   return (
     <div
-      className={`rounded-xl border transition-colors ${
+      className={`w-[360px] shrink-0 flex flex-col rounded-xl border transition-colors snap-start ${
         isSelected
           ? 'border-blue-300 bg-blue-50'
           : 'border-slate-200 bg-white hover:border-slate-300'
@@ -133,7 +169,10 @@ function CitationRow({
 
       {expanded && (
         <div className="border-t border-slate-200 p-3 space-y-3">
-          <div className="max-h-[300px] overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <div 
+            className="max-h-[300px] overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-3 custom-scrollbar"
+            onWheel={(e) => e.stopPropagation()}
+          >
             {sourceContent ? (
               markdownTableCandidate(sourceContent) || sourceContent.includes('#') ? (
                 <MarkdownArticle markdown={sourceContent} compact />
@@ -180,7 +219,7 @@ function AssetRow({
   const alreadyUsed = placeholder ? contentMd.includes(placeholder) : false;
 
   return (
-    <div className={`rounded-xl border transition-colors ${
+    <div className={`w-[360px] shrink-0 flex flex-col rounded-xl border transition-colors snap-start ${
       asset.review_required ? 'border-amber-300 bg-amber-50/30' : 'border-slate-200 bg-white hover:border-slate-300'
     }`}>
       <button
@@ -252,9 +291,9 @@ export function AllCandidatesDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="max-h-[65vh] space-y-4 overflow-y-auto pr-1">
+        <div className="max-h-[75vh] space-y-4 overflow-y-auto pr-1">
           <CategorySection title="Citations" icon={FileText} count={citations.length}>
-            <div className="space-y-2">
+            <HorizontalScrollContainer>
               {citations.map((citation, index) => {
                 const citationId = citation.evidence_id || `citation-${index}`;
                 return (
@@ -271,11 +310,11 @@ export function AllCandidatesDialog({
                   />
                 );
               })}
-            </div>
+            </HorizontalScrollContainer>
           </CategorySection>
 
           <CategorySection title="Recommended Assets" icon={GalleryVerticalEnd} count={recommendedAssets.length}>
-            <div className="space-y-2">
+            <HorizontalScrollContainer>
               {recommendedAssets.map((asset, index) => (
                 <AssetRow
                   key={`recommended-${asset.asset_id || asset.title || index}`}
@@ -285,11 +324,11 @@ export function AllCandidatesDialog({
                   onInsert={() => onInsertAsset(asset)}
                 />
               ))}
-            </div>
+            </HorizontalScrollContainer>
           </CategorySection>
 
           <CategorySection title="More Candidates" icon={GalleryVerticalEnd} count={assetCandidates.length} defaultOpen={false}>
-            <div className="space-y-2">
+            <HorizontalScrollContainer>
               {assetCandidates.map((asset, index) => (
                 <AssetRow
                   key={`candidate-${asset.asset_id || asset.title || index}`}
@@ -299,7 +338,7 @@ export function AllCandidatesDialog({
                   onInsert={() => onInsertAsset(asset)}
                 />
               ))}
-            </div>
+            </HorizontalScrollContainer>
           </CategorySection>
         </div>
 
