@@ -200,7 +200,7 @@ export default function EditorPage() {
             </Button>
           </div>
         ) : (
-          <div className="max-w-5xl mx-auto">
+          <div className="max-w-[1400px] mx-auto">
             {sections.map((section) => (
               <SectionBlock
                 key={section.section_id}
