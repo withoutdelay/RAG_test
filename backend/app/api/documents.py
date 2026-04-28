@@ -54,9 +54,25 @@ from app.utils.object_storage import MaterializedObject, get_object_storage
 
 router = APIRouter()
 
+LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE = {
+    "main_indexed": "historical_proposal",
+    "review_pending": "historical_review",
+    "holdout_eval": "holdout_eval",
+}
+
 
 def _should_refresh_history_library(*, doc_type: str) -> bool:
     return str(doc_type or "").strip().lower() == "historical_proposal"
+
+
+def _normalize_library_import_route(route: str | None) -> str:
+    normalized = str(route or "main_indexed").strip()
+    if normalized not in LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid library import route. Use main_indexed, review_pending, or holdout_eval.",
+        )
+    return normalized
 
 
 def _resolve_document_parse_outcome(*, doc_type: str, parsed_metadata: dict[str, object] | None) -> dict[str, object]:
@@ -782,28 +798,30 @@ def _safe_delete_storage_path(*, storage: object, storage_path: str | None) -> N
         pass
 
 
-@router.post(
-    "/projects/{project_id}/documents/upload",
-    response_model=APIResponse[DocumentUploadAccepted],
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def upload_document(
-    project_id: UUID,
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    doc_type: str = Form(...),
-    metadata: str | None = Form(default=None),
-    session: AsyncSession = Depends(get_db_session),
-) -> APIResponse[DocumentUploadAccepted]:
-    project = await session.get(Project, project_id)
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-
+def _parse_upload_metadata(metadata: str | None) -> dict[str, object]:
     try:
         parsed_metadata = json.loads(metadata) if metadata else {}
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid metadata JSON") from exc
+    if not isinstance(parsed_metadata, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid metadata JSON")
+    return parsed_metadata
 
+
+async def _accept_document_upload(
+    *,
+    session: AsyncSession,
+    file: UploadFile,
+    project_id: UUID | None,
+    doc_type: str,
+    metadata: dict[str, object],
+    storage_prefix: str,
+    job_label_prefix: str,
+    trace_prefix: str,
+    priority: int,
+    input_ref_extra: dict[str, object] | None = None,
+    ensure_sample_id: bool = False,
+) -> APIResponse[DocumentUploadAccepted]:
     suffix = Path(file.filename or "").suffix or ".bin"
     storage = get_object_storage()
 
@@ -812,10 +830,11 @@ async def upload_document(
         temp_path = Path(temp_file.name)
 
     try:
-        storage_path = storage.save(temp_path, prefix=f"{project_id}_")
+        storage_path = storage.save(temp_path, prefix=storage_prefix)
         file_size_bytes = temp_path.stat().st_size
     finally:
         temp_path.unlink(missing_ok=True)
+
     document = Document(
         project_id=project_id,
         filename=file.filename or temp_path.name,
@@ -824,10 +843,13 @@ async def upload_document(
         storage_path=storage_path,
         doc_type=doc_type,
         parse_status="parsing",
-        meta=parsed_metadata,
+        meta=metadata,
     )
     session.add(document)
     await session.flush()
+    if ensure_sample_id and not str((document.meta or {}).get("sample_id") or "").strip():
+        document.meta = {**(document.meta or {}), "sample_id": f"uploaded-{document.id}"}
+
     job = Job(
         project_id=project_id,
         job_type="document_parse",
@@ -836,23 +858,28 @@ async def upload_document(
             "document_id": str(document.id),
             "filename": document.filename,
             "doc_type": doc_type,
+            **(input_ref_extra or {}),
         },
         output_ref={"progress": {"stage": "queued", "document_id": str(document.id)}},
-        trace_id=f"document-parse-{uuid.uuid4()}",
+        trace_id=f"{trace_prefix}-{uuid.uuid4()}",
     )
     session.add(job)
+    await session.flush()
+    job_id = job.id
+    document_id = document.id
+    job_metadata = dict(document.meta or {})
     await session.commit()
     await session.refresh(document)
     await session.refresh(job)
 
     queue = get_background_task_queue()
     queue.submit(
-        job_id=job.id,
+        job_id=job_id,
         job_type="document_parse",
-        label=f"parse:{document.filename}",
-        run=lambda: _run_document_parse_job(job.id, document.id, parsed_metadata),
-        dedupe_key=f"document_parse:{document.id}",
-        priority=40,
+        label=f"{job_label_prefix}:{document.filename}",
+        run=lambda: _run_document_parse_job(job_id, document_id, job_metadata),
+        dedupe_key=f"document_parse:{document_id}",
+        priority=priority,
     )
 
     return APIResponse(
@@ -869,6 +896,70 @@ async def upload_document(
             job_id=job.id,
             next_poll=f"/api/v1/jobs/{job.id}",
         ),
+    )
+
+
+@router.post(
+    "/projects/{project_id}/documents/upload",
+    response_model=APIResponse[DocumentUploadAccepted],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def upload_document(
+    project_id: UUID,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    doc_type: str = Form(...),
+    metadata: str | None = Form(default=None),
+    session: AsyncSession = Depends(get_db_session),
+) -> APIResponse[DocumentUploadAccepted]:
+    project = await session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return await _accept_document_upload(
+        session=session,
+        file=file,
+        project_id=project_id,
+        doc_type=doc_type,
+        metadata=_parse_upload_metadata(metadata),
+        storage_prefix=f"{project_id}_",
+        job_label_prefix="parse",
+        trace_prefix="document-parse",
+        priority=40,
+    )
+
+
+@router.post(
+    "/library/materials/import",
+    response_model=APIResponse[DocumentUploadAccepted],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def import_library_material(
+    file: UploadFile = File(...),
+    route: str = Form(default="main_indexed"),
+    metadata: str | None = Form(default=None),
+    session: AsyncSession = Depends(get_db_session),
+) -> APIResponse[DocumentUploadAccepted]:
+    normalized_route = _normalize_library_import_route(route)
+    doc_type = LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE[normalized_route]
+    base_metadata = {
+        **_parse_upload_metadata(metadata),
+        "source_kind": "uploaded_document",
+        "material_route": normalized_route,
+        "library_track": "pilot_main" if normalized_route == "main_indexed" else normalized_route,
+        "ingestion_recommendation": "uploaded_historical_material",
+    }
+    return await _accept_document_upload(
+        session=session,
+        file=file,
+        project_id=None,
+        doc_type=doc_type,
+        metadata=base_metadata,
+        storage_prefix="library_upload_",
+        job_label_prefix="import-library",
+        trace_prefix="library-document-parse",
+        priority=35,
+        input_ref_extra={"library_route": normalized_route},
+        ensure_sample_id=True,
     )
 
 

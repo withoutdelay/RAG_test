@@ -56,6 +56,14 @@ DOC_TYPE_BY_ROUTE = {
     "conversion_failed": "legacy_conversion",
     "excluded": "excluded",
 }
+DOC_TYPE_TO_ROUTE = {
+    "historical_proposal": "main_indexed",
+    "historical_review": "review_pending",
+    "holdout_eval": "holdout_eval",
+    "legacy_conversion": "conversion_required",
+    "excluded": "excluded",
+}
+LIBRARY_DOC_TYPES = set(DOC_TYPE_TO_ROUTE)
 
 
 class MaterialRouteRequest(BaseModel):
@@ -130,6 +138,43 @@ def _sample_source_path(entry: dict[str, Any]) -> Path:
     return REPO_ROOT / "private_samples" / "real_proposals" / str(entry.get("file_name") or "")
 
 
+def _route_for_uploaded_document(document: Document) -> MaterialRoute:
+    metadata = dict(document.meta or {})
+    route = str(metadata.get("material_route") or "").strip()
+    if route in DOC_TYPE_BY_ROUTE:
+        return route  # type: ignore[return-value]
+    return DOC_TYPE_TO_ROUTE.get(str(document.doc_type or "").strip(), "review_pending")  # type: ignore[return-value]
+
+
+def _uploaded_document_entry(document: Document) -> dict[str, Any]:
+    metadata = dict(document.meta or {})
+    route = _route_for_uploaded_document(document)
+    sample_id = str(metadata.get("sample_id") or "").strip() or f"uploaded-{document.id}"
+    file_type = str(document.file_type or "").strip().lower()
+    return {
+        "sample_id": sample_id,
+        "file_name": document.filename,
+        "file_format": file_type or Path(document.filename).suffix.lstrip(".").lower(),
+        "file_size_bytes": document.file_size_bytes,
+        "file_path": document.storage_path,
+        "source_kind": "uploaded_document",
+        "source_exists": True,
+        "document_id": str(document.id),
+        "phase_b_track": metadata.get("library_track") or "uploaded",
+        "suggested_track": metadata.get("material_route") or route,
+        "route": route,
+        "detected_profile": metadata.get("detected_profile") or metadata.get("parser_backend_used"),
+        "ingestion_recommendation": metadata.get("ingestion_recommendation") or "uploaded_historical_material",
+        "metrics": {
+            "image_count": int(metadata.get("image_count") or 0),
+            "table_count": int(metadata.get("table_count") or 0),
+            "chunk_count": int(metadata.get("chunk_count") or 0),
+            "indexed_chunk_count": int(metadata.get("indexed_chunk_count") or 0),
+        },
+        "high_risk_content_flags": list(metadata.get("high_risk_content_flags") or []),
+    }
+
+
 def _material_base_metadata(entry: dict[str, Any], route: str) -> dict[str, Any]:
     return {
         "sample_id": entry.get("sample_id"),
@@ -158,6 +203,52 @@ async def _latest_document_for_filename(*, session: AsyncSession, filename: str)
     return result.first()
 
 
+async def _resolve_material_document(*, session: AsyncSession, entry: dict[str, Any]) -> Document | None:
+    document_id = entry.get("document_id")
+    if document_id:
+        try:
+            return await session.get(Document, UUID(str(document_id)))
+        except (TypeError, ValueError):
+            return None
+    return await _latest_document_for_filename(session=session, filename=str(entry.get("file_name") or ""))
+
+
+async def _load_uploaded_material_entries(*, session: AsyncSession, manifest_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    manifest_sample_ids = {str(entry.get("sample_id") or "").strip() for entry in manifest_entries}
+    manifest_file_names = {str(entry.get("file_name") or "").strip() for entry in manifest_entries}
+    result = await session.scalars(
+        select(Document)
+        .where(Document.doc_type.in_(LIBRARY_DOC_TYPES))
+        .order_by(Document.created_at.desc())
+    )
+
+    uploaded_entries: list[dict[str, Any]] = []
+    seen_sample_ids = set(manifest_sample_ids)
+    for document in result.all():
+        metadata = dict(document.meta or {})
+        sample_id = str(metadata.get("sample_id") or "").strip() or f"uploaded-{document.id}"
+        if sample_id in seen_sample_ids:
+            continue
+        if not str(metadata.get("sample_id") or "").strip() and document.filename in manifest_file_names:
+            continue
+        seen_sample_ids.add(sample_id)
+        uploaded_entries.append(_uploaded_document_entry(document))
+    return uploaded_entries
+
+
+async def _load_all_material_entries(*, session: AsyncSession) -> list[dict[str, Any]]:
+    manifest_entries = _load_manifest_entries()
+    uploaded_entries = await _load_uploaded_material_entries(session=session, manifest_entries=manifest_entries)
+    return [*manifest_entries, *uploaded_entries]
+
+
+async def _find_material_entry(*, session: AsyncSession, sample_id: str) -> dict[str, Any] | None:
+    return next(
+        (item for item in await _load_all_material_entries(session=session) if str(item.get("sample_id") or "") == sample_id),
+        None,
+    )
+
+
 async def _build_material_item(
     *,
     session: AsyncSession,
@@ -165,10 +256,11 @@ async def _build_material_item(
     state: dict[str, Any],
 ) -> dict[str, Any]:
     sample_id = str(entry.get("sample_id") or "")
-    route = _route_for_entry(entry, state)
+    route = entry.get("route") if str(entry.get("route") or "") in DOC_TYPE_BY_ROUTE else _route_for_entry(entry, state)
     state_item = dict((state.get("materials") or {}).get(sample_id) or {})
+    source_kind = str(entry.get("source_kind") or "private_sample")
     path = _sample_source_path(entry)
-    document = await _latest_document_for_filename(session=session, filename=str(entry.get("file_name") or ""))
+    document = await _resolve_material_document(session=session, entry=entry)
     raw_document: RawDocument | None = None
     if document is not None:
         raw_document_id = (document.meta or {}).get("raw_document_id")
@@ -209,7 +301,8 @@ async def _build_material_item(
         "file_format": entry.get("file_format"),
         "file_size_bytes": entry.get("file_size_bytes"),
         "source_path": str(path),
-        "source_exists": path.exists(),
+        "source_kind": source_kind,
+        "source_exists": bool(entry.get("source_exists")) if source_kind == "uploaded_document" else path.exists(),
         "phase_b_track": entry.get("phase_b_track"),
         "suggested_track": entry.get("suggested_track"),
         "route": route,
@@ -388,7 +481,7 @@ def _summarize_materials(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 @router.get("/library/materials", response_model=APIResponse[dict[str, Any]])
 async def list_materials(session: AsyncSession = Depends(get_db_session)) -> APIResponse[dict[str, Any]]:
-    entries = _load_manifest_entries()
+    entries = await _load_all_material_entries(session=session)
     state = _load_material_state()
     items = [await _build_material_item(session=session, entry=entry, state=state) for entry in entries]
     return APIResponse(code=200, message="success", data={"items": items, "summary": _summarize_materials(items)})
@@ -396,7 +489,7 @@ async def list_materials(session: AsyncSession = Depends(get_db_session)) -> API
 
 @router.get("/library/materials/{sample_id}", response_model=APIResponse[dict[str, Any]])
 async def get_material(sample_id: str, session: AsyncSession = Depends(get_db_session)) -> APIResponse[dict[str, Any]]:
-    entry = next((item for item in _load_manifest_entries() if str(item.get("sample_id") or "") == sample_id), None)
+    entry = await _find_material_entry(session=session, sample_id=sample_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Material not found")
     state = _load_material_state()
@@ -411,7 +504,7 @@ async def route_material(
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[dict[str, Any]]:
-    entry = next((item for item in _load_manifest_entries() if str(item.get("sample_id") or "") == sample_id), None)
+    entry = await _find_material_entry(session=session, sample_id=sample_id)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Material not found")
 
@@ -426,7 +519,7 @@ async def route_material(
     state["materials"] = materials
     _save_material_state(state)
 
-    document = await _latest_document_for_filename(session=session, filename=str(entry.get("file_name") or ""))
+    document = await _resolve_material_document(session=session, entry=entry)
     if document is not None:
         document.doc_type = DOC_TYPE_BY_ROUTE[payload.route]
         document.meta = {

@@ -400,6 +400,7 @@ export interface LibraryMaterial {
   file_format: string;
   file_size_bytes: number;
   source_path: string;
+  source_kind?: 'private_sample' | 'uploaded_document' | string;
   source_exists: boolean;
   phase_b_track?: string | null;
   suggested_track?: string | null;

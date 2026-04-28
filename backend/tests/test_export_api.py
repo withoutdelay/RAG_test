@@ -19,7 +19,8 @@ class _FakeExportService:
         self.job_id = uuid4()
         self.export_id = uuid4()
 
-    async def export_project(self, *, session, project_id, format="markdown"):
+    async def export_project(self, *, session, project_id, format="docx", force=False):
+        extension = "docx" if format == "docx" else "md"
         return (
             SimpleNamespace(id=self.job_id, status="succeeded"),
             SimpleNamespace(
@@ -30,12 +31,12 @@ class _FakeExportService:
                 requirement_card_id=uuid4(),
                 evidence_bundle_id=uuid4(),
                 validation_report_id=uuid4(),
-                file_name="demo-export.md",
-                file_type="md",
-                storage_path="data/uploads/demo-export.md",
+                file_name=f"demo-export.{extension}",
+                file_type=extension,
+                storage_path=f"data/uploads/demo-export.{extension}",
                 content_md="# demo\n\ncontent",
-                snapshot={"draft_version": 1},
-                status="succeeded",
+                snapshot={"draft_version": 1, "forced": force},
+                status="forced" if force else "succeeded",
                 created_at=datetime.now(timezone.utc),
             ),
         )
@@ -65,7 +66,7 @@ class ExportApiTests(unittest.TestCase):
         with TestClient(self.app) as client:
             export_response = client.post(
                 f"/api/v1/projects/{self.service.project_id}/export",
-                json={"format": "markdown"},
+                json={"format": "docx", "force": True},
             )
             self.assertEqual(export_response.status_code, 202)
             self.assertEqual(export_response.json()["data"]["resource_id"], str(self.service.export_id))
@@ -74,7 +75,7 @@ class ExportApiTests(unittest.TestCase):
             self.assertEqual(latest_response.status_code, 200)
             payload = latest_response.json()["data"]
             self.assertEqual(payload["id"], str(self.service.export_id))
-            self.assertEqual(payload["file_type"], "md")
+            self.assertEqual(payload["file_type"], "docx")
             self.assertEqual(payload["status"], "succeeded")
 
 

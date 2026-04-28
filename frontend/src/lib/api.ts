@@ -63,4 +63,8 @@ export function buildAssetContentUrl(assetId: string): string {
   return `${resolveApiBaseURL()}/assets/${assetId}/content`;
 }
 
+export function buildLatestExportDownloadUrl(projectId: string): string {
+  return `${resolveApiBaseURL()}/projects/${projectId}/exports/latest/download`;
+}
+
 export default api;

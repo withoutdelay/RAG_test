@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertCircle, CheckCircle2, Database, Eye, FileText, Image as ImageIcon, Loader2, RefreshCw, ShieldAlert } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertCircle, CheckCircle2, Database, Eye, FileText, Image as ImageIcon, Loader2, RefreshCw, ShieldAlert, UploadCloud } from 'lucide-react';
 import api, { buildAssetContentUrl, getApiErrorMessage } from '@/lib/api';
 import type {
   JobAccepted,
@@ -36,8 +36,15 @@ const ROUTE_OPTIONS: MaterialRoute[] = [
   'conversion_required',
   'excluded',
 ];
+const IMPORT_ROUTE_OPTIONS: MaterialRoute[] = [
+  'main_indexed',
+  'review_pending',
+  'holdout_eval',
+];
+const PROCESSING_PARSE_STATUSES = new Set(['pending', 'queued', 'parsing']);
 const LIBRARY_JOB_POLL_INTERVAL_MS = 3000;
 const LIBRARY_JOB_POLL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+type MaterialFilter = MaterialRoute | 'all' | 'processing';
 
 interface JobQueueStatus {
   worker_count: number;
@@ -137,13 +144,17 @@ export default function LibraryMaterialsPage() {
   const [payload, setPayload] = useState<LibraryMaterialsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [busySampleId, setBusySampleId] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importRoute, setImportRoute] = useState<MaterialRoute>('main_indexed');
+  const [importProgress, setImportProgress] = useState<string | null>(null);
   const [rebuilding, setRebuilding] = useState(false);
   const [rebuildProgress, setRebuildProgress] = useState<string | null>(null);
   const [queueStatus, setQueueStatus] = useState<JobQueueStatus | null>(null);
-  const [activeRoute, setActiveRoute] = useState<MaterialRoute | 'all'>('all');
+  const [activeRoute, setActiveRoute] = useState<MaterialFilter>('all');
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [selectedMaterial, setSelectedMaterial] = useState<LibraryMaterialDetail | null>(null);
+  const importFileInputRef = useRef<HTMLInputElement>(null);
 
   const loadMaterials = useCallback(async () => {
     try {
@@ -159,6 +170,16 @@ export default function LibraryMaterialsPage() {
   useEffect(() => {
     void loadMaterials();
   }, [loadMaterials]);
+
+  useEffect(() => {
+    if (!payload?.items.some((item) => PROCESSING_PARSE_STATUSES.has(item.parse_status))) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void loadMaterials();
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [loadMaterials, payload]);
 
   const openMaterialDetail = async (sampleId: string) => {
     setDetailOpen(true);
@@ -219,6 +240,9 @@ export default function LibraryMaterialsPage() {
   const items = useMemo(() => {
     const allItems = payload?.items || [];
     if (activeRoute === 'all') return allItems;
+    if (activeRoute === 'processing') {
+      return allItems.filter((item) => PROCESSING_PARSE_STATUSES.has(item.parse_status));
+    }
     return allItems.filter((item) => item.route === activeRoute);
   }, [activeRoute, payload]);
 
@@ -240,14 +264,62 @@ export default function LibraryMaterialsPage() {
     }
   };
 
-  const reparseOne = async (sampleId: string) => {
-    setBusySampleId(sampleId);
+  const handleImportClick = () => {
+    importFileInputRef.current?.click();
+  };
+
+  const importHistoricalMaterials = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    setImporting(true);
+    let successCount = 0;
+    try {
+      for (const file of files) {
+        setImportProgress(`Importing ${successCount + 1} / ${files.length}: ${file.name}`);
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('route', importRoute);
+        const res = await api.post('/library/materials/import', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        const accepted = (res.data || {}) as JobAccepted & { message?: string; filename?: string };
+        successCount += 1;
+        setImportProgress(`Historical proposal import queued: ${accepted.filename || file.name}`);
+      }
+      toast.success(`Queued ${successCount}/${files.length} historical proposal(s) for import`);
+      await loadQueueStatus();
+      await loadMaterials();
+    } catch (error) {
+      toast.error(
+        getApiErrorMessage(
+          error,
+          files.length > 1
+            ? `Imported ${successCount}/${files.length} historical proposal(s) before the error`
+            : 'Failed to import historical proposal'
+        )
+      );
+      setImportProgress(getApiErrorMessage(error, 'Historical proposal import failed'));
+    } finally {
+      setImporting(false);
+      if (importFileInputRef.current) importFileInputRef.current.value = '';
+    }
+  };
+
+  const reparseOne = async (item: LibraryMaterial) => {
+    setBusySampleId(item.sample_id);
     setRebuildProgress('Submitting material reparse job...');
     try {
-      const res = await api.post(`/library/materials/${sampleId}/reparse`, {});
-      const accepted = res.data as JobAccepted;
-      setRebuildProgress(`Reparse queued: ${accepted.job_id}`);
-      await waitForLibraryJob(accepted.next_poll);
+      if (item.source_kind === 'uploaded_document' && item.document_id) {
+        const res = await api.post(`/documents/${item.document_id}/reparse`);
+        const accepted = res.data as { message?: string };
+        setRebuildProgress(accepted.message || 'Material reparse completed');
+      } else {
+        const res = await api.post(`/library/materials/${item.sample_id}/reparse`, {});
+        const accepted = res.data as JobAccepted;
+        setRebuildProgress(`Reparse queued: ${accepted.job_id}`);
+        await waitForLibraryJob(accepted.next_poll);
+      }
       toast.success('Material reparse completed');
       await loadMaterials();
     } catch (error) {
@@ -276,6 +348,9 @@ export default function LibraryMaterialsPage() {
 
   const summary = payload?.summary;
   const issueCount = payload?.items.filter((item) => item.quality_flags.length > 0).length || 0;
+  const processingCount = payload?.items.filter((item) => PROCESSING_PARSE_STATUSES.has(item.parse_status)).length || 0;
+  const activityProgress = rebuilding || busySampleId ? rebuildProgress : (importProgress || rebuildProgress);
+  const activityTitle = importing ? 'Historical proposal import' : 'Library rebuild status';
 
   return (
     <div className="p-6 space-y-6">
@@ -286,7 +361,34 @@ export default function LibraryMaterialsPage() {
             Audit real proposal files before they enter the reusable library, AI Wiki, and visual index.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-2 rounded-md border bg-background px-2 py-1 text-sm">
+            <span className="text-muted-foreground">Import route</span>
+            <select
+              className="bg-transparent text-sm outline-none"
+              value={importRoute}
+              onChange={(event) => setImportRoute(event.target.value as MaterialRoute)}
+              disabled={importing}
+            >
+              {IMPORT_ROUTE_OPTIONS.map((route) => (
+                <option key={route} value={route}>
+                  {ROUTE_LABELS[route]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <input
+            type="file"
+            ref={importFileInputRef}
+            onChange={importHistoricalMaterials}
+            className="hidden"
+            multiple
+            accept=".pdf,.docx,.doc,.txt,.md"
+          />
+          <Button onClick={handleImportClick} disabled={importing || rebuilding}>
+            {importing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
+            {importing ? 'Importing...' : 'Import Historical Proposal'}
+          </Button>
           <Button variant="outline" onClick={() => void loadMaterials()} disabled={loading || rebuilding}>
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
@@ -298,12 +400,12 @@ export default function LibraryMaterialsPage() {
         </div>
       </div>
 
-      {rebuildProgress && (
+      {activityProgress && (
         <Alert>
-          {rebuilding || busySampleId ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
-          <AlertTitle>Library rebuild status</AlertTitle>
+          {rebuilding || busySampleId || importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
+          <AlertTitle>{activityTitle}</AlertTitle>
           <AlertDescription>
-            {rebuildProgress}
+            {activityProgress}
             {queueStatus && (
               <span className="mt-1 block text-xs text-muted-foreground">
                 Queue: {queueStatus.running_count} running / {queueStatus.queued_count} waiting / {queueStatus.worker_count} worker(s)
@@ -354,6 +456,13 @@ export default function LibraryMaterialsPage() {
         <Button variant={activeRoute === 'all' ? 'default' : 'outline'} size="sm" onClick={() => setActiveRoute('all')}>
           All
         </Button>
+        <Button
+          variant={activeRoute === 'processing' ? 'default' : 'outline'}
+          size="sm"
+          onClick={() => setActiveRoute('processing')}
+        >
+          Processing {processingCount}
+        </Button>
         {ROUTE_OPTIONS.map((route) => (
           <Button
             key={route}
@@ -390,6 +499,7 @@ export default function LibraryMaterialsPage() {
                       </div>
                       <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                         <Badge variant="outline">{item.file_format}</Badge>
+                        {item.source_kind === 'uploaded_document' ? <Badge variant="outline">uploaded</Badge> : null}
                         <span>{formatBytes(item.file_size_bytes)}</span>
                         <span>profile: {item.detected_profile || 'unknown'}</span>
                         <span>parse: {item.parse_status}</span>
@@ -411,7 +521,7 @@ export default function LibraryMaterialsPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => void reparseOne(item.sample_id)}
+                        onClick={() => void reparseOne(item)}
                         disabled={busySampleId === item.sample_id}
                       >
                         {busySampleId === item.sample_id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}

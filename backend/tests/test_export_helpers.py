@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
+
+from docx import Document as DocxDocument
 
 from app.services.export.service import (
     ExportService,
@@ -11,6 +15,7 @@ from app.services.export.service import (
     render_export_markdown,
     render_export_sections_markdown,
     summarize_holistic_finalization_trace,
+    write_export_file,
 )
 
 
@@ -149,6 +154,23 @@ class ExportHelperTests(unittest.TestCase):
 
         self.assertIn("[[ASSET:FIGURE:asset-001]]", markdown)
         self.assertNotIn("[建议插入图片]", markdown)
+
+    def test_write_export_file_creates_word_docx(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as handle:
+            path = Path(handle.name)
+        try:
+            write_export_file(
+                markdown="# 测试方案\n\n## 技术参数\n\n| 参数 | 值 |\n| --- | --- |\n| 电压 | 10kV |\n\n- 支持联锁控制",
+                file_format="docx",
+                destination=path,
+            )
+            document = DocxDocument(str(path))
+            text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            self.assertIn("测试方案", text)
+            self.assertIn("技术参数", text)
+            self.assertEqual(document.tables[0].cell(1, 1).text, "10kV")
+        finally:
+            path.unlink(missing_ok=True)
 
     def test_export_holistic_finalization_is_optional_and_renders_assets(self) -> None:
         finalized = (

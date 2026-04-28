@@ -190,7 +190,8 @@ class ReviewTaskResolveRequest(BaseModel):
 
 
 class ExportRequest(BaseModel):
-    format: str = Field(default="markdown", pattern="^(markdown)$")
+    format: str = Field(default="docx", pattern="^(markdown|docx)$")
+    force: bool = False
 
 
 class ExportRead(BaseModel):

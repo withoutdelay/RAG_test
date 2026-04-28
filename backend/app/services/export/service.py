@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from uuid import UUID
 
+from docx import Document as DocxDocument
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,8 +29,10 @@ from app.services.validation.service import flatten_outline_sections
 from app.utils.object_storage import get_object_storage
 
 
-SUPPORTED_EXPORT_FORMATS = {"markdown": "md"}
+SUPPORTED_EXPORT_FORMATS = {"markdown": "md", "docx": "docx"}
 ASSET_PLACEHOLDER_PATTERN = re.compile(r"\[\[ASSET:(FIGURE|TABLE|FORMULA):([^\]]+)\]\]")
+MARKDOWN_TABLE_DELIMITER_PATTERN = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+ORDERED_LIST_PATTERN = re.compile(r"^\s*\d+[.)]\s+(.+)$")
 
 
 def build_export_snapshot(
@@ -38,8 +41,9 @@ def build_export_snapshot(
     outline: ProposalOutline,
     requirement_card: RequirementCard,
     evidence_bundle: EvidenceBundle,
-    validation_report: ValidationReport,
+    validation_report: ValidationReport | None,
     review_tasks: list[ReviewTask],
+    forced: bool = False,
 ) -> dict:
     return {
         "project_id": str(project.id),
@@ -51,8 +55,9 @@ def build_export_snapshot(
         "requirement_card_version": requirement_card.version,
         "evidence_bundle_id": str(evidence_bundle.id),
         "evidence_bundle_version": evidence_bundle.retrieval_version,
-        "validation_report_id": str(validation_report.id),
-        "validation_status": validation_report.status,
+        "validation_report_id": str(validation_report.id) if validation_report else None,
+        "validation_status": validation_report.status if validation_report else "not_run",
+        "forced": forced,
         "review_tasks": [
             {
                 "id": str(task.id),
@@ -179,6 +184,151 @@ def render_export_markdown_from_sections(*, sections_markdown: str, section_draf
     if not citations_markdown:
         return sections_markdown.strip() + "\n"
     return "\n".join([sections_markdown.strip(), "", citations_markdown]).strip() + "\n"
+
+
+def write_export_file(*, markdown: str, file_format: str, destination: Path) -> None:
+    normalized = file_format.lower()
+    if normalized == "markdown":
+        destination.write_text(markdown, encoding="utf-8")
+        return
+    if normalized == "docx":
+        _write_docx_from_markdown(markdown=markdown, destination=destination)
+        return
+    raise ArtifactValidationError("Unsupported export format")
+
+
+def _write_docx_from_markdown(*, markdown: str, destination: Path) -> None:
+    document = DocxDocument()
+    document.core_properties.title = _clean_markdown_inline(_first_heading(markdown) or "技术方案")
+
+    lines = str(markdown or "").splitlines()
+    paragraph_buffer: list[str] = []
+    index = 0
+
+    def flush_paragraph() -> None:
+        if not paragraph_buffer:
+            return
+        text = _clean_markdown_inline(" ".join(item.strip() for item in paragraph_buffer if item.strip()))
+        if text:
+            document.add_paragraph(text)
+        paragraph_buffer.clear()
+
+    while index < len(lines):
+        raw_line = lines[index]
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if not stripped:
+            flush_paragraph()
+            index += 1
+            continue
+
+        if stripped.startswith("```"):
+            flush_paragraph()
+            code_lines: list[str] = []
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                code_lines.append(lines[index])
+                index += 1
+            document.add_paragraph("\n".join(code_lines))
+            index += 1
+            continue
+
+        heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if heading_match:
+            flush_paragraph()
+            level = min(len(heading_match.group(1)), 4)
+            document.add_heading(_clean_markdown_inline(heading_match.group(2)), level=level)
+            index += 1
+            continue
+
+        if stripped in {"---", "***", "___"}:
+            flush_paragraph()
+            index += 1
+            continue
+
+        if _looks_like_markdown_table_row(stripped):
+            flush_paragraph()
+            table_lines: list[str] = []
+            while index < len(lines) and _looks_like_markdown_table_row(lines[index].strip()):
+                table_lines.append(lines[index].strip())
+                index += 1
+            _append_markdown_table(document, table_lines)
+            continue
+
+        unordered_match = re.match(r"^\s*[-*+]\s+(.+)$", stripped)
+        if unordered_match:
+            flush_paragraph()
+            document.add_paragraph(_clean_markdown_inline(unordered_match.group(1)), style="List Bullet")
+            index += 1
+            continue
+
+        ordered_match = ORDERED_LIST_PATTERN.match(stripped)
+        if ordered_match:
+            flush_paragraph()
+            document.add_paragraph(_clean_markdown_inline(ordered_match.group(1)), style="List Number")
+            index += 1
+            continue
+
+        if stripped.startswith(">"):
+            flush_paragraph()
+            quote = _clean_markdown_inline(stripped.lstrip("> ").strip())
+            if quote:
+                document.add_paragraph(quote, style="Intense Quote")
+            index += 1
+            continue
+
+        paragraph_buffer.append(stripped)
+        index += 1
+
+    flush_paragraph()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    document.save(destination)
+
+
+def _first_heading(markdown: str) -> str | None:
+    for line in str(markdown or "").splitlines():
+        match = re.match(r"^#\s+(.+)$", line.strip())
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _clean_markdown_inline(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1（\2）", text)
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)
+    text = re.sub(r"(\*|_)(.*?)\1", r"\2", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return text.strip()
+
+
+def _looks_like_markdown_table_row(line: str) -> bool:
+    stripped = str(line or "").strip()
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
+
+
+def _parse_markdown_table_row(line: str) -> list[str]:
+    stripped = str(line or "").strip().strip("|")
+    return [_clean_markdown_inline(cell.strip()) for cell in stripped.split("|")]
+
+
+def _append_markdown_table(document: DocxDocument, table_lines: list[str]) -> None:
+    rows = [
+        _parse_markdown_table_row(line)
+        for line in table_lines
+        if not MARKDOWN_TABLE_DELIMITER_PATTERN.match(str(line or "").strip())
+    ]
+    rows = [row for row in rows if any(cell for cell in row)]
+    if not rows:
+        return
+    col_count = max(len(row) for row in rows)
+    table = document.add_table(rows=len(rows), cols=col_count)
+    table.style = "Table Grid"
+    for row_index, row in enumerate(rows):
+        for col_index in range(col_count):
+            table.cell(row_index, col_index).text = row[col_index] if col_index < len(row) else ""
 
 
 def _render_export_section_content(draft: SectionDraft) -> str:
@@ -402,22 +552,28 @@ class ExportService:
         *,
         session: AsyncSession,
         project_id: UUID,
-        format: str = "markdown",
+        format: str = "docx",
+        force: bool = False,
     ) -> tuple[Job, ProjectExport]:
         normalized_format = format.lower()
         if normalized_format not in SUPPORTED_EXPORT_FORMATS:
-            raise ArtifactValidationError("Only markdown export is supported in the current MVP")
+            raise ArtifactValidationError("Only Word docx or markdown export is supported")
 
         project = await session.get(Project, project_id)
         if not project:
             raise ArtifactNotFoundError("Project not found")
-        if project.status not in {"EXPORTABLE", "EXPORTED"}:
+        exportable = project.status in {"EXPORTABLE", "EXPORTED"}
+        if not exportable and not force:
             raise ArtifactValidationError("Project is not exportable yet")
 
         outline = await self._resolve_outline(session=session, project=project)
         requirement_card = await self._resolve_requirement_card(session=session, project=project, outline=outline)
         evidence_bundle = await self._resolve_evidence_bundle(session=session, outline=outline)
-        validation_report = await self._resolve_validation_report(session=session, project=project)
+        validation_report = await self._resolve_validation_report(
+            session=session,
+            project=project,
+            require_passed=not force,
+        )
         section_drafts = await self._load_section_drafts(session=session, project=project)
         review_tasks = await self._load_review_tasks(session=session, project=project)
 
@@ -428,6 +584,7 @@ class ExportService:
             evidence_bundle=evidence_bundle,
             validation_report=validation_report,
             review_tasks=review_tasks,
+            forced=force and not exportable,
         )
         markdown = render_export_markdown(
             project=project,
@@ -454,8 +611,9 @@ class ExportService:
             input_ref={
                 "project_id": str(project_id),
                 "draft_version": int(project.current_draft_version or 0),
-                "validation_report_id": str(validation_report.id),
+                "validation_report_id": str(validation_report.id) if validation_report else None,
                 "format": normalized_format,
+                "force": force,
             },
             started_at=datetime.now(timezone.utc),
         )
@@ -464,9 +622,9 @@ class ExportService:
 
         storage = get_object_storage()
         file_name = f"{self._slugify(project.name)}-draft-v{int(project.current_draft_version or 0)}.{extension}"
-        with NamedTemporaryFile("w", suffix=f".{extension}", delete=False, encoding="utf-8") as handle:
-            handle.write(markdown)
+        with NamedTemporaryFile("wb", suffix=f".{extension}", delete=False) as handle:
             temp_path = Path(handle.name)
+        write_export_file(markdown=markdown, file_format=normalized_format, destination=temp_path)
         try:
             storage_path = storage.save(temp_path, prefix=f"{project.id}_export_")
         finally:
@@ -478,18 +636,19 @@ class ExportService:
             outline_id=outline.id,
             requirement_card_id=requirement_card.id,
             evidence_bundle_id=evidence_bundle.id,
-            validation_report_id=validation_report.id,
+            validation_report_id=validation_report.id if validation_report else None,
             file_name=file_name,
             file_type=extension,
             storage_path=storage_path,
             content_md=markdown,
             snapshot=snapshot,
-            status="succeeded",
+            status="forced" if force and not exportable else "succeeded",
         )
         session.add(export_record)
         await session.flush()
 
-        project.status = "EXPORTED"
+        if exportable:
+            project.status = "EXPORTED"
         session.add(
             AuditLog(
                 project_id=project_id,
@@ -500,7 +659,8 @@ class ExportService:
                     "draft_version": export_record.draft_version,
                     "file_name": file_name,
                     "storage_path": storage_path,
-                    "validation_report_id": str(validation_report.id),
+                    "validation_report_id": str(validation_report.id) if validation_report else None,
+                    "force": force,
                 },
                 trace_id=job.trace_id,
             )
@@ -719,7 +879,13 @@ class ExportService:
     async def _resolve_evidence_bundle(self, *, session: AsyncSession, outline: ProposalOutline) -> EvidenceBundle:
         return await resolve_outline_evidence_bundle(session=session, outline=outline)
 
-    async def _resolve_validation_report(self, *, session: AsyncSession, project: Project) -> ValidationReport:
+    async def _resolve_validation_report(
+        self,
+        *,
+        session: AsyncSession,
+        project: Project,
+        require_passed: bool = True,
+    ) -> ValidationReport | None:
         result = await session.scalars(
             select(ValidationReport)
             .where(ValidationReport.project_id == project.id)
@@ -728,10 +894,12 @@ class ExportService:
         )
         report = result.first()
         if not report:
-            raise ArtifactValidationError("Project has not been validated yet")
-        if report.status != "passed":
+            if require_passed:
+                raise ArtifactValidationError("Project has not been validated yet")
+            return None
+        if require_passed and report.status != "passed":
             raise ArtifactValidationError("Latest validation report is not exportable")
-        if report.draft_version != int(project.current_draft_version or 0):
+        if require_passed and report.draft_version != int(project.current_draft_version or 0):
             raise ArtifactValidationError("Latest validation report does not match current draft version")
         return report
 

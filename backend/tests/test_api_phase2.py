@@ -146,6 +146,37 @@ class Phase2ApiTests(unittest.TestCase):
             self.assertIn("final", top_result["score_breakdown"])
             self.assertIn("semantic", top_result["score_breakdown"])
 
+    def test_library_material_import_accepts_global_historical_upload(self) -> None:
+        with self._make_client() as client:
+            with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
+                handle.write("# 历史方案\n\n高压变频系统采用一拖一拓扑。")
+                upload_path = Path(handle.name)
+
+            try:
+                with upload_path.open("rb") as file_handle:
+                    upload_response = client.post(
+                        "/api/v1/library/materials/import",
+                        files={"file": ("library-sample.md", file_handle, "text/markdown")},
+                        data={"route": "main_indexed", "metadata": '{"industry":"电气"}'},
+                    )
+            finally:
+                upload_path.unlink(missing_ok=True)
+
+            self.assertEqual(upload_response.status_code, 202)
+            accepted = upload_response.json()["data"]
+            self.assertEqual(accepted["filename"], "library-sample.md")
+            self.assertIsNotNone(accepted["job_id"])
+            self.assertIsNotNone(accepted["next_poll"])
+
+            document_response = client.get(f"/api/v1/documents/{accepted['id']}")
+            self.assertEqual(document_response.status_code, 200)
+            document = document_response.json()["data"]
+            self.assertIsNone(document["project_id"])
+            self.assertEqual(document["doc_type"], "historical_proposal")
+            self.assertEqual(document["metadata"]["material_route"], "main_indexed")
+            self.assertEqual(document["metadata"]["source_kind"], "uploaded_document")
+            self.assertTrue(str(document["metadata"]["sample_id"]).startswith("uploaded-"))
+
     def test_historical_document_upload_marks_parse_insufficient_and_skips_indexing(self) -> None:
         with self._make_client() as client:
             project_response = client.post(

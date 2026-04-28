@@ -7,6 +7,8 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db_session, get_session_factory
@@ -45,6 +47,7 @@ from app.services.retrieval import EvidenceBundleService
 from app.services.task_queue import get_background_task_queue
 from app.services.validation import ValidationService
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
+from app.utils.object_storage import get_object_storage
 
 
 router = APIRouter()
@@ -817,6 +820,7 @@ async def export_project(
             session=session,
             project_id=project_id,
             format=payload.format,
+            force=payload.force,
         )
     except ArtifactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -845,6 +849,32 @@ async def get_latest_export(
     except ArtifactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return APIResponse(code=200, message="success", data=ExportRead.model_validate(export_record))
+
+
+@router.get("/projects/{project_id}/exports/latest/download")
+async def download_latest_export(
+    project_id: UUID,
+    session: AsyncSession = Depends(get_db_session),
+    service: ExportService = Depends(get_export_service),
+) -> FileResponse:
+    try:
+        export_record = await service.get_latest_export(session=session, project_id=project_id)
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    storage = get_object_storage()
+    materialized = storage.materialize(export_record.storage_path)
+    media_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if export_record.file_type == "docx"
+        else "text/markdown; charset=utf-8"
+    )
+    return FileResponse(
+        path=materialized.path,
+        media_type=media_type,
+        filename=export_record.file_name,
+        background=BackgroundTask(materialized.cleanup),
+    )
 
 
 @router.get("/jobs/queue", response_model=APIResponse[dict[str, Any]])
