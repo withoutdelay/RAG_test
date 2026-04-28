@@ -17,6 +17,7 @@ $RootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
 $EnvFile = Join-Path $RootDir ".env"
 $EnvExampleFile = Join-Path $RootDir ".env.example"
 $ComposeFile = Join-Path $RootDir "docker-compose.prod.yml"
+$InstallAssetsDir = Join-Path $RootDir "install-assets"
 $script:RebootMayBeRequired = $false
 
 function Write-Step {
@@ -379,6 +380,55 @@ function Ensure-EnvFile {
   Write-Warn "EMBEDDING_LOCAL_FILES_ONLY=false was set for first-run model download. For offline installs, preload the embedding model before importing documents."
 }
 
+function Import-InstallAssets {
+  if (-not (Test-Path $InstallAssetsDir)) {
+    return
+  }
+
+  $imageTar = Join-Path $InstallAssetsDir "docker-images.tar"
+  if (Test-Path $imageTar) {
+    Write-Step "Loading Docker image bundle from install-assets\\docker-images.tar"
+    & docker load -i $imageTar
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to load Docker image bundle: $imageTar"
+    }
+  }
+
+  $caseLibraryZip = Join-Path $InstallAssetsDir "case_library.zip"
+  $sourceCaseLibrary = Join-Path $InstallAssetsDir "case_library"
+  if ((Test-Path $caseLibraryZip) -or (Test-Path $sourceCaseLibrary)) {
+    $targetCaseLibrary = Join-Path $RootDir "backend\data\case_library"
+    New-Item -ItemType Directory -Force -Path $targetCaseLibrary | Out-Null
+  }
+
+  if (Test-Path $caseLibraryZip) {
+    $targetCaseLibrary = Join-Path $RootDir "backend\data\case_library"
+    Write-Step "Extracting install-assets\\case_library.zip into backend\\data\\case_library"
+    Expand-Archive -Path $caseLibraryZip -DestinationPath $targetCaseLibrary -Force
+
+    $nestedCaseLibrary = Join-Path $targetCaseLibrary "case_library"
+    if (Test-Path $nestedCaseLibrary) {
+      foreach ($item in @(Get-ChildItem -Path $nestedCaseLibrary -Force)) {
+        Copy-Item -Path $item.FullName -Destination $targetCaseLibrary -Recurse -Force
+      }
+      Remove-Item $nestedCaseLibrary -Recurse -Force
+    }
+  }
+
+  if (Test-Path $sourceCaseLibrary) {
+    $targetCaseLibrary = Join-Path $RootDir "backend\data\case_library"
+    Write-Step "Importing packaged case_library into backend\\data\\case_library"
+    $items = @(Get-ChildItem -Path $sourceCaseLibrary -Force)
+    if ($items.Count -eq 0) {
+      Write-Warn "install-assets\\case_library exists but is empty."
+    } else {
+      foreach ($item in $items) {
+        Copy-Item -Path $item.FullName -Destination $targetCaseLibrary -Recurse -Force
+      }
+    }
+  }
+}
+
 function Get-EffectivePorts {
   $values = Read-DotEnv
   $backend = $BackendPort
@@ -473,6 +523,7 @@ function Run-Install {
   Ensure-Prerequisites
   Wait-DockerReady
   Ensure-EnvFile
+  Import-InstallAssets
 
   $ports = Get-EffectivePorts
   Warn-EnvIssues -EnvValues $ports.Values -EffectiveBackendPort $ports.Backend

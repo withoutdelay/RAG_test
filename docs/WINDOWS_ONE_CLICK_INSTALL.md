@@ -63,6 +63,54 @@ VISION_LLM_API_STYLE=auto
 powershell -ExecutionPolicy Bypass -File scripts\windows-install.ps1 -Action restart
 ```
 
+## 可选交付数据包
+
+如果需要随安装包交付已有方案库，不要把真实运行数据提交到 git。按下面目录放入交付包：
+
+```text
+install-assets/
+  case_library/
+    outline_library.json
+    block_library.json
+    case_library_summary.md
+```
+
+也可以打成 zip：
+
+```text
+install-assets/
+  case_library.zip
+```
+
+安装脚本会在构建 backend 镜像前，把 `install-assets/case_library/` 或 `install-assets/case_library.zip` 导入到：
+
+```text
+backend/data/case_library/
+```
+
+这样客户机 fresh clone 或 zip 解压后，也能带着已有 case library 构建。
+
+如果客户环境无法访问 Docker Hub，也可以额外准备：
+
+```text
+install-assets/docker-images.tar
+```
+
+安装脚本会先执行 `docker load -i install-assets/docker-images.tar`，再继续启动服务。这个文件通常会很大，只有完全离线或企业网络限制很强时才建议使用。
+
+如果客户有企业内网镜像仓库，可以在 `.env` 里覆盖镜像名：
+
+```env
+PYTHON_BASE_IMAGE=registry.company.com/library/python:3.11-slim
+NODE_BASE_IMAGE=registry.company.com/library/node:20-alpine
+POSTGRES_IMAGE=registry.company.com/library/postgres:16-alpine
+REDIS_IMAGE=registry.company.com/library/redis:7-alpine
+QDRANT_IMAGE=registry.company.com/qdrant/qdrant:v1.12.4
+MINIO_IMAGE=registry.company.com/minio/minio:latest
+```
+
+如果只是 Docker Hub 访问慢，优先在 Docker Desktop 里配置国内镜像加速器；如果公司网络完全禁止 Docker Hub，再使用企业内网镜像仓库或离线镜像包。
+
 ## 常用运维命令
 
 以下命令都在项目根目录执行：
@@ -144,3 +192,14 @@ powershell -ExecutionPolicy Bypass -File scripts\windows-install.ps1 -Action res
 首次安装需要构建 Docker 镜像，并在容器里下载 Python/Node 依赖。客户网络受限时耗时会明显增加。
 
 如果客户环境完全离线，需要后续单独准备 `docker save` / `docker load` 的离线镜像包。本脚本当前默认目标电脑可以访问外网或企业代理。
+
+### backend 镜像构建时报 `data/case_library` not found
+
+如果看到：
+
+```text
+COPY data/case_library ./data/case_library
+failed to calculate checksum ... "/data/case_library": not found
+```
+
+说明当前代码包缺少空的 `backend/data/case_library` 目录。更新到包含 Windows 安装修复的最新代码后重试；如果需要交付已有方案库，把方案库文件放到 `install-assets/case_library/`。
