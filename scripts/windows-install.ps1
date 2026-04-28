@@ -188,10 +188,75 @@ function Ensure-Prerequisites {
 }
 
 function Start-DockerDesktop {
-  $dockerDesktop = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
-  if (Test-Path $dockerDesktop) {
-    Write-Step "Starting Docker Desktop"
-    Start-Process -FilePath $dockerDesktop | Out-Null
+  $candidates = @()
+  if ($env:ProgramFiles) {
+    $candidates += (Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe")
+  }
+  if ($env:LOCALAPPDATA) {
+    $candidates += (Join-Path $env:LOCALAPPDATA "Docker\Docker Desktop.exe")
+  }
+
+  foreach ($dockerDesktop in $candidates) {
+    if (Test-Path $dockerDesktop) {
+      Write-Step "Starting Docker Desktop"
+      Start-Process -FilePath $dockerDesktop | Out-Null
+      return
+    }
+  }
+
+  Write-Warn "Docker Desktop executable was not found in the common install locations."
+}
+
+function Start-DockerService {
+  $service = Get-Service -Name "com.docker.service" -ErrorAction SilentlyContinue
+  if (-not $service) {
+    return
+  }
+
+  if ($service.Status -ne "Running") {
+    try {
+      Write-Step "Starting Docker Desktop service"
+      Start-Service -Name "com.docker.service" -ErrorAction Stop
+    } catch {
+      Write-Warn "Unable to start com.docker.service automatically: $($_.Exception.Message)"
+    }
+  }
+}
+
+function Invoke-DockerInfoProbe {
+  $stdout = Join-Path $env:TEMP "rag-test-docker-info.out"
+  $stderr = Join-Path $env:TEMP "rag-test-docker-info.err"
+
+  try {
+    Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    $process = Start-Process `
+      -FilePath "docker" `
+      -ArgumentList @("info") `
+      -NoNewWindow `
+      -Wait `
+      -PassThru `
+      -RedirectStandardOutput $stdout `
+      -RedirectStandardError $stderr
+
+    $output = ""
+    if (Test-Path $stdout) {
+      $output += (Get-Content $stdout -Raw -ErrorAction SilentlyContinue)
+    }
+    if (Test-Path $stderr) {
+      $output += (Get-Content $stderr -Raw -ErrorAction SilentlyContinue)
+    }
+
+    return @{
+      Ready = ($process.ExitCode -eq 0)
+      Output = $output.Trim()
+    }
+  } catch {
+    return @{
+      Ready = $false
+      Output = $_.Exception.Message
+    }
+  } finally {
+    Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -204,22 +269,36 @@ function Wait-DockerReady {
     throw "Docker CLI is not available. Install Docker Desktop and rerun this script."
   }
 
+  Start-DockerService
   Start-DockerDesktop
   Write-Step "Waiting for Docker engine"
 
   for ($i = 1; $i -le 120; $i++) {
-    & docker info *> $null
-    if ($LASTEXITCODE -eq 0) {
+    $probe = Invoke-DockerInfoProbe
+    if ($probe.Ready) {
       Write-Step "Docker engine is ready"
       return
     }
+
+    if (($i % 12) -eq 0) {
+      Write-Step "Docker engine is still starting. Make sure Docker Desktop is open and has finished its first-run setup."
+      Start-DockerService
+      Start-DockerDesktop
+    }
+
     Start-Sleep -Seconds 5
+  }
+
+  $lastProbe = Invoke-DockerInfoProbe
+  $detail = $lastProbe.Output
+  if ($detail -match "dockerDesktopLinuxEngine|pipe|named pipe") {
+    throw "Docker Desktop is installed, but the Linux engine is not ready. Open Docker Desktop manually, finish first-run setup, make sure it is using Linux containers, then rerun install-windows.cmd. Last docker error: $detail"
   }
 
   if ($script:RebootMayBeRequired) {
     throw "Docker did not become ready. Windows features were changed, so reboot Windows and rerun install-windows.cmd."
   }
-  throw "Docker did not become ready. Check Docker Desktop, WSL2, virtualization, and company security policy."
+  throw "Docker did not become ready. Check Docker Desktop, WSL2, virtualization, company security policy, and Docker Desktop first-run prompts. Last docker error: $detail"
 }
 
 function Read-DotEnv {

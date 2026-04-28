@@ -91,11 +91,37 @@ powershell -ExecutionPolicy Bypass -File scripts\windows-install.ps1 -Action log
 常见原因：
 
 - Windows 刚启用 WSL2 相关特性，需要重启。
+- Docker Desktop 已安装，但还没有完成首次启动、许可确认或初始化。
+- Docker Desktop 没有切到 Linux containers。
 - BIOS/UEFI 中没有开启虚拟化。
 - 客户公司的终端安全软件拦截 Docker Desktop。
 - 客户公司策略不允许使用 Docker Desktop。
 
 建议先重启一次 Windows，手动打开 Docker Desktop，确认 Docker Desktop 运行正常后，再重新执行 `install-windows.cmd`。
+
+如果看到类似下面的错误：
+
+```text
+open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified
+```
+
+这说明 Docker CLI 已安装，但 Docker Desktop 的 Linux engine 还没有启动成功。按下面顺序处理：
+
+1. 重启 Windows。
+2. 手动打开 Docker Desktop。
+3. 完成首次启动向导、许可确认、WSL2 初始化。
+4. 等 Docker Desktop 显示 running。
+5. 如果托盘菜单里有 `Switch to Linux containers...`，切换到 Linux containers。
+6. 在 PowerShell 里确认：
+
+```powershell
+docker info
+wsl --status
+wsl -l -v
+Get-Service com.docker.service
+```
+
+`docker info` 可以正常输出后，再重新执行 `install-windows.cmd`。
 
 ### 端口被占用
 
