@@ -326,6 +326,7 @@ async def _parse_and_index_document(
     indexed_chunk_count = 0
     skipped_chunk_count = 0
     preserved_table_chunks: list[Chunk] = []
+    index_records: list[tuple[uuid.UUID, str, dict]] = []
 
     for payload in chunk_payloads:
         section_anchor = _resolve_section_anchor_from_catalog(
@@ -372,39 +373,45 @@ async def _parse_and_index_document(
         await session.flush()
 
         if indexable and point_id is not None:
-            vector = await embedder.embed_text(chunk_meta.get("semantic_retrieval_text") or payload.content)
-            qdrant.upsert_chunk(
-                point_id=point_id,
-                vector=vector,
-                payload={
-                    "project_id": str(document.project_id) if document.project_id else None,
-                    "document_id": str(document.id),
-                    "document_name": document.filename,
-                    "chunk_id": str(chunk.id),
-                    "chunk_index": payload.chunk_index,
-                    "chunk_type": payload.chunk_type,
-                    "heading_path": payload.heading_path,
-                    **section_anchor,
-                    "content": payload.content,
-                    "contextual_text": chunk_meta.get("contextual_text"),
-                    "contextualized_block_text": chunk_meta.get("contextualized_block_text"),
-                    "semantic_retrieval_text": chunk_meta.get("semantic_retrieval_text"),
-                    "semantic_retrieval_version": chunk_meta.get("semantic_retrieval_version"),
-                    "industry": base_metadata.get("industry"),
-                    "year": base_metadata.get("year"),
-                    "amount_range": base_metadata.get("amount_range"),
-                    "doc_type": document.doc_type,
-                    "image_url": None,
-                    "token_count": payload.token_count,
-                    "indexable": True,
-                    **payload.metadata,
-                },
+            index_records.append(
+                (
+                    point_id,
+                    chunk_meta.get("semantic_retrieval_text") or payload.content,
+                    {
+                        "project_id": str(document.project_id) if document.project_id else None,
+                        "document_id": str(document.id),
+                        "document_name": document.filename,
+                        "chunk_id": str(chunk.id),
+                        "chunk_index": payload.chunk_index,
+                        "chunk_type": payload.chunk_type,
+                        "heading_path": payload.heading_path,
+                        **section_anchor,
+                        "content": payload.content,
+                        "contextual_text": chunk_meta.get("contextual_text"),
+                        "contextualized_block_text": chunk_meta.get("contextualized_block_text"),
+                        "semantic_retrieval_text": chunk_meta.get("semantic_retrieval_text"),
+                        "semantic_retrieval_version": chunk_meta.get("semantic_retrieval_version"),
+                        "industry": base_metadata.get("industry"),
+                        "year": base_metadata.get("year"),
+                        "amount_range": base_metadata.get("amount_range"),
+                        "doc_type": document.doc_type,
+                        "image_url": None,
+                        "token_count": payload.token_count,
+                        "indexable": True,
+                        **payload.metadata,
+                    },
+                )
             )
-            indexed_chunk_count += 1
         else:
             skipped_chunk_count += 1
             if payload.chunk_type == "TABLE" and preserve_for_assets:
                 preserved_table_chunks.append(chunk)
+
+    if index_records:
+        vectors = await embedder.embed_texts([text for _point_id, text, _payload in index_records])
+        for (point_id, _text, qdrant_payload), vector in zip(index_records, vectors):
+            qdrant.upsert_chunk(point_id=point_id, vector=vector, payload=qdrant_payload)
+        indexed_chunk_count = len(index_records)
 
     raw_document = await _upsert_raw_document(session=session, document=document, base_metadata=base_metadata)
     figure_asset_count = await _replace_figure_assets(

@@ -53,9 +53,25 @@ VISION_LLM_API_KEY=replace-with-real-vision-key
 VISION_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 VISION_LLM_MODEL=replace-with-vision-model
 VISION_LLM_API_STYLE=auto
+
+EMBEDDING_BACKEND=openai-compatible
+EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+EMBEDDING_API_KEY=replace-with-real-key
+EMBEDDING_ENDPOINT_PATH=/embeddings
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSION=1024
+EMBEDDING_BATCH_SIZE=16
 ```
 
-首次安装生成的 `.env` 会把 `EMBEDDING_LOCAL_FILES_ONLY=false`，用于允许容器首次下载离线 embedding 模型。客户网络无法访问模型源时，需要提前准备模型缓存或企业内网镜像，否则导入文档时可能失败。
+第三方 embedding 是默认推荐路径。这样 backend 镜像不需要安装本地 `sentence-transformers`、`torch` 和本地 embedding 模型，能显著降低客户机安装复杂度。`EMBEDDING_API_KEY` 可以单独配置；如果留空，系统会尝试复用 `QWEN_API_KEY` 或 `OPENAI_API_KEY`。
+
+Windows 安装脚本会把旧 `.env` 中的 `BACKEND_EXTRAS=full` / `BACKEND_EXTRAS=parsing,embeddings` 自动迁移为 `BACKEND_EXTRAS=parsing`，并把旧的本地 embedding 配置迁移为第三方 embedding 默认配置。脚本不会覆盖已有的 LLM/API key。
+
+切换 embedding 模型或维度后，旧 Qdrant 向量不能混用。新环境建议使用新的 collection 名称，或重建历史方案库：
+
+```env
+QDRANT_COLLECTION=presale_knowledge_api_embedding
+```
 
 修改 `.env` 后，从项目根目录执行：
 
@@ -116,17 +132,16 @@ MINIO_IMAGE=registry.company.com/minio/minio:latest
 默认生产安装使用：
 
 ```env
-BACKEND_EXTRAS=parsing,embeddings
-INSTALL_CPU_TORCH=true
-TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
+BACKEND_EXTRAS=parsing
+EMBEDDING_BACKEND=openai-compatible
 FORMULA_OCR_BACKEND=none
 ```
 
-这里有两个目的：
+这里有三个目的：
 
-- 保留文档解析和本地 embedding 能力。
+- 保留文档解析能力。
+- embedding 交给第三方 API，不在客户机安装本地 embedding 模型。
 - 排除 `pix2tex` 公式 OCR，避免在默认安装里拉取额外的大型深度学习依赖。
-- 先安装 CPU-only torch，避免 pip 默认拉取 CUDA / cuDNN / cuSPARSE 等 GPU 运行包。
 
 如果仍看到类似下面的大包下载：
 
@@ -139,8 +154,9 @@ cuda_toolkit
 说明当前 `.env` 仍在使用旧配置，或者 Docker 缓存/构建参数没有更新。确认 `.env`：
 
 ```env
-BACKEND_EXTRAS=parsing,embeddings
-INSTALL_CPU_TORCH=true
+BACKEND_EXTRAS=parsing
+EMBEDDING_BACKEND=openai-compatible
+FORMULA_OCR_BACKEND=none
 ```
 
 然后重新构建：
@@ -149,7 +165,13 @@ INSTALL_CPU_TORCH=true
 docker compose --project-name rag_test_customer --env-file .env -f docker-compose.prod.yml build --no-cache backend
 ```
 
-如果客户网络无法访问 `download.pytorch.org`，可以把 `TORCH_CPU_INDEX_URL` 改成客户可访问的 PyTorch CPU wheel 镜像源，或改用离线镜像包。
+如果只是为了临时跑通流程，也可以使用：
+
+```env
+EMBEDDING_BACKEND=fallback
+```
+
+但 fallback 只适合排查部署问题，检索质量会明显下降。
 
 ## 常用运维命令
 

@@ -371,13 +371,61 @@ function Ensure-EnvFile {
   Copy-Item $EnvExampleFile $EnvFile
   Set-DotEnvValue -Key "APP_ENV" -Value "production"
   Set-DotEnvValue -Key "COMPOSE_PROJECT_NAME" -Value $ProjectName
+  Set-DotEnvValue -Key "BACKEND_EXTRAS" -Value "parsing"
+  Set-DotEnvValue -Key "QDRANT_COLLECTION" -Value "presale_knowledge_api_embedding"
   Set-DotEnvValue -Key "BACKEND_PORT" -Value ([string]$BackendPort)
   Set-DotEnvValue -Key "FRONTEND_PORT" -Value ([string]$FrontendPort)
   Set-DotEnvValue -Key "NEXT_PUBLIC_API_BASE_URL" -Value "http://localhost:$BackendPort/api/v1"
+  Set-DotEnvValue -Key "EMBEDDING_BACKEND" -Value "openai-compatible"
+  Set-DotEnvValue -Key "EMBEDDING_BASE_URL" -Value "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  Set-DotEnvValue -Key "EMBEDDING_ENDPOINT_PATH" -Value "/embeddings"
+  Set-DotEnvValue -Key "EMBEDDING_MODEL" -Value "text-embedding-v4"
+  Set-DotEnvValue -Key "EMBEDDING_DIMENSION" -Value "1024"
+  Set-DotEnvValue -Key "EMBEDDING_BATCH_SIZE" -Value "16"
   Set-DotEnvValue -Key "EMBEDDING_LOCAL_FILES_ONLY" -Value "false"
+  Set-DotEnvValue -Key "FORMULA_OCR_BACKEND" -Value "none"
 
   Write-Warn ".env was created with mock LLM settings. Edit .env with the real Qwen/OpenAI-compatible API settings before customer testing."
-  Write-Warn "EMBEDDING_LOCAL_FILES_ONLY=false was set for first-run model download. For offline installs, preload the embedding model before importing documents."
+  Write-Warn "Third-party embeddings are enabled by default. Set EMBEDDING_API_KEY or QWEN_API_KEY before importing documents."
+}
+
+function Apply-CustomerEnvMigrations {
+  $values = Read-DotEnv
+  $changed = $false
+
+  $backendExtras = ""
+  if ($values.ContainsKey("BACKEND_EXTRAS")) {
+    $backendExtras = "," + $values["BACKEND_EXTRAS"].ToLowerInvariant() + ","
+  }
+  if (-not $values.ContainsKey("BACKEND_EXTRAS") -or $backendExtras.Contains(",full,") -or $backendExtras.Contains(",embeddings,")) {
+    Set-DotEnvValue -Key "BACKEND_EXTRAS" -Value "parsing"
+    $changed = $true
+  }
+
+  $embeddingBackend = ""
+  if ($values.ContainsKey("EMBEDDING_BACKEND")) {
+    $embeddingBackend = $values["EMBEDDING_BACKEND"].ToLowerInvariant().Replace("_", "-")
+  }
+  if ($embeddingBackend -eq "" -or $embeddingBackend -eq "sentence-transformers") {
+    Set-DotEnvValue -Key "EMBEDDING_BACKEND" -Value "openai-compatible"
+    Set-DotEnvValue -Key "EMBEDDING_BASE_URL" -Value "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    Set-DotEnvValue -Key "EMBEDDING_ENDPOINT_PATH" -Value "/embeddings"
+    Set-DotEnvValue -Key "EMBEDDING_MODEL" -Value "text-embedding-v4"
+    Set-DotEnvValue -Key "EMBEDDING_DIMENSION" -Value "1024"
+    Set-DotEnvValue -Key "EMBEDDING_BATCH_SIZE" -Value "16"
+    Set-DotEnvValue -Key "EMBEDDING_LOCAL_FILES_ONLY" -Value "false"
+    Set-DotEnvValue -Key "FORMULA_OCR_BACKEND" -Value "none"
+    $changed = $true
+  }
+
+  if (-not $values.ContainsKey("QDRANT_COLLECTION") -or $values["QDRANT_COLLECTION"] -eq "presale_knowledge") {
+    Set-DotEnvValue -Key "QDRANT_COLLECTION" -Value "presale_knowledge_api_embedding"
+    $changed = $true
+  }
+
+  if ($changed) {
+    Write-Warn ".env was migrated to customer deployment defaults: BACKEND_EXTRAS=parsing and third-party embeddings."
+  }
 }
 
 function Import-InstallAssets {
@@ -463,6 +511,40 @@ function Warn-EnvIssues {
     Write-Warn "LLM_PROVIDER_BACKEND=mock. The app will start, but real generation needs Qwen/OpenAI-compatible credentials in .env."
   }
 
+  if ($EnvValues.ContainsKey("BACKEND_EXTRAS")) {
+    $backendExtras = "," + $EnvValues["BACKEND_EXTRAS"].ToLowerInvariant() + ","
+    if ($backendExtras.Contains(",full,") -or $backendExtras.Contains(",embeddings,")) {
+      Write-Warn "BACKEND_EXTRAS includes local ML dependencies. Customer installs should normally use BACKEND_EXTRAS=parsing with third-party embeddings."
+    }
+  }
+
+  $embeddingBackend = ""
+  if ($EnvValues.ContainsKey("EMBEDDING_BACKEND")) {
+    $embeddingBackend = $EnvValues["EMBEDDING_BACKEND"].ToLowerInvariant().Replace("_", "-")
+  }
+  if ($embeddingBackend -eq "openai-compatible") {
+    $embeddingKey = ""
+    foreach ($keyName in @("EMBEDDING_API_KEY", "QWEN_API_KEY", "OPENAI_API_KEY")) {
+      if ($EnvValues.ContainsKey($keyName) -and -not [string]::IsNullOrWhiteSpace($EnvValues[$keyName])) {
+        $embeddingKey = $EnvValues[$keyName]
+        break
+      }
+    }
+    if ($embeddingKey -in @("", "sk-xxxxx", "replace-with-real-key", "your-api-key", "xxx")) {
+      Write-Warn "EMBEDDING_BACKEND=openai-compatible but no real embedding API key is configured. Document import/retrieval will fail until EMBEDDING_API_KEY or QWEN_API_KEY is set."
+    }
+  }
+
+  if ($embeddingBackend -eq "fallback") {
+    Write-Warn "EMBEDDING_BACKEND=fallback can start the app but retrieval quality will be weak."
+  }
+
+  if ($embeddingBackend -eq "openai-compatible" -and $EnvValues.ContainsKey("QDRANT_COLLECTION")) {
+    if ($EnvValues["QDRANT_COLLECTION"] -eq "presale_knowledge") {
+      Write-Warn "QDRANT_COLLECTION is still presale_knowledge. Use a new collection name or rebuild the library when switching embedding models."
+    }
+  }
+
   if ($EnvValues.ContainsKey("EMBEDDING_LOCAL_FILES_ONLY") -and $EnvValues["EMBEDDING_LOCAL_FILES_ONLY"] -eq "true") {
     Write-Warn "EMBEDDING_LOCAL_FILES_ONLY=true. On a fresh customer laptop this requires a preloaded embedding model cache inside the backend container."
   }
@@ -523,6 +605,7 @@ function Run-Install {
   Ensure-Prerequisites
   Wait-DockerReady
   Ensure-EnvFile
+  Apply-CustomerEnvMigrations
   Import-InstallAssets
 
   $ports = Get-EffectivePorts
@@ -566,6 +649,7 @@ function Run-Install {
 function Run-Restart {
   Wait-DockerReady
   Ensure-EnvFile
+  Apply-CustomerEnvMigrations
   Invoke-Compose down
   Run-Install
 }

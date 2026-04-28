@@ -62,11 +62,18 @@ class Settings(BaseSettings):
     formula_ocr_backend: Literal["none", "pix2tex"] = "none"
     formula_ocr_max_assets: int = 3
     formula_ocr_max_regions_per_asset: int = 3
-    embedding_backend: Literal["auto", "sentence-transformers", "fallback"] = "fallback"
+    embedding_backend: Literal["auto", "sentence-transformers", "openai-compatible", "openai_compatible", "fallback"] = (
+        "fallback"
+    )
     embedding_model: str = "BAAI/bge-large-zh-v1.5"
     embedding_dimension: int = 1024
     embedding_local_files_only: bool = True
     embedding_device: str = Field(default="cpu", validation_alias="EMBEDDING_DEVICE")
+    embedding_api_key: str | None = Field(default=None, validation_alias="EMBEDDING_API_KEY")
+    embedding_base_url: str | None = Field(default=None, validation_alias="EMBEDDING_BASE_URL")
+    embedding_endpoint_path: str = Field(default="/embeddings", validation_alias="EMBEDDING_ENDPOINT_PATH")
+    embedding_timeout_seconds: float = Field(default=45.0, validation_alias="EMBEDDING_TIMEOUT_SECONDS")
+    embedding_batch_size: int = Field(default=16, validation_alias="EMBEDDING_BATCH_SIZE")
     background_job_worker_count: int = Field(default=1, validation_alias="BACKGROUND_JOB_WORKER_COUNT")
     visual_embedding_backend: Literal["proxy", "auto", "clip"] = "proxy"
     visual_embedding_model: str = "openai/clip-vit-base-patch32"
@@ -210,6 +217,12 @@ def get_settings() -> Settings:
         settings.background_job_worker_count = 1
     if settings.background_job_worker_count > 4:
         settings.background_job_worker_count = 4
+    if settings.embedding_timeout_seconds <= 0 or not math.isfinite(settings.embedding_timeout_seconds):
+        settings.embedding_timeout_seconds = 45.0
+    if settings.embedding_batch_size < 1:
+        settings.embedding_batch_size = 1
+    if settings.embedding_batch_size > 128:
+        settings.embedding_batch_size = 128
     if settings.section_reuse_candidate_limit < 5:
         settings.section_reuse_candidate_limit = 5
     if settings.section_reuse_candidate_limit > 64:

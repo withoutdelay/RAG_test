@@ -388,8 +388,18 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
                 _ = service.retriever
 
     def test_embedder_returns_configured_dimension(self) -> None:
-        embedder = Embedder()
+        with patch.dict(
+            os.environ,
+            {
+                "EMBEDDING_BACKEND": "fallback",
+                "EMBEDDING_DIMENSION": "1024",
+            },
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            embedder = Embedder()
         vector = asyncio.run(embedder.embed_text("110kV 变电站综合自动化方案"))
+        get_settings.cache_clear()
         self.assertEqual(len(vector), embedder.dimension)
 
     def test_embedder_uses_fallback_backend_when_configured(self) -> None:
@@ -445,6 +455,84 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
 
         self.assertIs(embedder._model, mock_model)
         mock_loader.assert_called_once_with("BAAI/bge-large-zh-v1.5", local_files_only=True, device="cpu")
+
+    def test_embedder_uses_openai_compatible_embedding_backend(self) -> None:
+        requests: list[dict] = []
+
+        class FakeResponse:
+            def __init__(self, inputs: list[str]) -> None:
+                self.inputs = inputs
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "data": [
+                        {"index": index, "embedding": [float(index), float(index + 1), float(index + 2)]}
+                        for index, _text in enumerate(self.inputs)
+                    ]
+                }
+
+        class FakeAsyncClient:
+            def __init__(self, *, timeout: float) -> None:
+                self.timeout = timeout
+
+            async def __aenter__(self) -> "FakeAsyncClient":
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def post(self, url: str, *, headers: dict, json: dict) -> FakeResponse:
+                requests.append({"url": url, "headers": headers, "json": json, "timeout": self.timeout})
+                return FakeResponse(list(json["input"]))
+
+        with patch("app.services.vectorstore.embedder.httpx.AsyncClient", FakeAsyncClient):
+            with patch.dict(
+                os.environ,
+                {
+                    "EMBEDDING_BACKEND": "openai-compatible",
+                    "EMBEDDING_BASE_URL": "https://embedding.example.test/v1",
+                    "EMBEDDING_API_KEY": "sk-real",
+                    "EMBEDDING_MODEL": "text-embedding-v4",
+                    "EMBEDDING_DIMENSION": "3",
+                    "EMBEDDING_BATCH_SIZE": "2",
+                    "QWEN_API_KEY": "",
+                    "OPENAI_API_KEY": "",
+                },
+                clear=False,
+            ):
+                get_settings.cache_clear()
+                embedder = Embedder()
+                vectors = asyncio.run(embedder.embed_texts(["alpha", "beta", "gamma"]))
+
+        get_settings.cache_clear()
+
+        self.assertEqual(embedder.backend_name, "openai-compatible")
+        self.assertEqual(vectors, [[0.0, 1.0, 2.0], [1.0, 2.0, 3.0], [0.0, 1.0, 2.0]])
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0]["url"], "https://embedding.example.test/v1/embeddings")
+        self.assertEqual(requests[0]["headers"]["Authorization"], "Bearer sk-real")
+        self.assertEqual(requests[0]["json"]["model"], "text-embedding-v4")
+        self.assertEqual(requests[0]["json"]["input"], ["alpha", "beta"])
+
+    def test_embedder_fails_fast_for_missing_openai_compatible_key(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "EMBEDDING_BACKEND": "openai-compatible",
+                "EMBEDDING_BASE_URL": "https://embedding.example.test/v1",
+                "EMBEDDING_API_KEY": "",
+                "QWEN_API_KEY": "",
+                "OPENAI_API_KEY": "",
+            },
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            with self.assertRaisesRegex(RuntimeError, "EMBEDDING_API_KEY"):
+                Embedder()
+        get_settings.cache_clear()
 
     def test_asset_taxonomy_boost_prefers_main_circuit_figure(self) -> None:
         target = infer_target_taxonomy(
