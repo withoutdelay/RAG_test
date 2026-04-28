@@ -111,6 +111,46 @@ MINIO_IMAGE=registry.company.com/minio/minio:latest
 
 如果只是 Docker Hub 访问慢，优先在 Docker Desktop 里配置国内镜像加速器；如果公司网络完全禁止 Docker Hub，再使用企业内网镜像仓库或离线镜像包。
 
+## Backend Python 依赖体积
+
+默认生产安装使用：
+
+```env
+BACKEND_EXTRAS=parsing,embeddings
+INSTALL_CPU_TORCH=true
+TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
+FORMULA_OCR_BACKEND=none
+```
+
+这里有两个目的：
+
+- 保留文档解析和本地 embedding 能力。
+- 排除 `pix2tex` 公式 OCR，避免在默认安装里拉取额外的大型深度学习依赖。
+- 先安装 CPU-only torch，避免 pip 默认拉取 CUDA / cuDNN / cuSPARSE 等 GPU 运行包。
+
+如果仍看到类似下面的大包下载：
+
+```text
+nvidia_cudnn_cu13
+nvidia_cusparselt_cu13
+cuda_toolkit
+```
+
+说明当前 `.env` 仍在使用旧配置，或者 Docker 缓存/构建参数没有更新。确认 `.env`：
+
+```env
+BACKEND_EXTRAS=parsing,embeddings
+INSTALL_CPU_TORCH=true
+```
+
+然后重新构建：
+
+```powershell
+docker compose --project-name rag_test_customer --env-file .env -f docker-compose.prod.yml build --no-cache backend
+```
+
+如果客户网络无法访问 `download.pytorch.org`，可以把 `TORCH_CPU_INDEX_URL` 改成客户可访问的 PyTorch CPU wheel 镜像源，或改用离线镜像包。
+
 ## 常用运维命令
 
 以下命令都在项目根目录执行：
