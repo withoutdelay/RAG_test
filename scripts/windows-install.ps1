@@ -1,0 +1,487 @@
+param(
+  [ValidateSet("install", "restart", "stop", "status", "logs")]
+  [string]$Action = "install",
+
+  [switch]$SkipPrerequisites,
+  [switch]$NoBrowser,
+  [switch]$NoElevate,
+
+  [string]$ProjectName = "rag_test_customer",
+  [int]$BackendPort = 8000,
+  [int]$FrontendPort = 3000
+)
+
+$ErrorActionPreference = "Stop"
+
+$RootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
+$EnvFile = Join-Path $RootDir ".env"
+$EnvExampleFile = Join-Path $RootDir ".env.example"
+$ComposeFile = Join-Path $RootDir "docker-compose.prod.yml"
+$script:RebootMayBeRequired = $false
+
+function Write-Step {
+  param([string]$Message)
+  Write-Host "[install] $Message" -ForegroundColor Cyan
+}
+
+function Write-Warn {
+  param([string]$Message)
+  Write-Host "[install] WARNING: $Message" -ForegroundColor Yellow
+}
+
+function Write-Fail {
+  param([string]$Message)
+  Write-Host "[install] ERROR: $Message" -ForegroundColor Red
+}
+
+function Test-Administrator {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+  return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Test-CommandExists {
+  param([string]$Name)
+  return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Refresh-Path {
+  $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  $env:Path = "$machinePath;$userPath"
+}
+
+function Request-ElevationIfNeeded {
+  if ($NoElevate -or $SkipPrerequisites -or (Test-Administrator)) {
+    return
+  }
+
+  $needsInstall = -not (Test-CommandExists "docker") -or -not (Test-CommandExists "git")
+  if (-not $needsInstall) {
+    return
+  }
+
+  Write-Step "Administrator permission is required to install missing prerequisites."
+  $args = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", "`"$PSCommandPath`"",
+    "-Action", $Action,
+    "-ProjectName", "`"$ProjectName`"",
+    "-BackendPort", $BackendPort,
+    "-FrontendPort", $FrontendPort
+  )
+  if ($NoBrowser) {
+    $args += "-NoBrowser"
+  }
+
+  Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList ($args -join " ")
+  exit 0
+}
+
+function Enable-WslFeatures {
+  if ($SkipPrerequisites) {
+    return
+  }
+
+  if (-not (Test-Administrator)) {
+    Write-Warn "Skipping WSL feature enablement because this PowerShell session is not elevated."
+    return
+  }
+
+  Write-Step "Ensuring Windows WSL2 features are enabled"
+  $features = @(
+    "Microsoft-Windows-Subsystem-Linux",
+    "VirtualMachinePlatform"
+  )
+
+  foreach ($feature in $features) {
+    & dism.exe /online /enable-feature /featurename:$feature /all /norestart | Out-Host
+    if ($LASTEXITCODE -eq 3010) {
+      $script:RebootMayBeRequired = $true
+    } elseif ($LASTEXITCODE -ne 0) {
+      throw "Failed to enable Windows feature $feature (exit code $LASTEXITCODE)"
+    }
+  }
+
+  if (Test-CommandExists "wsl") {
+    & wsl.exe --set-default-version 2 *> $null
+  }
+}
+
+function Install-WingetPackage {
+  param(
+    [string]$PackageId,
+    [string]$CommandName,
+    [string]$Label
+  )
+
+  if (Test-CommandExists $CommandName) {
+    Write-Step "$Label is already available"
+    return
+  }
+
+  if ($SkipPrerequisites) {
+    throw "$Label is missing. Re-run without -SkipPrerequisites or install it manually."
+  }
+
+  if (-not (Test-CommandExists "winget")) {
+    throw "winget is not available. Install Microsoft App Installer first, then rerun this script."
+  }
+
+  Write-Step "Installing $Label with winget"
+  & winget install --id $PackageId -e --silent --accept-source-agreements --accept-package-agreements | Out-Host
+  if ($LASTEXITCODE -eq 3010) {
+    $script:RebootMayBeRequired = $true
+    Write-Warn "$Label installer requested a Windows reboot."
+  } elseif ($LASTEXITCODE -ne 0) {
+    throw "Failed to install $Label with winget (exit code $LASTEXITCODE)"
+  }
+
+  Refresh-Path
+  if (-not (Test-CommandExists $CommandName)) {
+    Write-Warn "$Label was installed, but the command is not visible in this shell yet. A reboot or new terminal may be required."
+  }
+}
+
+function Assert-HostCapacity {
+  Write-Step "Checking host capacity"
+
+  try {
+    $computer = Get-CimInstance Win32_ComputerSystem
+    $memoryGb = [math]::Round($computer.TotalPhysicalMemory / 1GB, 1)
+    if ($memoryGb -lt 16) {
+      Write-Warn "Detected $memoryGb GB RAM. 16 GB or more is recommended for document parsing and local embeddings."
+    }
+  } catch {
+    Write-Warn "Unable to check RAM: $($_.Exception.Message)"
+  }
+
+  try {
+    $driveName = ([System.IO.Path]::GetPathRoot($RootDir.Path)).TrimEnd("\").TrimEnd(":")
+    $drive = Get-PSDrive -Name $driveName
+    $freeGb = [math]::Round($drive.Free / 1GB, 1)
+    if ($freeGb -lt 30) {
+      Write-Warn "Detected $freeGb GB free disk on drive $driveName. 30 GB or more is recommended for Docker images and parsed assets."
+    }
+  } catch {
+    Write-Warn "Unable to check free disk space: $($_.Exception.Message)"
+  }
+
+  try {
+    $processor = Get-CimInstance Win32_Processor | Select-Object -First 1
+    if ($processor.PSObject.Properties.Name -contains "VirtualizationFirmwareEnabled") {
+      if (-not $processor.VirtualizationFirmwareEnabled) {
+        Write-Warn "CPU virtualization appears disabled. Docker Desktop may not start until virtualization is enabled in BIOS/UEFI."
+      }
+    }
+  } catch {
+    Write-Warn "Unable to check CPU virtualization: $($_.Exception.Message)"
+  }
+}
+
+function Ensure-Prerequisites {
+  Assert-HostCapacity
+  Enable-WslFeatures
+  Install-WingetPackage -PackageId "Git.Git" -CommandName "git" -Label "Git"
+  Install-WingetPackage -PackageId "Docker.DockerDesktop" -CommandName "docker" -Label "Docker Desktop"
+}
+
+function Start-DockerDesktop {
+  $dockerDesktop = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
+  if (Test-Path $dockerDesktop) {
+    Write-Step "Starting Docker Desktop"
+    Start-Process -FilePath $dockerDesktop | Out-Null
+  }
+}
+
+function Wait-DockerReady {
+  Refresh-Path
+  if (-not (Test-CommandExists "docker")) {
+    if ($script:RebootMayBeRequired) {
+      throw "Docker CLI is not available yet. Reboot Windows and rerun install-windows.cmd."
+    }
+    throw "Docker CLI is not available. Install Docker Desktop and rerun this script."
+  }
+
+  Start-DockerDesktop
+  Write-Step "Waiting for Docker engine"
+
+  for ($i = 1; $i -le 120; $i++) {
+    & docker info *> $null
+    if ($LASTEXITCODE -eq 0) {
+      Write-Step "Docker engine is ready"
+      return
+    }
+    Start-Sleep -Seconds 5
+  }
+
+  if ($script:RebootMayBeRequired) {
+    throw "Docker did not become ready. Windows features were changed, so reboot Windows and rerun install-windows.cmd."
+  }
+  throw "Docker did not become ready. Check Docker Desktop, WSL2, virtualization, and company security policy."
+}
+
+function Read-DotEnv {
+  $values = @{}
+  if (-not (Test-Path $EnvFile)) {
+    return $values
+  }
+
+  foreach ($line in Get-Content $EnvFile) {
+    if ($line -match "^\s*#" -or $line -match "^\s*$") {
+      continue
+    }
+    if ($line -match "^\s*([^=\s]+)\s*=\s*(.*)\s*$") {
+      $key = $Matches[1]
+      $value = $Matches[2].Trim()
+      if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+        $value = $value.Substring(1, $value.Length - 2)
+      }
+      $values[$key] = $value
+    }
+  }
+
+  return $values
+}
+
+function Set-DotEnvValue {
+  param(
+    [string]$Key,
+    [string]$Value
+  )
+
+  $lines = @()
+  if (Test-Path $EnvFile) {
+    $lines = @(Get-Content $EnvFile)
+  }
+
+  $found = $false
+  $next = foreach ($line in $lines) {
+    if ($line -match "^\s*$([regex]::Escape($Key))\s*=") {
+      $found = $true
+      "$Key=$Value"
+    } else {
+      $line
+    }
+  }
+  if (-not $found) {
+    $next += "$Key=$Value"
+  }
+
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllLines($EnvFile, $next, $utf8NoBom)
+}
+
+function Ensure-EnvFile {
+  if (-not (Test-Path $ComposeFile)) {
+    throw "Missing docker-compose.prod.yml at $ComposeFile"
+  }
+
+  if (Test-Path $EnvFile) {
+    Write-Step "Using existing .env file"
+    return
+  }
+
+  if (-not (Test-Path $EnvExampleFile)) {
+    throw "Missing .env.example at $EnvExampleFile"
+  }
+
+  Write-Step "Creating .env from .env.example"
+  Copy-Item $EnvExampleFile $EnvFile
+  Set-DotEnvValue -Key "APP_ENV" -Value "production"
+  Set-DotEnvValue -Key "COMPOSE_PROJECT_NAME" -Value $ProjectName
+  Set-DotEnvValue -Key "BACKEND_PORT" -Value ([string]$BackendPort)
+  Set-DotEnvValue -Key "FRONTEND_PORT" -Value ([string]$FrontendPort)
+  Set-DotEnvValue -Key "NEXT_PUBLIC_API_BASE_URL" -Value "http://localhost:$BackendPort/api/v1"
+  Set-DotEnvValue -Key "EMBEDDING_LOCAL_FILES_ONLY" -Value "false"
+
+  Write-Warn ".env was created with mock LLM settings. Edit .env with the real Qwen/OpenAI-compatible API settings before customer testing."
+  Write-Warn "EMBEDDING_LOCAL_FILES_ONLY=false was set for first-run model download. For offline installs, preload the embedding model before importing documents."
+}
+
+function Get-EffectivePorts {
+  $values = Read-DotEnv
+  $backend = $BackendPort
+  $frontend = $FrontendPort
+
+  if ($values.ContainsKey("BACKEND_PORT") -and $values["BACKEND_PORT"] -match "^\d+$") {
+    $backend = [int]$values["BACKEND_PORT"]
+  }
+  if ($values.ContainsKey("FRONTEND_PORT") -and $values["FRONTEND_PORT"] -match "^\d+$") {
+    $frontend = [int]$values["FRONTEND_PORT"]
+  }
+
+  return @{
+    Backend = $backend
+    Frontend = $frontend
+    Values = $values
+  }
+}
+
+function Warn-EnvIssues {
+  param([hashtable]$EnvValues, [int]$EffectiveBackendPort)
+
+  if ($EnvValues.ContainsKey("NEXT_PUBLIC_API_BASE_URL")) {
+    $expected = "http://localhost:$EffectiveBackendPort/api/v1"
+    $actual = $EnvValues["NEXT_PUBLIC_API_BASE_URL"]
+    if ($actual -match "localhost|127\.0\.0\.1" -and $actual -ne $expected) {
+      Write-Warn "NEXT_PUBLIC_API_BASE_URL is '$actual', but BACKEND_PORT is $EffectiveBackendPort. Frontend export/generation calls may fail unless these match."
+    }
+  }
+
+  if ($EnvValues.ContainsKey("LLM_PROVIDER_BACKEND") -and $EnvValues["LLM_PROVIDER_BACKEND"] -eq "mock") {
+    Write-Warn "LLM_PROVIDER_BACKEND=mock. The app will start, but real generation needs Qwen/OpenAI-compatible credentials in .env."
+  }
+
+  if ($EnvValues.ContainsKey("EMBEDDING_LOCAL_FILES_ONLY") -and $EnvValues["EMBEDDING_LOCAL_FILES_ONLY"] -eq "true") {
+    Write-Warn "EMBEDDING_LOCAL_FILES_ONLY=true. On a fresh customer laptop this requires a preloaded embedding model cache inside the backend container."
+  }
+}
+
+function Invoke-Compose {
+  param(
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$ComposeArgs
+  )
+
+  & docker compose --project-name $ProjectName --env-file $EnvFile -f $ComposeFile @ComposeArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "docker compose failed: $($ComposeArgs -join ' ')"
+  }
+}
+
+function Wait-Postgres {
+  param([string]$User, [string]$Database)
+
+  Write-Step "Waiting for Postgres"
+  for ($i = 1; $i -le 90; $i++) {
+    & docker compose --project-name $ProjectName --env-file $EnvFile -f $ComposeFile exec -T postgres pg_isready -U $User -d $Database *> $null
+    if ($LASTEXITCODE -eq 0) {
+      return
+    }
+    Start-Sleep -Seconds 2
+  }
+
+  Invoke-Compose logs --tail=120 postgres
+  throw "Timed out waiting for Postgres"
+}
+
+function Wait-Url {
+  param(
+    [string]$Url,
+    [string]$ServiceName,
+    [int]$Attempts = 90
+  )
+
+  Write-Step "Waiting for $ServiceName at $Url"
+  for ($i = 1; $i -le $Attempts; $i++) {
+    try {
+      $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
+      if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
+        return
+      }
+    } catch {
+      Start-Sleep -Seconds 2
+    }
+  }
+
+  Invoke-Compose logs --tail=120 $ServiceName
+  throw "Timed out waiting for $ServiceName at $Url"
+}
+
+function Run-Install {
+  Ensure-Prerequisites
+  Wait-DockerReady
+  Ensure-EnvFile
+
+  $ports = Get-EffectivePorts
+  Warn-EnvIssues -EnvValues $ports.Values -EffectiveBackendPort $ports.Backend
+
+  $postgresUser = "copilot"
+  $postgresDb = "copilot_db"
+  if ($ports.Values.ContainsKey("POSTGRES_USER")) {
+    $postgresUser = $ports.Values["POSTGRES_USER"]
+  }
+  if ($ports.Values.ContainsKey("POSTGRES_DB")) {
+    $postgresDb = $ports.Values["POSTGRES_DB"]
+  }
+
+  Write-Step "Starting infrastructure containers"
+  Invoke-Compose up -d --build postgres redis qdrant minio gateway
+
+  Wait-Postgres -User $postgresUser -Database $postgresDb
+
+  Write-Step "Running database migrations"
+  Invoke-Compose run --rm backend alembic upgrade head
+
+  Write-Step "Starting backend and frontend containers"
+  Invoke-Compose up -d --build backend frontend
+
+  Wait-Url -Url "http://127.0.0.1:$($ports.Backend)/health" -ServiceName "backend" -Attempts 90
+  Wait-Url -Url "http://127.0.0.1:$($ports.Frontend)/projects" -ServiceName "frontend" -Attempts 90
+
+  $frontendUrl = "http://127.0.0.1:$($ports.Frontend)/projects"
+  Write-Step "Installation completed"
+  Write-Host "Frontend: $frontendUrl"
+  Write-Host "Backend:  http://127.0.0.1:$($ports.Backend)/health"
+  Write-Host "Logs:     powershell -ExecutionPolicy Bypass -File scripts\windows-install.ps1 -Action logs"
+  Write-Host "Stop:     powershell -ExecutionPolicy Bypass -File scripts\windows-install.ps1 -Action stop"
+
+  if (-not $NoBrowser) {
+    Start-Process $frontendUrl | Out-Null
+  }
+}
+
+function Run-Restart {
+  Wait-DockerReady
+  Ensure-EnvFile
+  Invoke-Compose down
+  Run-Install
+}
+
+function Main {
+  if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+    throw "This installer is intended for Windows. Use scripts/dev-up.sh or scripts/deploy.sh on macOS/Linux."
+  }
+
+  Set-Location $RootDir
+  Request-ElevationIfNeeded
+
+  switch ($Action) {
+    "install" {
+      Run-Install
+    }
+    "restart" {
+      Run-Restart
+    }
+    "stop" {
+      Ensure-EnvFile
+      Wait-DockerReady
+      Invoke-Compose down
+    }
+    "status" {
+      Ensure-EnvFile
+      Wait-DockerReady
+      Invoke-Compose ps
+    }
+    "logs" {
+      Ensure-EnvFile
+      Wait-DockerReady
+      Invoke-Compose logs -f --tail=150
+    }
+  }
+}
+
+try {
+  Main
+} catch {
+  Write-Fail $_.Exception.Message
+  Write-Host ""
+  Write-Host "Troubleshooting:"
+  Write-Host "1. If Docker or WSL2 was just installed, reboot Windows and rerun install-windows.cmd."
+  Write-Host "2. Make sure BIOS/UEFI virtualization is enabled."
+  Write-Host "3. If ports 3000 or 8000 are occupied, edit FRONTEND_PORT/BACKEND_PORT in .env and rerun."
+  Write-Host "4. Use '-Action logs' after startup to inspect container logs."
+  exit 1
+}
