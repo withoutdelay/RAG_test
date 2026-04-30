@@ -329,21 +329,35 @@ export default function LibraryMaterialsPage() {
     if (files.length === 0) return;
 
     setImporting(true);
-    let successCount = 0;
+    let processedCount = 0;
+    let queuedCount = 0;
+    let duplicateCount = 0;
     try {
       for (const file of files) {
-        setImportProgress(`Importing ${successCount + 1} / ${files.length}: ${file.name}`);
+        setImportProgress(`正在导入 ${processedCount + 1} / ${files.length}: ${file.name}`);
         const formData = new FormData();
         formData.append('file', file);
         formData.append('route', importRoute);
         const res = await api.post('/library/materials/import', formData, {
           headers: { 'Content-Type': 'multipart/form-data' },
         });
-        const accepted = (res.data || {}) as JobAccepted & { message?: string; filename?: string };
-        successCount += 1;
-        setImportProgress(`Historical proposal import queued: ${accepted.filename || file.name}`);
+        const accepted = (res.data || {}) as Partial<JobAccepted> & {
+          message?: string;
+          filename?: string;
+          duplicate?: boolean;
+        };
+        processedCount += 1;
+        if (accepted.duplicate) {
+          duplicateCount += 1;
+        } else {
+          queuedCount += 1;
+        }
+        setImportProgress(accepted.message || `历史方案导入已排队：${accepted.filename || file.name}`);
       }
-      toast.success(`Queued ${successCount}/${files.length} historical proposal(s) for import`);
+      const summaryParts = [];
+      if (queuedCount > 0) summaryParts.push(`已排队 ${queuedCount} 份`);
+      if (duplicateCount > 0) summaryParts.push(`已忽略重复 ${duplicateCount} 份`);
+      toast.success(`${summaryParts.join('，') || '已处理 0 份'} / 共 ${files.length} 份历史方案`);
       await loadQueueStatus();
       await loadMaterials();
     } catch (error) {
@@ -351,11 +365,11 @@ export default function LibraryMaterialsPage() {
         getApiErrorMessage(
           error,
           files.length > 1
-            ? `Imported ${successCount}/${files.length} historical proposal(s) before the error`
-            : 'Failed to import historical proposal'
+            ? `出错前已处理 ${processedCount}/${files.length} 份历史方案`
+            : '历史方案导入失败'
         )
       );
-      setImportProgress(getApiErrorMessage(error, 'Historical proposal import failed'));
+      setImportProgress(getApiErrorMessage(error, '历史方案导入失败'));
     } finally {
       setImporting(false);
       if (importFileInputRef.current) importFileInputRef.current.value = '';

@@ -30,6 +30,8 @@ class DocumentUploadAccepted(BaseModel):
     message: str
     job_id: UUID | None = None
     next_poll: str | None = None
+    duplicate: bool = False
+    duplicate_of_id: UUID | None = None
 
 
 class HistoryLibraryRefreshPipelineStatusRead(BaseModel):

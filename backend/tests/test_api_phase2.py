@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -32,6 +34,18 @@ class Phase2ApiTests(unittest.TestCase):
         from app.main import app
 
         return TestClient(app)
+
+    def _wait_for_job(self, client: TestClient, next_poll: str | None, timeout_seconds: float = 5.0) -> dict:
+        self.assertIsNotNone(next_poll)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            response = client.get(str(next_poll))
+            self.assertEqual(response.status_code, 200)
+            job = response.json()["data"]
+            if job["status"] in {"succeeded", "failed"}:
+                return job
+            time.sleep(0.1)
+        self.fail(f"Job did not finish within {timeout_seconds:.1f}s: {next_poll}")
 
     async def _truncate_tables(self) -> None:
         async with get_engine().begin() as connection:
@@ -176,6 +190,110 @@ class Phase2ApiTests(unittest.TestCase):
             self.assertEqual(document["metadata"]["material_route"], "main_indexed")
             self.assertEqual(document["metadata"]["source_kind"], "uploaded_document")
             self.assertTrue(str(document["metadata"]["sample_id"]).startswith("uploaded-"))
+            self.assertRegex(document["metadata"]["content_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(self._wait_for_job(client, accepted["next_poll"])["status"], "succeeded")
+
+    def test_library_material_import_ignores_exact_duplicate_upload(self) -> None:
+        content = "# 历史方案\n\n同一份历史方案重复上传时应被精确去重。".encode("utf-8")
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+
+        with self._make_client() as client:
+            with tempfile.NamedTemporaryFile("wb", suffix=".md", delete=False) as handle:
+                handle.write(content)
+                first_path = Path(handle.name)
+            with tempfile.NamedTemporaryFile("wb", suffix=".md", delete=False) as handle:
+                handle.write(content)
+                second_path = Path(handle.name)
+
+            try:
+                with first_path.open("rb") as file_handle:
+                    first_response = client.post(
+                        "/api/v1/library/materials/import",
+                        files={"file": ("library-sample.md", file_handle, "text/markdown")},
+                        data={"route": "main_indexed"},
+                    )
+                with second_path.open("rb") as file_handle:
+                    second_response = client.post(
+                        "/api/v1/library/materials/import",
+                        files={"file": ("library-sample-renamed.md", file_handle, "text/markdown")},
+                        data={"route": "main_indexed"},
+                    )
+            finally:
+                first_path.unlink(missing_ok=True)
+                second_path.unlink(missing_ok=True)
+
+            self.assertEqual(first_response.status_code, 202)
+            self.assertEqual(second_response.status_code, 202)
+            first = first_response.json()["data"]
+            second = second_response.json()["data"]
+            self.assertEqual(second["id"], first["id"])
+            self.assertTrue(second["duplicate"])
+            self.assertEqual(second["duplicate_of_id"], first["id"])
+            self.assertIn("已忽略重复上传", second["message"])
+            self.assertEqual(self._wait_for_job(client, first["next_poll"])["status"], "succeeded")
+
+        async def _count_documents_by_hash() -> int:
+            async with get_engine().begin() as connection:
+                result = await connection.execute(
+                    text("SELECT count(*) FROM documents WHERE content_sha256 = :content_sha256"),
+                    {"content_sha256": expected_sha256},
+                )
+                return int(result.scalar_one())
+
+        self.assertEqual(asyncio.run(_count_documents_by_hash()), 1)
+
+    def test_library_material_import_detects_legacy_duplicate_without_stored_hash(self) -> None:
+        content = "# 旧历史方案\n\n旧数据没有 content_sha256 时仍应通过存储文件精确比对去重。".encode("utf-8")
+
+        with self._make_client() as client:
+            with tempfile.NamedTemporaryFile("wb", suffix=".md", delete=False) as handle:
+                handle.write(content)
+                first_path = Path(handle.name)
+            with tempfile.NamedTemporaryFile("wb", suffix=".md", delete=False) as handle:
+                handle.write(content)
+                second_path = Path(handle.name)
+
+            try:
+                with first_path.open("rb") as file_handle:
+                    first_response = client.post(
+                        "/api/v1/library/materials/import",
+                        files={"file": ("legacy-library-sample.md", file_handle, "text/markdown")},
+                        data={"route": "main_indexed"},
+                    )
+                self.assertEqual(first_response.status_code, 202)
+                first = first_response.json()["data"]
+                self.assertEqual(self._wait_for_job(client, first["next_poll"])["status"], "succeeded")
+
+                async def _clear_content_hash() -> None:
+                    async with get_engine().begin() as connection:
+                        await connection.execute(
+                            text(
+                                """
+                                UPDATE documents
+                                SET content_sha256 = NULL,
+                                    metadata = metadata - 'content_sha256'
+                                WHERE id = :document_id
+                                """
+                            ),
+                            {"document_id": first["id"]},
+                        )
+
+                asyncio.run(_clear_content_hash())
+
+                with second_path.open("rb") as file_handle:
+                    second_response = client.post(
+                        "/api/v1/library/materials/import",
+                        files={"file": ("legacy-library-sample-renamed.md", file_handle, "text/markdown")},
+                        data={"route": "main_indexed"},
+                    )
+            finally:
+                first_path.unlink(missing_ok=True)
+                second_path.unlink(missing_ok=True)
+
+            self.assertEqual(second_response.status_code, 202)
+            second = second_response.json()["data"]
+            self.assertEqual(second["id"], first["id"])
+            self.assertTrue(second["duplicate"])
 
     def test_historical_document_upload_marks_parse_insufficient_and_skips_indexing(self) -> None:
         with self._make_client() as client:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import mimetypes
 import uuid
@@ -10,7 +11,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, select
+from sqlalchemy import String, cast, delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
@@ -59,6 +61,8 @@ LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE = {
     "review_pending": "historical_review",
     "holdout_eval": "holdout_eval",
 }
+LIBRARY_IMPORT_DOC_TYPES = frozenset(LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE.values())
+DEDUPABLE_LIBRARY_PARSE_STATUSES = {"pending", "queued", "parsing", "done", "parse_insufficient", "failed"}
 
 
 def _should_refresh_history_library(*, doc_type: str) -> bool:
@@ -533,6 +537,7 @@ async def _upsert_raw_document(
     base_metadata: dict,
 ) -> RawDocument:
     corpus_scope = "global" if document.project_id is None else "project"
+    checksum = str(base_metadata.get("content_sha256") or document.content_sha256 or "").strip().lower() or None
     raw_document: RawDocument | None = None
     raw_document_id = (document.meta or {}).get("raw_document_id")
     if raw_document_id:
@@ -548,6 +553,7 @@ async def _upsert_raw_document(
             doc_type=document.doc_type,
             file_uri=document.storage_path,
             file_name=document.filename,
+            checksum=checksum,
             parse_status=document.parse_status,
             confidentiality_level=str(base_metadata.get("confidentiality_level") or "") or None,
             meta={"legacy_document_id": str(document.id)},
@@ -561,6 +567,7 @@ async def _upsert_raw_document(
     raw_document.doc_type = document.doc_type
     raw_document.file_uri = document.storage_path
     raw_document.file_name = document.filename
+    raw_document.checksum = checksum
     raw_document.parse_status = document.parse_status
     raw_document.confidentiality_level = str(base_metadata.get("confidentiality_level") or "") or None
     return raw_document
@@ -806,6 +813,117 @@ def _safe_delete_storage_path(*, storage: object, storage_path: str | None) -> N
         pass
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+async def _latest_document_parse_job(*, session: AsyncSession, document_id: UUID) -> Job | None:
+    result = await session.scalars(
+        select(Job)
+        .where(
+            Job.job_type == "document_parse",
+            cast(Job.input_ref["document_id"].astext, String) == str(document_id),
+        )
+        .order_by(Job.created_at.desc())
+        .limit(1)
+    )
+    return result.first()
+
+
+async def _find_duplicate_global_library_document(
+    *,
+    session: AsyncSession,
+    storage: object,
+    content_sha256: str,
+    file_size_bytes: int | None = None,
+) -> Document | None:
+    normalized = str(content_sha256 or "").strip().lower()
+    if not normalized:
+        return None
+    result = await session.scalars(
+        select(Document)
+        .where(
+            Document.project_id.is_(None),
+            Document.content_sha256 == normalized,
+            Document.doc_type.in_(LIBRARY_IMPORT_DOC_TYPES),
+            Document.parse_status.in_(DEDUPABLE_LIBRARY_PARSE_STATUSES),
+        )
+        .order_by(Document.created_at.desc())
+        .limit(1)
+    )
+    duplicate = result.first()
+    if duplicate is not None:
+        return duplicate
+
+    legacy_stmt = select(Document).where(
+        Document.project_id.is_(None),
+        Document.content_sha256.is_(None),
+        Document.doc_type.in_(LIBRARY_IMPORT_DOC_TYPES),
+        Document.parse_status.in_(DEDUPABLE_LIBRARY_PARSE_STATUSES),
+    )
+    if file_size_bytes is not None:
+        legacy_stmt = legacy_stmt.where(Document.file_size_bytes == file_size_bytes)
+    legacy_result = await session.scalars(legacy_stmt.order_by(Document.created_at.desc()))
+    for candidate in legacy_result.all():
+        materialized: MaterializedObject | None = None
+        try:
+            materialized = storage.materialize(candidate.storage_path)
+            candidate_sha256 = _sha256_file(materialized.path)
+        except Exception:
+            continue
+        finally:
+            if materialized is not None:
+                materialized.cleanup()
+        if candidate_sha256 != normalized:
+            continue
+        candidate.content_sha256 = normalized
+        candidate.meta = {**(candidate.meta or {}), "content_sha256": normalized}
+        raw_document_id = (candidate.meta or {}).get("raw_document_id")
+        if raw_document_id:
+            try:
+                raw_document = await session.get(RawDocument, UUID(str(raw_document_id)))
+            except (TypeError, ValueError):
+                raw_document = None
+            if raw_document is not None:
+                raw_document.checksum = normalized
+        await session.flush()
+        return candidate
+    return None
+
+
+async def _build_duplicate_upload_response(
+    *,
+    session: AsyncSession,
+    duplicate: Document,
+) -> APIResponse[DocumentUploadAccepted]:
+    job = await _latest_document_parse_job(session=session, document_id=duplicate.id)
+    active_job = job if job is not None and job.status in {"queued", "running"} else None
+    if duplicate.parse_status in {"pending", "queued", "parsing"}:
+        message = "该历史方案已在处理中，已忽略重复上传"
+    elif duplicate.parse_status == "failed":
+        message = "该历史方案已存在但解析失败，已忽略重复上传；可在历史方案库中重新解析"
+    else:
+        message = "该历史方案已存在，已忽略重复上传"
+    return APIResponse(
+        code=200,
+        message="duplicate_ignored",
+        data=DocumentUploadAccepted(
+            id=duplicate.id,
+            filename=duplicate.filename,
+            parse_status=duplicate.parse_status,
+            message=message,
+            job_id=active_job.id if active_job is not None else None,
+            next_poll=f"/api/v1/jobs/{active_job.id}" if active_job is not None else None,
+            duplicate=True,
+            duplicate_of_id=duplicate.id,
+        ),
+    )
+
+
 def _parse_upload_metadata(metadata: str | None) -> dict[str, object]:
     try:
         parsed_metadata = json.loads(metadata) if metadata else {}
@@ -829,6 +947,7 @@ async def _accept_document_upload(
     priority: int,
     input_ref_extra: dict[str, object] | None = None,
     ensure_sample_id: bool = False,
+    dedupe_global_library_upload: bool = False,
 ) -> APIResponse[DocumentUploadAccepted]:
     suffix = Path(file.filename or "").suffix or ".bin"
     storage = get_object_storage()
@@ -837,6 +956,25 @@ async def _accept_document_upload(
         temp_file.write(await file.read())
         temp_path = Path(temp_file.name)
 
+    content_sha256 = _sha256_file(temp_path) if dedupe_global_library_upload else None
+    if content_sha256:
+        duplicate = await _find_duplicate_global_library_document(
+            session=session,
+            storage=storage,
+            content_sha256=content_sha256,
+            file_size_bytes=temp_path.stat().st_size,
+        )
+        if duplicate is not None:
+            temp_path.unlink(missing_ok=True)
+            await session.commit()
+            return await _build_duplicate_upload_response(session=session, duplicate=duplicate)
+        metadata = {
+            **metadata,
+            "content_sha256": content_sha256,
+            "upload_original_filename": file.filename or temp_path.name,
+        }
+
+    storage_path: str | None = None
     try:
         storage_path = storage.save(temp_path, prefix=storage_prefix)
         file_size_bytes = temp_path.stat().st_size
@@ -848,13 +986,29 @@ async def _accept_document_upload(
         filename=file.filename or temp_path.name,
         file_type=suffix.lstrip(".").lower(),
         file_size_bytes=file_size_bytes,
+        content_sha256=content_sha256,
         storage_path=storage_path,
         doc_type=doc_type,
         parse_status="parsing",
         meta=metadata,
     )
     session.add(document)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError:
+        if dedupe_global_library_upload and content_sha256:
+            _safe_delete_storage_path(storage=storage, storage_path=storage_path)
+            await session.rollback()
+            duplicate = await _find_duplicate_global_library_document(
+                session=session,
+                storage=storage,
+                content_sha256=content_sha256,
+                file_size_bytes=file_size_bytes,
+            )
+            if duplicate is not None:
+                await session.commit()
+                return await _build_duplicate_upload_response(session=session, duplicate=duplicate)
+        raise
     if ensure_sample_id and not str((document.meta or {}).get("sample_id") or "").strip():
         document.meta = {**(document.meta or {}), "sample_id": f"uploaded-{document.id}"}
 
@@ -968,6 +1122,7 @@ async def import_library_material(
         priority=35,
         input_ref_extra={"library_route": normalized_route},
         ensure_sample_id=True,
+        dedupe_global_library_upload=True,
     )
 
 
