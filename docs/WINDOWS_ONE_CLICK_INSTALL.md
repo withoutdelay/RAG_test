@@ -63,7 +63,7 @@ EMBEDDING_DIMENSION=1024
 EMBEDDING_BATCH_SIZE=16
 ```
 
-第三方 embedding 是默认推荐路径。这样 backend 镜像不需要安装本地 `sentence-transformers`、`torch` 和本地 embedding 模型，能显著降低客户机安装复杂度。`dashscope-multimodal` 会调用阿里云百炼的多模态向量 HTTP 接口；`EMBEDDING_API_KEY` 可以单独配置，如果留空，系统会尝试复用 `QWEN_API_KEY`。
+第三方 embedding 是默认推荐路径。这样 backend 镜像不需要为了向量检索安装本地 `sentence-transformers` 和本地 embedding 模型，能显著降低客户机安装复杂度。`dashscope-multimodal` 会调用阿里云百炼的多模态向量 HTTP 接口；`EMBEDDING_API_KEY` 可以单独配置，如果留空，系统会尝试复用 `QWEN_API_KEY`。
 
 Windows 安装脚本会把旧 `.env` 中的 `BACKEND_EXTRAS=full` / `BACKEND_EXTRAS=parsing,embeddings` 自动迁移为 `BACKEND_EXTRAS=parsing`，并把旧的本地 embedding 配置迁移为第三方 embedding 默认配置。脚本不会覆盖已有的 LLM/API key。
 
@@ -150,6 +150,8 @@ FORMULA_OCR_BACKEND=none
 - 保留文档解析能力。
 - embedding 交给第三方 API，不在客户机安装本地 embedding 模型。
 - 排除 `pix2tex` 公式 OCR，避免在默认安装里拉取额外的大型深度学习依赖。
+
+注意：`BACKEND_EXTRAS=parsing` 会安装 `docling` 文档解析依赖，`docling` 自身需要 `torch`。Dockerfile 会在该模式下优先安装 CPU-only torch，避免默认 PyPI 拉取 CUDA 相关包。如果只想先验证系统启动、不导入新 PDF/Word，可临时设置 `BACKEND_EXTRAS=`，但文档解析能力会下降。
 
 如果仍看到类似下面的大包下载：
 

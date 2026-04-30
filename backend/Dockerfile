@@ -25,7 +25,7 @@ RUN mkdir -p \
 COPY data/case_library ./data/case_library
 COPY pyproject.toml .
 RUN case ",${BACKEND_EXTRAS}," in \
-      *",embeddings,"*|*",full,"*) \
+      *",parsing,"*|*",embeddings,"*|*",full,"*) \
         if [ "${INSTALL_CPU_TORCH}" = "true" ]; then \
           pip install --no-cache-dir --index-url "${TORCH_CPU_INDEX_URL}" torch; \
         fi \
