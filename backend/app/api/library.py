@@ -123,6 +123,9 @@ def _default_route_for_entry(entry: dict[str, Any]) -> MaterialRoute:
 
 
 def _route_for_entry(entry: dict[str, Any], state: dict[str, Any]) -> MaterialRoute:
+    entry_route = str(entry.get("route") or "").strip()
+    if entry_route in DOC_TYPE_BY_ROUTE:
+        return entry_route  # type: ignore[return-value]
     sample_id = str(entry.get("sample_id") or "")
     material_state = dict((state.get("materials") or {}).get(sample_id) or {})
     route = str(material_state.get("route") or "").strip()
@@ -189,7 +192,7 @@ def _material_base_metadata(entry: dict[str, Any], route: str) -> dict[str, Any]
         },
         "high_risk_content_flags": list(entry.get("high_risk_content_flags") or []),
         "source_path": str(_sample_source_path(entry)),
-        "source_kind": "private_sample",
+        "source_kind": entry.get("source_kind") or "private_sample",
     }
 
 
@@ -574,7 +577,7 @@ async def rebuild_materials(
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[JobAcceptedData]:
-    entries = _load_manifest_entries()
+    entries = await _load_all_material_entries(session=session)
     sample_filter = {str(item) for item in (payload.sample_ids or []) if str(item).strip()}
     selected_entries = [
         entry for entry in entries if not sample_filter or str(entry.get("sample_id") or "") in sample_filter
