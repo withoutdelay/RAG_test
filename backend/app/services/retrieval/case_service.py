@@ -1775,7 +1775,7 @@ class CaseLibraryService:
             }
         )
 
-        candidates: list[dict[str, Any]] = []
+        section_rows: list[tuple[dict[str, Any], str, str, dict[str, Any], str]] = []
         for outline_entry in outline_entries:
             track = str(outline_entry.get("library_track") or "pilot_main")
             if library_tracks and track not in library_tracks:
@@ -1789,42 +1789,61 @@ class CaseLibraryService:
                 if not isinstance(section, dict):
                     continue
                 retrieval_text = self._build_section_retrieval_text(section)
-                score, reasons = self._score_section_candidate(
-                    query=query,
-                    query_terms=query_terms,
-                    title_terms=title_terms,
-                    context_terms=context_terms,
-                    section_title=section_title or "",
-                    section=section,
-                    term_lexicon=term_lexicon,
-                    target_taxonomy=target_taxonomy,
-                    use_semantic=self.section_scope_semantic_enabled,
-                )
-                if score <= 0:
-                    continue
-                candidates.append(
-                    {
-                        "sample_id": sample_id,
-                        "file_name": outline_entry.get("file_name"),
-                        "library_track": track,
-                        "section_id": section.get("section_id"),
-                        "heading_path": section.get("heading_path") or section.get("section_path"),
-                        "section_path": section.get("section_path") or section.get("heading_path"),
-                        "source_heading": section.get("source_heading") or section.get("title"),
-                        "normalized_heading": section.get("normalized_heading"),
-                        "heading_aliases": section.get("heading_aliases") or [],
-                        "heading_family": section.get("heading_family") or [],
-                        "page_span": section.get("page_span"),
-                        "content_span": section.get("content_span"),
-                        "section_summary": section.get("section_summary"),
-                        "level": section.get("level"),
-                        "source_signals": section.get("source_signals") or [],
-                        "_score": float(score),
-                        "_reasons": list(reasons),
-                        "_score_breakdown": _initialize_retrieval_score_breakdown(base_score=float(score)),
-                        "_retrieval_text": retrieval_text,
-                    }
-                )
+                section_rows.append((outline_entry, track, sample_id, section, retrieval_text))
+
+        semantic_scores_by_section_id: dict[int, float] = {}
+        semantic_query = "\n".join(part for part in (section_title or "", query) if part).strip()
+        if self.section_scope_semantic_enabled and self.semantic_scorer.available and section_rows:
+            section_texts = [retrieval_text for _outline_entry, _track, _sample_id, _section, retrieval_text in section_rows]
+            if hasattr(self.semantic_scorer, "score_many"):
+                semantic_scores = self.semantic_scorer.score_many(query=semantic_query, texts=section_texts)
+            else:
+                semantic_scores = [self.semantic_scorer.score(query=semantic_query, text=text) for text in section_texts]
+            for (_outline_entry, _track, _sample_id, section, _retrieval_text), semantic_score in zip(
+                section_rows,
+                semantic_scores,
+            ):
+                semantic_scores_by_section_id[id(section)] = float(semantic_score or 0.0)
+
+        candidates: list[dict[str, Any]] = []
+        for outline_entry, track, sample_id, section, retrieval_text in section_rows:
+            score, reasons = self._score_section_candidate(
+                query=query,
+                query_terms=query_terms,
+                title_terms=title_terms,
+                context_terms=context_terms,
+                section_title=section_title or "",
+                section=section,
+                term_lexicon=term_lexicon,
+                target_taxonomy=target_taxonomy,
+                use_semantic=self.section_scope_semantic_enabled,
+                semantic_score_override=semantic_scores_by_section_id.get(id(section)),
+            )
+            if score <= 0:
+                continue
+            candidates.append(
+                {
+                    "sample_id": sample_id,
+                    "file_name": outline_entry.get("file_name"),
+                    "library_track": track,
+                    "section_id": section.get("section_id"),
+                    "heading_path": section.get("heading_path") or section.get("section_path"),
+                    "section_path": section.get("section_path") or section.get("heading_path"),
+                    "source_heading": section.get("source_heading") or section.get("title"),
+                    "normalized_heading": section.get("normalized_heading"),
+                    "heading_aliases": section.get("heading_aliases") or [],
+                    "heading_family": section.get("heading_family") or [],
+                    "page_span": section.get("page_span"),
+                    "content_span": section.get("content_span"),
+                    "section_summary": section.get("section_summary"),
+                    "level": section.get("level"),
+                    "source_signals": section.get("source_signals") or [],
+                    "_score": float(score),
+                    "_reasons": list(reasons),
+                    "_score_breakdown": _initialize_retrieval_score_breakdown(base_score=float(score)),
+                    "_retrieval_text": retrieval_text,
+                }
+            )
         if self.section_scope_semantic_enabled:
             self._apply_hybrid_rrf_boost(
                 candidates=candidates,
@@ -2362,6 +2381,7 @@ class CaseLibraryService:
         term_lexicon: dict[str, tuple[str, ...]] | None = None,
         target_taxonomy: dict[str, Any] | None = None,
         use_semantic: bool = True,
+        semantic_score_override: float | None = None,
     ) -> tuple[float, list[str]]:
         heading_path = str(section.get("heading_path") or section.get("section_path") or section.get("title") or "")
         normalized_heading = str(section.get("normalized_heading") or normalize_section_heading(heading_path))
@@ -2469,6 +2489,7 @@ class CaseLibraryService:
                 candidate_text=candidate_text,
                 reasons=reasons,
                 weight=semantic_weight,
+                semantic_score_override=semantic_score_override,
             )
         return score, reasons
 
@@ -2479,10 +2500,15 @@ class CaseLibraryService:
         candidate_text: str,
         reasons: list[str],
         weight: float,
+        semantic_score_override: float | None = None,
     ) -> float:
-        if not self.semantic_scorer.available:
+        if semantic_score_override is None and not self.semantic_scorer.available:
             return 0.0
-        semantic_score = self.semantic_scorer.score(query=query, text=candidate_text)
+        semantic_score = (
+            float(semantic_score_override)
+            if semantic_score_override is not None
+            else self.semantic_scorer.score(query=query, text=candidate_text)
+        )
         if semantic_score <= 0:
             return 0.0
         reasons.append(f"semantic_match={semantic_score:.3f}")
@@ -2573,7 +2599,16 @@ class CaseLibraryService:
         }
         avg_doc_length = sum(sum(counts.values()) for _candidate, _text, counts in candidate_corpus) / max(len(candidate_corpus), 1)
 
-        for candidate, candidate_text, candidate_counts in candidate_corpus:
+        candidate_texts = [candidate_text for _candidate, candidate_text, _candidate_counts in candidate_corpus]
+        if hasattr(self.semantic_scorer, "score_many"):
+            semantic_scores = self.semantic_scorer.score_many(query=query_text, texts=candidate_texts)
+        else:
+            semantic_scores = [
+                self.semantic_scorer.score(query=query_text, text=candidate_text)
+                for candidate_text in candidate_texts
+            ]
+
+        for (candidate, candidate_text, candidate_counts), semantic_score in zip(candidate_corpus, semantic_scores):
             sparse_score = self._hybrid_sparse_score(
                 query_text=query_text,
                 query_terms=sparse_query_terms,
@@ -2583,7 +2618,6 @@ class CaseLibraryService:
                 corpus_size=len(candidate_corpus),
                 avg_doc_length=avg_doc_length,
             )
-            semantic_score = self.semantic_scorer.score(query=query_text, text=candidate_text)
             candidate["_hybrid_sparse_score"] = sparse_score
             candidate["_hybrid_semantic_score"] = semantic_score
             breakdown = _ensure_retrieval_score_breakdown(candidate)

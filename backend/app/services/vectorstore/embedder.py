@@ -116,6 +116,30 @@ class Embedder:
             return [self._coerce_vector(vector) for vector in vectors]
         return [self._fallback_vector(text) for text in texts]
 
+    def embed_text_sync(self, text: str) -> list[float]:
+        vectors = self.embed_texts_sync([text])
+        return vectors[0]
+
+    def embed_texts_sync(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        if self.backend_name == "openai-compatible":
+            vectors: list[list[float]] = []
+            batch_size = max(1, int(self.batch_size or 1))
+            for start in range(0, len(texts), batch_size):
+                vectors.extend(self._embed_texts_openai_compatible_sync(texts[start : start + batch_size]))
+            return vectors
+        if self.backend_name == "dashscope-multimodal":
+            vectors = []
+            batch_size = max(1, int(self.batch_size or 1))
+            for start in range(0, len(texts), batch_size):
+                vectors.extend(self._embed_texts_dashscope_multimodal_sync(texts[start : start + batch_size]))
+            return vectors
+        if self._model is not None:
+            vectors = self._model.encode(texts, normalize_embeddings=True)
+            return [self._coerce_vector(vector) for vector in vectors]
+        return [self._fallback_vector(text) for text in texts]
+
     def _fallback_vector(self, text: str) -> list[float]:
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         seed = list(digest) * ((self.dimension // len(digest)) + 1)
@@ -152,19 +176,23 @@ class Embedder:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
+        return self._parse_openai_compatible_vectors(data, expected_count=len(texts))
 
-        items = data.get("data")
-        if not isinstance(items, list):
-            raise RuntimeError("embedding provider returned no data list")
-        ordered_items = sorted(items, key=lambda item: int(item.get("index", 0)) if isinstance(item, dict) else 0)
-        vectors: list[list[float]] = []
-        for item in ordered_items:
-            if not isinstance(item, dict) or "embedding" not in item:
-                raise RuntimeError("embedding provider returned an invalid embedding item")
-            vectors.append(self._coerce_vector(item["embedding"]))
-        if len(vectors) != len(texts):
-            raise RuntimeError(f"embedding provider returned {len(vectors)} vectors for {len(texts)} inputs")
-        return vectors
+    def _embed_texts_openai_compatible_sync(self, texts: list[str]) -> list[list[float]]:
+        url = self._embedding_url()
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "model": self.model_name,
+            "input": texts,
+        }
+        with httpx.Client(timeout=float(self.timeout_seconds or 45.0)) as client:
+            response = client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        return self._parse_openai_compatible_vectors(data, expected_count=len(texts))
 
     async def _embed_texts_dashscope_multimodal(self, texts: list[str]) -> list[list[float]]:
         payload = self._dashscope_multimodal_payload(texts)
@@ -196,6 +224,33 @@ class Embedder:
             f"dashscope multimodal embedding provider returned {len(vectors)} vectors for {len(texts)} inputs"
         )
 
+    def _embed_texts_dashscope_multimodal_sync(self, texts: list[str]) -> list[list[float]]:
+        payload = self._dashscope_multimodal_payload(texts)
+        data = self._post_embedding_request_sync(self._dashscope_multimodal_embedding_url(), payload)
+        vectors = self._parse_dashscope_multimodal_vectors(data)
+        if len(vectors) == len(texts):
+            return vectors
+
+        if len(texts) > 1:
+            fallback_vectors: list[list[float]] = []
+            for text in texts:
+                single_data = self._post_embedding_request_sync(
+                    self._dashscope_multimodal_embedding_url(),
+                    self._dashscope_multimodal_payload([text]),
+                )
+                single_vectors = self._parse_dashscope_multimodal_vectors(single_data)
+                if len(single_vectors) != 1:
+                    raise RuntimeError(
+                        f"dashscope multimodal embedding provider returned {len(single_vectors)} vectors "
+                        "for one input"
+                    )
+                fallback_vectors.extend(single_vectors)
+            return fallback_vectors
+
+        raise RuntimeError(
+            f"dashscope multimodal embedding provider returned {len(vectors)} vectors for {len(texts)} inputs"
+        )
+
     async def _post_embedding_request(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -205,16 +260,18 @@ class Embedder:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
-        if not isinstance(data, dict):
-            raise RuntimeError("embedding provider returned a non-object response")
-        status_code = data.get("status_code")
-        if isinstance(status_code, int) and status_code >= 400:
-            message = data.get("message") or data.get("code") or "unknown error"
-            raise RuntimeError(f"embedding provider failed: {message}")
-        if str(data.get("code") or "").strip():
-            message = data.get("message") or data.get("code")
-            raise RuntimeError(f"embedding provider failed: {message}")
-        return data
+        return self._validate_embedding_response_payload(data)
+
+    def _post_embedding_request_sync(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        with httpx.Client(timeout=float(self.timeout_seconds or 45.0)) as client:
+            response = client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        return self._validate_embedding_response_payload(data)
 
     def _embedding_url(self) -> str:
         base_url = str(self.base_url or "").strip()
@@ -271,6 +328,32 @@ class Embedder:
                 raise RuntimeError(f"dashscope multimodal embedding item failed: {item.get('message')}")
             vectors.append(self._extract_embedding_vector(item))
         return vectors
+
+    def _parse_openai_compatible_vectors(self, data: dict[str, Any], *, expected_count: int) -> list[list[float]]:
+        items = data.get("data")
+        if not isinstance(items, list):
+            raise RuntimeError("embedding provider returned no data list")
+        ordered_items = sorted(items, key=lambda item: int(item.get("index", 0)) if isinstance(item, dict) else 0)
+        vectors: list[list[float]] = []
+        for item in ordered_items:
+            if not isinstance(item, dict) or "embedding" not in item:
+                raise RuntimeError("embedding provider returned an invalid embedding item")
+            vectors.append(self._coerce_vector(item["embedding"]))
+        if len(vectors) != expected_count:
+            raise RuntimeError(f"embedding provider returned {len(vectors)} vectors for {expected_count} inputs")
+        return vectors
+
+    def _validate_embedding_response_payload(self, data: Any) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            raise RuntimeError("embedding provider returned a non-object response")
+        status_code = data.get("status_code")
+        if isinstance(status_code, int) and status_code >= 400:
+            message = data.get("message") or data.get("code") or "unknown error"
+            raise RuntimeError(f"embedding provider failed: {message}")
+        if str(data.get("code") or "").strip():
+            message = data.get("message") or data.get("code")
+            raise RuntimeError(f"embedding provider failed: {message}")
+        return data
 
     def _extract_embedding_vector(self, item: Any) -> list[float]:
         if isinstance(item, dict):

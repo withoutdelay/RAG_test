@@ -30,6 +30,7 @@ from app.services.retrieval.service import (
     build_evidence_search_plan,
     filter_evidence_results,
 )
+from app.services.retrieval.semantic_scorer import EmbeddingSemanticScorer
 from app.services.vectorstore.retriever import Retriever, _build_chunk_retrieval_text, _rank_chunk_candidates
 from app.services.vectorstore.chunker import Chunker
 from app.services.vectorstore.embedder import Embedder
@@ -609,6 +610,96 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         self.assertEqual(requests[0]["json"]["model"], "qwen3-vl-embedding")
         self.assertEqual(requests[0]["json"]["input"]["contents"], [{"text": "alpha"}, {"text": "beta"}])
         self.assertEqual(requests[0]["json"]["parameters"]["dimension"], 3)
+
+    def test_embedder_sync_uses_dashscope_multimodal_embedding_backend(self) -> None:
+        requests: list[dict] = []
+
+        class FakeResponse:
+            def __init__(self, inputs: list[dict]) -> None:
+                self.inputs = inputs
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "status_code": 200,
+                    "code": "",
+                    "message": "",
+                    "output": {
+                        "embeddings": [
+                            {"index": index, "embedding": [float(index), float(index + 1), float(index + 2)]}
+                            for index, _item in enumerate(self.inputs)
+                        ]
+                    },
+                }
+
+        class FakeClient:
+            def __init__(self, *, timeout: float) -> None:
+                self.timeout = timeout
+
+            def __enter__(self) -> "FakeClient":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def post(self, url: str, *, headers: dict, json: dict) -> FakeResponse:
+                requests.append({"url": url, "headers": headers, "json": json, "timeout": self.timeout})
+                return FakeResponse(list(json["input"]["contents"]))
+
+        with patch("app.services.vectorstore.embedder.httpx.Client", FakeClient):
+            with patch.dict(
+                os.environ,
+                {
+                    "EMBEDDING_BACKEND": "dashscope-multimodal",
+                    "EMBEDDING_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "EMBEDDING_API_KEY": "sk-real",
+                    "EMBEDDING_MODEL": "qwen3-vl-embedding",
+                    "EMBEDDING_DIMENSION": "3",
+                    "EMBEDDING_BATCH_SIZE": "2",
+                    "QWEN_API_KEY": "",
+                    "OPENAI_API_KEY": "",
+                },
+                clear=False,
+            ):
+                get_settings.cache_clear()
+                embedder = Embedder()
+                vectors = embedder.embed_texts_sync(["alpha", "beta", "gamma"])
+
+        get_settings.cache_clear()
+
+        self.assertEqual(vectors, [[0.0, 1.0, 2.0], [1.0, 2.0, 3.0], [0.0, 1.0, 2.0]])
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            requests[0]["url"],
+            "https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding",
+        )
+
+    def test_semantic_scorer_can_use_api_embedder_sync_batches(self) -> None:
+        class FakeApiEmbedder:
+            backend_name = "dashscope-multimodal"
+            _model = None
+
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
+
+            def embed_texts_sync(self, texts: list[str]) -> list[list[float]]:
+                self.calls.append(list(texts))
+                vectors = {
+                    "query": [1.0, 0.0, 0.0],
+                    "strong": [0.9, 0.1, 0.0],
+                    "weak": [0.0, 1.0, 0.0],
+                }
+                return [vectors[text] for text in texts]
+
+        embedder = FakeApiEmbedder()
+        scorer = EmbeddingSemanticScorer(embedder=embedder)  # type: ignore[arg-type]
+        scores = scorer.score_many(query="query", texts=["strong", "weak"])
+
+        self.assertTrue(scorer.available)
+        self.assertEqual(scores, [0.9, 0.0])
+        self.assertEqual(embedder.calls, [["query"], ["strong", "weak"]])
 
     def test_dashscope_multimodal_batch_falls_back_when_provider_fuses_vectors(self) -> None:
         requests: list[dict] = []
