@@ -600,10 +600,11 @@ async def _replace_figure_assets(
         )
         asset_uri = raw_document.file_uri
         if asset.image_bytes:
+            figure_prefix_scope = str(document.project_id or "global")
             asset_uri = storage.save_bytes(
                 asset.image_bytes,
                 suffix=asset.image_ext or ".png",
-                prefix=f"{document.project_id}_figure_{index}_",
+                prefix=f"{figure_prefix_scope}_figure_{index}_",
             )
 
         saved_asset = FigureAsset(
