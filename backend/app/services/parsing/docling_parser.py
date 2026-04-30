@@ -98,7 +98,18 @@ class DoclingParser:
                 self._configure_docling_environment()
                 effective_path = path
                 conversion_note: dict[str, Any] = {}
-                if self._office_document_prefers_pdf_conversion(path):
+                if suffix == ".doc":
+                    converted_docx = self._convert_legacy_doc_to_docx(path)
+                    if converted_docx is not None:
+                        effective_path = converted_docx
+                        conversion_note = {
+                            "docling_office_conversion": "libreoffice_docx",
+                            "docling_office_conversion_source_format": "doc",
+                            "docling_office_conversion_target_format": "docx",
+                        }
+                    else:
+                        return self._legacy_doc_placeholder(path)
+                elif self._office_document_prefers_pdf_conversion(path):
                     converted_pdf = self._convert_office_document_to_pdf(path)
                     if converted_pdf is not None:
                         effective_path = converted_pdf
@@ -107,8 +118,6 @@ class DoclingParser:
                             "docling_office_conversion_source_format": suffix.lstrip("."),
                             "docling_office_conversion_target_format": "pdf",
                         }
-                    elif suffix == ".doc":
-                        return self._legacy_doc_placeholder(path)
                 converter = self._build_converter(effective_path.suffix.lower(), include_assets=include_assets)
                 result = converter.convert(str(effective_path))
                 items = list(result.document.iterate_items())
@@ -206,16 +215,21 @@ class DoclingParser:
         suffix = path.suffix.lower()
         if not self.resolved_libreoffice_cmd:
             return False
-        if suffix == ".doc":
-            return True
         if suffix == ".docx":
             return self._docx_prefers_pdf_conversion(path)
         return False
 
     def _convert_office_document_to_pdf(self, path: Path) -> Path | None:
+        return self._convert_office_document(path, target_ext=".pdf", convert_to="pdf")
+
+    def _convert_legacy_doc_to_docx(self, path: Path) -> Path | None:
+        return self._convert_office_document(path, target_ext=".docx", convert_to="docx")
+
+    def _convert_office_document(self, path: Path, *, target_ext: str, convert_to: str) -> Path | None:
         if not self.resolved_libreoffice_cmd:
             return None
-        temp_dir = tempfile.mkdtemp(prefix="docling-office-pdf-")
+        normalized_ext = target_ext if target_ext.startswith(".") else f".{target_ext}"
+        temp_dir = tempfile.mkdtemp(prefix=f"docling-office-{normalized_ext.lstrip('.')}-")
         executable = (
             self.resolved_libreoffice_cmd
             if Path(self.resolved_libreoffice_cmd).exists()
@@ -227,7 +241,7 @@ class DoclingParser:
             executable,
             "--headless",
             "--convert-to",
-            "pdf",
+            convert_to,
             "--outdir",
             temp_dir,
             str(path),
@@ -235,9 +249,9 @@ class DoclingParser:
         completed = subprocess.run(command, capture_output=True, text=True)
         if completed.returncode != 0:
             return None
-        pdf_path = Path(temp_dir) / f"{path.stem}.pdf"
-        if pdf_path.exists():
-            return pdf_path
+        converted_path = Path(temp_dir) / f"{path.stem}{normalized_ext}"
+        if converted_path.exists():
+            return converted_path
         return None
 
     def _resolve_libreoffice_cmd(self) -> str | None:
