@@ -11,6 +11,10 @@ export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
   const hasSession = Boolean(request.cookies.get(COOKIE_NAME)?.value);
 
+  if (pathname.startsWith('/api/v1/')) {
+    return NextResponse.next();
+  }
+
   if (pathname === '/login') {
     if (hasSession) {
       return NextResponse.redirect(new URL('/projects', request.url));
@@ -30,4 +34,3 @@ export function proxy(request: NextRequest) {
 export const config = {
   matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
 };
-

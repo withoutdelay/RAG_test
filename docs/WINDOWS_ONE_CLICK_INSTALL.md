@@ -75,6 +75,8 @@ AUTH_COOKIE_SECURE=false
 AUTH_COOKIE_SAMESITE=lax
 NEXT_PUBLIC_AUTH_ENABLED=true
 NEXT_PUBLIC_AUTH_COOKIE_NAME=presale_session
+NEXT_PUBLIC_API_BASE_URL=/api/v1
+API_PROXY_TARGET=http://backend:8000
 CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 ```
 
@@ -267,7 +269,8 @@ Get-Service com.docker.service
 ```env
 FRONTEND_PORT=3001
 BACKEND_PORT=8002
-NEXT_PUBLIC_API_BASE_URL=http://localhost:8002/api/v1
+NEXT_PUBLIC_API_BASE_URL=/api/v1
+API_PROXY_TARGET=http://backend:8000
 ```
 
 然后执行：

@@ -382,7 +382,8 @@ function Ensure-EnvFile {
   Set-DotEnvValue -Key "QDRANT_COLLECTION" -Value "presale_knowledge_qwen3_vl_embedding"
   Set-DotEnvValue -Key "BACKEND_PORT" -Value ([string]$BackendPort)
   Set-DotEnvValue -Key "FRONTEND_PORT" -Value ([string]$FrontendPort)
-  Set-DotEnvValue -Key "NEXT_PUBLIC_API_BASE_URL" -Value "http://localhost:$BackendPort/api/v1"
+  Set-DotEnvValue -Key "NEXT_PUBLIC_API_BASE_URL" -Value "/api/v1"
+  Set-DotEnvValue -Key "API_PROXY_TARGET" -Value "http://backend:8000"
   Set-DotEnvValue -Key "CORS_ALLOW_ORIGINS" -Value "http://localhost:$FrontendPort,http://127.0.0.1:$FrontendPort"
   Set-DotEnvValue -Key "EMBEDDING_BACKEND" -Value "dashscope-multimodal"
   Set-DotEnvValue -Key "EMBEDDING_BASE_URL" -Value "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -457,9 +458,17 @@ function Apply-CustomerEnvMigrations {
     Set-DotEnvValue -Key "NEXT_PUBLIC_AUTH_ENABLED" -Value "true"
     $changed = $true
   }
+  if (-not $values.ContainsKey("NEXT_PUBLIC_API_BASE_URL") -or $values["NEXT_PUBLIC_API_BASE_URL"] -match "localhost|127\.0\.0\.1") {
+    Set-DotEnvValue -Key "NEXT_PUBLIC_API_BASE_URL" -Value "/api/v1"
+    $changed = $true
+  }
+  if (-not $values.ContainsKey("API_PROXY_TARGET")) {
+    Set-DotEnvValue -Key "API_PROXY_TARGET" -Value "http://backend:8000"
+    $changed = $true
+  }
 
   if ($changed) {
-    Write-Warn ".env was migrated to customer deployment defaults: BACKEND_EXTRAS=parsing and third-party embeddings."
+    Write-Warn ".env was migrated to customer deployment defaults: BACKEND_EXTRAS=parsing, third-party embeddings, and same-origin frontend API proxy."
   }
 }
 
@@ -535,10 +544,10 @@ function Warn-EnvIssues {
   param([hashtable]$EnvValues, [int]$EffectiveBackendPort)
 
   if ($EnvValues.ContainsKey("NEXT_PUBLIC_API_BASE_URL")) {
-    $expected = "http://localhost:$EffectiveBackendPort/api/v1"
+    $expected = "/api/v1"
     $actual = $EnvValues["NEXT_PUBLIC_API_BASE_URL"]
-    if ($actual -match "localhost|127\.0\.0\.1" -and $actual -ne $expected) {
-      Write-Warn "NEXT_PUBLIC_API_BASE_URL is '$actual', but BACKEND_PORT is $EffectiveBackendPort. Frontend export/generation calls may fail unless these match."
+    if (($actual -match "localhost|127\.0\.0\.1") -or ($actual -ne $expected -and $actual -notmatch "^https?://")) {
+      Write-Warn "NEXT_PUBLIC_API_BASE_URL is '$actual'. The recommended value is '/api/v1' so the frontend can proxy API calls to the backend container."
     }
   }
 
