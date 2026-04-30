@@ -20,7 +20,7 @@ RUN case ",${BACKEND_EXTRAS}," in \
       *",parsing,"*|*",embeddings,"*|*",full,"*) \
         if [ "${INSTALL_CPU_TORCH}" = "true" ]; then \
           pip install --no-cache-dir filelock typing-extensions sympy networkx jinja2 fsspec && \
-          pip install --no-cache-dir --no-deps --index-url "${TORCH_CPU_INDEX_URL}" torch; \
+          pip install --no-cache-dir --no-deps --index-url "${TORCH_CPU_INDEX_URL}" torch torchvision; \
         fi \
         ;; \
     esac
