@@ -1,11 +1,20 @@
+'use client';
+
 import { Sidebar } from './Sidebar';
 import { Header } from './Header';
+import { usePathname } from 'next/navigation';
 
 interface AppLayoutProps {
   children: React.ReactNode;
 }
 
 export function AppLayout({ children }: AppLayoutProps) {
+  const pathname = usePathname();
+
+  if (pathname === '/login') {
+    return <>{children}</>;
+  }
+
   return (
     <div className="flex h-screen w-full bg-background overflow-hidden">
       <Sidebar className="hidden border-r bg-muted/40 md:block" />

@@ -20,13 +20,20 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Presale Copilot Backend", version="0.1.0", lifespan=lifespan)
 settings = get_settings()
-if settings.app_env.lower() == "development":
+cors_origins = [
+    origin.strip()
+    for origin in str(settings.cors_allow_origins or "").split(",")
+    if origin.strip()
+]
+if not cors_origins and settings.app_env.lower() == "development":
+    cors_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+if cors_origins:
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-        ],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

@@ -63,6 +63,23 @@ EMBEDDING_DIMENSION=1024
 EMBEDDING_BATCH_SIZE=16
 ```
 
+如果应用会暴露在客户网络或公网，必须启用登录鉴权：
+
+```env
+AUTH_ENABLED=true
+AUTH_USERNAME=admin
+AUTH_PASSWORD=replace-with-strong-password
+AUTH_SESSION_COOKIE_NAME=presale_session
+AUTH_SESSION_TTL_SECONDS=28800
+AUTH_COOKIE_SECURE=false
+AUTH_COOKIE_SAMESITE=lax
+NEXT_PUBLIC_AUTH_ENABLED=true
+NEXT_PUBLIC_AUTH_COOKIE_NAME=presale_session
+CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+```
+
+当前默认是 HTTP 部署，所以 `AUTH_COOKIE_SECURE=false`。如果后续切到 HTTPS 反向代理，改为 `AUTH_COOKIE_SECURE=true`。
+
 第三方 embedding 是默认推荐路径。这样 backend 镜像不需要为了向量检索安装本地 `sentence-transformers` 和本地 embedding 模型，能显著降低客户机安装复杂度。`dashscope-multimodal` 会调用阿里云百炼的多模态向量 HTTP 接口；`EMBEDDING_API_KEY` 可以单独配置，如果留空，系统会尝试复用 `QWEN_API_KEY`。
 
 Windows 安装脚本会把旧 `.env` 中的 `BACKEND_EXTRAS=full` / `BACKEND_EXTRAS=parsing,embeddings` 自动迁移为 `BACKEND_EXTRAS=parsing`，并把旧的本地 embedding 配置迁移为第三方 embedding 默认配置。脚本不会覆盖已有的 LLM/API key。

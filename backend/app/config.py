@@ -18,6 +18,18 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     secret_key: str = "change-me-to-random-string"
+    auth_enabled: bool = Field(default=False, validation_alias="AUTH_ENABLED")
+    auth_username: str = Field(default="admin", validation_alias="AUTH_USERNAME")
+    auth_password: str | None = Field(default=None, validation_alias="AUTH_PASSWORD")
+    auth_password_hash: str | None = Field(default=None, validation_alias="AUTH_PASSWORD_HASH")
+    auth_session_cookie_name: str = Field(default="presale_session", validation_alias="AUTH_SESSION_COOKIE_NAME")
+    auth_session_ttl_seconds: int = Field(default=28800, validation_alias="AUTH_SESSION_TTL_SECONDS")
+    auth_cookie_secure: bool = Field(default=False, validation_alias="AUTH_COOKIE_SECURE")
+    auth_cookie_samesite: Literal["lax", "strict", "none"] = Field(
+        default="lax",
+        validation_alias="AUTH_COOKIE_SAMESITE",
+    )
+    cors_allow_origins: str = Field(default="", validation_alias="CORS_ALLOW_ORIGINS")
 
     database_url: str = "postgresql+asyncpg://copilot:copilot@localhost:5432/copilot_db"
     redis_url: str = "redis://localhost:6379/0"

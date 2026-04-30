@@ -96,7 +96,7 @@ export default function ExportPage() {
     if (!exportData) return;
     setDownloading(true);
     try {
-      const response = await fetch(buildLatestExportDownloadUrl(projectId));
+      const response = await fetch(buildLatestExportDownloadUrl(projectId), { credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to download export file');
       }

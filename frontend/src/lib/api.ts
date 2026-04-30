@@ -24,6 +24,7 @@ function resolveApiBaseURL(): string {
 
 const api = axios.create({
   baseURL: resolveApiBaseURL(),
+  withCredentials: true,
 });
 
 api.interceptors.response.use(
@@ -36,7 +37,15 @@ api.interceptors.response.use(
     }
     return response.data;
   },
-  (error) => Promise.reject(error)
+  (error) => {
+    if (typeof window !== 'undefined' && axios.isAxiosError(error) && error.response?.status === 401) {
+      const current = `${window.location.pathname}${window.location.search}`;
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = `/login?next=${encodeURIComponent(current)}`;
+      }
+    }
+    return Promise.reject(error);
+  }
 );
 
 export function getApiErrorMessage(error: unknown, fallback = 'API Error'): string {

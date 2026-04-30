@@ -371,11 +371,19 @@ function Ensure-EnvFile {
   Copy-Item $EnvExampleFile $EnvFile
   Set-DotEnvValue -Key "APP_ENV" -Value "production"
   Set-DotEnvValue -Key "COMPOSE_PROJECT_NAME" -Value $ProjectName
+  Set-DotEnvValue -Key "AUTH_ENABLED" -Value "true"
+  Set-DotEnvValue -Key "AUTH_USERNAME" -Value "admin"
+  Set-DotEnvValue -Key "AUTH_SESSION_COOKIE_NAME" -Value "presale_session"
+  Set-DotEnvValue -Key "AUTH_COOKIE_SECURE" -Value "false"
+  Set-DotEnvValue -Key "AUTH_COOKIE_SAMESITE" -Value "lax"
+  Set-DotEnvValue -Key "NEXT_PUBLIC_AUTH_ENABLED" -Value "true"
+  Set-DotEnvValue -Key "NEXT_PUBLIC_AUTH_COOKIE_NAME" -Value "presale_session"
   Set-DotEnvValue -Key "BACKEND_EXTRAS" -Value "parsing"
   Set-DotEnvValue -Key "QDRANT_COLLECTION" -Value "presale_knowledge_qwen3_vl_embedding"
   Set-DotEnvValue -Key "BACKEND_PORT" -Value ([string]$BackendPort)
   Set-DotEnvValue -Key "FRONTEND_PORT" -Value ([string]$FrontendPort)
   Set-DotEnvValue -Key "NEXT_PUBLIC_API_BASE_URL" -Value "http://localhost:$BackendPort/api/v1"
+  Set-DotEnvValue -Key "CORS_ALLOW_ORIGINS" -Value "http://localhost:$FrontendPort,http://127.0.0.1:$FrontendPort"
   Set-DotEnvValue -Key "EMBEDDING_BACKEND" -Value "dashscope-multimodal"
   Set-DotEnvValue -Key "EMBEDDING_BASE_URL" -Value "https://dashscope.aliyuncs.com/compatible-mode/v1"
   Set-DotEnvValue -Key "EMBEDDING_ENDPOINT_PATH" -Value "/services/embeddings/multimodal-embedding/multimodal-embedding"
@@ -386,6 +394,7 @@ function Ensure-EnvFile {
   Set-DotEnvValue -Key "FORMULA_OCR_BACKEND" -Value "none"
 
   Write-Warn ".env was created with mock LLM settings. Edit .env with the real Qwen/OpenAI-compatible API settings before customer testing."
+  Write-Warn "AUTH_ENABLED=true was set. Configure AUTH_PASSWORD before exposing the app."
   Write-Warn "Third-party embeddings are enabled by default. Set EMBEDDING_API_KEY or QWEN_API_KEY before importing documents."
 }
 
@@ -437,6 +446,15 @@ function Apply-CustomerEnvMigrations {
 
   if (-not $values.ContainsKey("QDRANT_COLLECTION") -or $values["QDRANT_COLLECTION"] -eq "presale_knowledge") {
     Set-DotEnvValue -Key "QDRANT_COLLECTION" -Value "presale_knowledge_qwen3_vl_embedding"
+    $changed = $true
+  }
+
+  if (-not $values.ContainsKey("AUTH_ENABLED")) {
+    Set-DotEnvValue -Key "AUTH_ENABLED" -Value "true"
+    $changed = $true
+  }
+  if (-not $values.ContainsKey("NEXT_PUBLIC_AUTH_ENABLED")) {
+    Set-DotEnvValue -Key "NEXT_PUBLIC_AUTH_ENABLED" -Value "true"
     $changed = $true
   }
 
@@ -526,6 +544,20 @@ function Warn-EnvIssues {
 
   if ($EnvValues.ContainsKey("LLM_PROVIDER_BACKEND") -and $EnvValues["LLM_PROVIDER_BACKEND"] -eq "mock") {
     Write-Warn "LLM_PROVIDER_BACKEND=mock. The app will start, but real generation needs Qwen/OpenAI-compatible credentials in .env."
+  }
+
+  if ($EnvValues.ContainsKey("AUTH_ENABLED") -and $EnvValues["AUTH_ENABLED"].ToLowerInvariant() -eq "true") {
+    $authPassword = ""
+    if ($EnvValues.ContainsKey("AUTH_PASSWORD")) {
+      $authPassword = $EnvValues["AUTH_PASSWORD"]
+    }
+    $authPasswordHash = ""
+    if ($EnvValues.ContainsKey("AUTH_PASSWORD_HASH")) {
+      $authPasswordHash = $EnvValues["AUTH_PASSWORD_HASH"]
+    }
+    if ([string]::IsNullOrWhiteSpace($authPassword) -and [string]::IsNullOrWhiteSpace($authPasswordHash)) {
+      Write-Warn "AUTH_ENABLED=true but AUTH_PASSWORD/AUTH_PASSWORD_HASH is empty. Login will fail until a password is configured."
+    }
   }
 
   if ($EnvValues.ContainsKey("BACKEND_EXTRAS")) {

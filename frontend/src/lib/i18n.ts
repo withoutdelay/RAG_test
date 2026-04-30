@@ -20,6 +20,7 @@ const zhCN: Record<string, string> = {
   'English interface': '英文交互',
   Help: '帮助',
   'User Menu': '用户菜单',
+  Logout: '退出登录',
   Overview: '概览',
   Documents: '文档',
   Requirement: '需求',
