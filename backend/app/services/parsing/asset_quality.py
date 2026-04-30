@@ -34,6 +34,11 @@ def _build_quality_metadata(*, asset: ParsedAsset, confidence_threshold: float) 
         score = min(score, 0.05)
         reasons.append("not_preserved_for_vector_db")
 
+    if bool(metadata.get("review_required")):
+        status = _max_status(status, "review_pending")
+        score = min(score, 0.62)
+        reasons.append("asset_marked_for_review")
+
     if asset.asset_type == "figure":
         if not asset.image_bytes:
             status = "rejected"

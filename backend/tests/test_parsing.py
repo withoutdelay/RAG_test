@@ -2,6 +2,7 @@ import os
 import asyncio
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,7 +10,7 @@ import zipfile
 
 from app.config import get_settings
 from app.services.parsing.parser import ParserService
-from app.services.parsing.docling_parser import DoclingParser
+from app.services.parsing.docling_parser import DoclingParser, ParsedAsset
 
 
 class ParsingTests(unittest.TestCase):
@@ -173,6 +174,100 @@ class ParsingTests(unittest.TestCase):
             self.assertFalse(parser._docx_prefers_pdf_conversion(path))
         finally:
             path.unlink(missing_ok=True)
+
+    def test_docx_media_repair_restores_missing_raster_figure(self) -> None:
+        try:
+            from PIL import Image
+        except Exception:
+            self.skipTest("pillow required")
+
+        image_handle = BytesIO()
+        Image.new("RGB", (12, 8), color="white").save(image_handle, format="PNG")
+        with tempfile.NamedTemporaryFile("wb", suffix=".docx", delete=False) as handle:
+            path = Path(handle.name)
+        try:
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("word/media/image1.png", image_handle.getvalue())
+            assets = [
+                ParsedAsset(
+                    asset_type="figure",
+                    page_no=None,
+                    title="主回路图",
+                    caption=None,
+                    heading_path="3.2 主回路图",
+                    context_before=None,
+                    context_after=None,
+                    bbox=None,
+                    source_ref="fig-1",
+                    image_bytes=None,
+                    meta={"visual_role": "engineering_figure"},
+                )
+            ]
+
+            repaired, metadata = DoclingParser()._repair_missing_figure_images(
+                assets,
+                source_path=path,
+                effective_path=path,
+            )
+        finally:
+            path.unlink(missing_ok=True)
+
+        self.assertTrue(repaired[0].image_bytes)
+        self.assertEqual(repaired[0].image_ext, ".png")
+        self.assertEqual(repaired[0].meta["asset_repair_method"], "docx_embedded_raster_media")
+        self.assertEqual(metadata["asset_repair_success_count"], 1)
+        self.assertEqual(metadata["asset_repair_raster_media_success_count"], 1)
+
+    def test_vector_media_repair_falls_back_to_pdf_page_candidate(self) -> None:
+        try:
+            from PIL import Image
+        except Exception:
+            self.skipTest("pillow required")
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".docx", delete=False) as handle:
+            path = Path(handle.name)
+        with tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False) as handle:
+            pdf_path = Path(handle.name)
+            handle.write(b"%PDF-placeholder")
+        try:
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("word/media/image1.wmf", b"wmf-placeholder")
+            assets = [
+                ParsedAsset(
+                    asset_type="figure",
+                    page_no=None,
+                    title="水阻柜原理图",
+                    caption=None,
+                    heading_path="2.1 水阻柜原理图",
+                    context_before=None,
+                    context_after=None,
+                    bbox=None,
+                    source_ref="fig-1",
+                    image_bytes=None,
+                    meta={"visual_role": "engineering_figure"},
+                )
+            ]
+            parser = DoclingParser()
+            with (
+                patch.object(parser, "_convert_office_document_to_pdf", return_value=pdf_path),
+                patch.object(parser, "_get_pdf_page_count", return_value=1),
+                patch.object(parser, "_render_pdf_page_candidate", return_value=Image.new("RGB", (120, 80), color="white")),
+            ):
+                repaired, metadata = parser._repair_missing_figure_images(
+                    assets,
+                    source_path=path,
+                    effective_path=path,
+                )
+        finally:
+            path.unlink(missing_ok=True)
+            pdf_path.unlink(missing_ok=True)
+
+        self.assertTrue(repaired[0].image_bytes)
+        self.assertEqual(repaired[0].meta["asset_repair_method"], "pdf_page_render_candidate")
+        self.assertEqual(repaired[0].meta["asset_repair_precision"], "page_candidate")
+        self.assertIn("pdf_page_render_candidate_requires_review", repaired[0].meta["quality_flags"])
+        self.assertEqual(metadata["asset_repair_vector_media_count"], 1)
+        self.assertEqual(metadata["asset_repair_pdf_render_success_count"], 1)
 
     def test_docling_parser_marks_footer_banner_as_page_furniture_even_with_figure_context(self) -> None:
         parser = DoclingParser()

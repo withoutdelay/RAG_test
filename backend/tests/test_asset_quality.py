@@ -31,6 +31,34 @@ class AssetQualityTests(unittest.TestCase):
         self.assertFalse(metadata["preserve_in_vector_db"])
         self.assertIn("figure_without_image_bytes", metadata["asset_audit_reasons"])
 
+    def test_quality_gate_keeps_repaired_page_candidate_review_pending(self) -> None:
+        assets = [
+            ParsedAsset(
+                asset_type="figure",
+                page_no=1,
+                title="候选页图",
+                caption=None,
+                heading_path="3.2 图纸",
+                context_before=None,
+                context_after=None,
+                bbox=None,
+                source_ref="fig-1",
+                image_bytes=b"png-bytes",
+                meta={
+                    "visual_role": "engineering_figure",
+                    "review_required": True,
+                    "asset_repair_method": "pdf_page_render_candidate",
+                },
+            )
+        ]
+
+        gated = apply_asset_quality_gate(assets, confidence_threshold=0.6)
+
+        metadata = gated[0].meta
+        self.assertEqual(metadata["asset_audit_status"], "review_pending")
+        self.assertTrue(metadata["review_required"])
+        self.assertIn("asset_marked_for_review", metadata["asset_audit_reasons"])
+
 
 if __name__ == "__main__":
     unittest.main()

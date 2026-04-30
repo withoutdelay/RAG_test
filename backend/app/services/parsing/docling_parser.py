@@ -39,6 +39,8 @@ DOC_LING_HEADING_TYPES = tuple(item for item in (SectionHeaderItem, TextItem) if
 
 MIN_REUSABLE_FIGURE_DIMENSION = 80
 MIN_REUSABLE_FIGURE_AREA = 12000
+DOCX_RASTER_MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+DOCX_VECTOR_MEDIA_EXTENSIONS = {".wmf", ".emf"}
 LAYOUT_DRAWING_MARKERS = ("外观图", "高度关系", "平面间距", "间距示意", "外形", "柜体分段", "顶部通风", "布置图", "尺寸图", "检修通道")
 
 
@@ -124,6 +126,13 @@ class DoclingParser:
                 markdown = result.document.export_to_markdown()
                 normalized_markdown = self._normalize_text(markdown, path.name)
                 assets = self._extract_assets(result.document, items=items) if include_assets else []
+                asset_repair_note: dict[str, Any] = {}
+                if include_assets:
+                    assets, asset_repair_note = self._repair_missing_figure_images(
+                        assets,
+                        source_path=path,
+                        effective_path=effective_path,
+                    )
                 structure = self._extract_structure_hints(items, markdown=normalized_markdown)
                 return ParsedDocument(
                     markdown=normalized_markdown,
@@ -139,6 +148,7 @@ class DoclingParser:
                         "format": effective_path.suffix.lower().lstrip(".") or suffix.lstrip("."),
                         "original_format": suffix.lstrip("."),
                         **conversion_note,
+                        **asset_repair_note,
                     },
                     assets=assets,
                     structure=structure,
@@ -253,6 +263,301 @@ class DoclingParser:
         if converted_path.exists():
             return converted_path
         return None
+
+    def _repair_missing_figure_images(
+        self,
+        assets: list[ParsedAsset],
+        *,
+        source_path: Path,
+        effective_path: Path,
+    ) -> tuple[list[ParsedAsset], dict[str, Any]]:
+        missing_indexes = [
+            index
+            for index, asset in enumerate(assets)
+            if asset.asset_type == "figure" and not asset.image_bytes
+        ]
+        if not missing_indexes:
+            return assets, {
+                "asset_repair_attempted": False,
+                "asset_repair_missing_figure_count": 0,
+                "asset_repair_success_count": 0,
+            }
+
+        stats: dict[str, Any] = {
+            "asset_repair_attempted": True,
+            "asset_repair_missing_figure_count": len(missing_indexes),
+            "asset_repair_success_count": 0,
+            "asset_repair_raster_media_success_count": 0,
+            "asset_repair_pdf_render_success_count": 0,
+            "asset_repair_vector_media_count": 0,
+            "asset_repair_unsupported_media_count": 0,
+            "asset_repair_methods": [],
+        }
+
+        remaining = self._repair_from_docx_media(
+            assets,
+            missing_indexes=missing_indexes,
+            effective_path=effective_path,
+            stats=stats,
+        )
+        if remaining:
+            remaining = self._repair_from_pdf_render(
+                assets,
+                missing_indexes=remaining,
+                source_path=source_path,
+                effective_path=effective_path,
+                stats=stats,
+            )
+        stats["asset_repair_success_count"] = sum(
+            1
+            for index in missing_indexes
+            if assets[index].asset_type == "figure" and bool(assets[index].image_bytes)
+        )
+        stats["asset_repair_unresolved_count"] = len(remaining)
+        return assets, stats
+
+    def _repair_from_docx_media(
+        self,
+        assets: list[ParsedAsset],
+        *,
+        missing_indexes: list[int],
+        effective_path: Path,
+        stats: dict[str, Any],
+    ) -> list[int]:
+        if effective_path.suffix.lower() != ".docx" or not missing_indexes:
+            return missing_indexes
+
+        media_items = self._extract_docx_media_items(effective_path)
+        if not media_items:
+            return missing_indexes
+
+        raster_items = [item for item in media_items if item["extension"] in DOCX_RASTER_MEDIA_EXTENSIONS]
+        vector_items = [item for item in media_items if item["extension"] in DOCX_VECTOR_MEDIA_EXTENSIONS]
+        unsupported_items = [
+            item
+            for item in media_items
+            if item["extension"] not in DOCX_RASTER_MEDIA_EXTENSIONS and item["extension"] not in DOCX_VECTOR_MEDIA_EXTENSIONS
+        ]
+        stats["asset_repair_vector_media_count"] = len(vector_items)
+        stats["asset_repair_unsupported_media_count"] = len(unsupported_items)
+        if media_items:
+            stats["asset_repair_docx_media_count"] = len(media_items)
+            stats["asset_repair_docx_media_extensions"] = sorted({item["extension"].lstrip(".") for item in media_items})
+
+        remaining: list[int] = []
+        raster_iter = iter(raster_items)
+        for index in missing_indexes:
+            media_item = next(raster_iter, None)
+            if media_item is None:
+                remaining.append(index)
+                continue
+            asset = assets[index]
+            asset.image_bytes = bytes(media_item["bytes"])
+            asset.image_ext = str(media_item["extension"])
+            asset.meta = {
+                **(asset.meta or {}),
+                "asset_repair_method": "docx_embedded_raster_media",
+                "asset_repair_source": media_item["name"],
+                "storage_fallback": False,
+                "review_required": True,
+            }
+            self._record_asset_repair_method(stats, "docx_embedded_raster_media")
+            stats["asset_repair_raster_media_success_count"] += 1
+        return remaining
+
+    def _extract_docx_media_items(self, path: Path) -> list[dict[str, Any]]:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                names = sorted(
+                    name
+                    for name in archive.namelist()
+                    if name.lower().startswith("word/media/")
+                    and Path(name).suffix.lower()
+                    and not name.endswith("/")
+                )
+                return [
+                    {
+                        "name": name,
+                        "extension": Path(name).suffix.lower(),
+                        "bytes": archive.read(name),
+                    }
+                    for name in names
+                ]
+        except (OSError, zipfile.BadZipFile, KeyError):
+            return []
+
+    def _repair_from_pdf_render(
+        self,
+        assets: list[ParsedAsset],
+        *,
+        missing_indexes: list[int],
+        source_path: Path,
+        effective_path: Path,
+        stats: dict[str, Any],
+    ) -> list[int]:
+        if not missing_indexes:
+            return []
+
+        pdf_path = effective_path if effective_path.suffix.lower() == ".pdf" else None
+        if pdf_path is None:
+            pdf_path = self._convert_office_document_to_pdf(source_path)
+        if pdf_path is None and effective_path != source_path:
+            pdf_path = self._convert_office_document_to_pdf(effective_path)
+        if pdf_path is None:
+            stats["asset_repair_pdf_render_error"] = "pdf_conversion_unavailable"
+            return missing_indexes
+
+        page_count = self._get_pdf_page_count(pdf_path)
+        if page_count <= 0:
+            stats["asset_repair_pdf_render_error"] = "pdf_has_no_renderable_pages"
+            return missing_indexes
+        stats["asset_repair_pdf_page_count"] = page_count
+
+        unresolved: list[int] = []
+        fallback_page_no = 1
+        for index in missing_indexes:
+            asset = assets[index]
+            image = None
+            method = ""
+            page_no = asset.page_no
+            bbox = asset.bbox if isinstance(asset.bbox, dict) else None
+            page_size = self._asset_page_size(asset)
+            if page_no is not None and bbox and page_size:
+                image = self._render_pdf_crop(pdf_path, page_no=page_no, bbox=bbox, page_size=page_size)
+                method = "pdf_bbox_crop"
+            if image is None:
+                selected_page = self._clamp_page_no(page_no or fallback_page_no, page_count=page_count)
+                image = self._render_pdf_page_candidate(pdf_path, page_no=selected_page)
+                page_no = selected_page
+                method = "pdf_page_render_candidate"
+                fallback_page_no = min(page_count, selected_page + 1)
+            image_bytes = self._to_png_bytes(image)
+            if not image_bytes:
+                unresolved.append(index)
+                continue
+            asset.image_bytes = image_bytes
+            asset.image_ext = ".png"
+            asset.page_no = page_no
+            asset.meta = {
+                **(asset.meta or {}),
+                "asset_repair_method": method,
+                "asset_repair_source": str(pdf_path),
+                "asset_repair_precision": "bbox" if method == "pdf_bbox_crop" else "page_candidate",
+                "storage_fallback": False,
+                "review_required": True,
+            }
+            if method == "pdf_page_render_candidate":
+                quality_flags = list(asset.meta.get("quality_flags") or [])
+                if "pdf_page_render_candidate_requires_review" not in quality_flags:
+                    quality_flags.append("pdf_page_render_candidate_requires_review")
+                asset.meta["quality_flags"] = quality_flags
+            self._record_asset_repair_method(stats, method)
+            stats["asset_repair_pdf_render_success_count"] += 1
+        return unresolved
+
+    def _get_pdf_page_count(self, pdf_path: Path) -> int:
+        try:
+            import pypdfium2 as pdfium  # type: ignore[import-not-found]
+
+            pdf = pdfium.PdfDocument(str(pdf_path))
+            return len(pdf)
+        except Exception:
+            return 0
+
+    def _render_pdf_crop(
+        self,
+        pdf_path: Path,
+        *,
+        page_no: int,
+        bbox: dict[str, Any],
+        page_size: tuple[float, float],
+    ) -> Any | None:
+        image = self._render_pdf_page_image(pdf_path, page_no=page_no)
+        if image is None:
+            return None
+        page_width, page_height = page_size
+        if page_width <= 0 or page_height <= 0:
+            return None
+        try:
+            left_value = float(bbox.get("l") or 0.0)
+            right_value = float(bbox.get("r") or 0.0)
+            top_value = float(bbox.get("t") or 0.0)
+            bottom_value = float(bbox.get("b") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        scale_x = image.size[0] / page_width
+        scale_y = image.size[1] / page_height
+        left = max(0, int(left_value * scale_x))
+        right = min(image.size[0], int(right_value * scale_x))
+        upper = max(0, int(image.size[1] - top_value * scale_y))
+        lower = min(image.size[1], int(image.size[1] - bottom_value * scale_y))
+        if right <= left or lower <= upper:
+            return None
+        return image.crop((left, upper, right, lower))
+
+    def _render_pdf_page_candidate(self, pdf_path: Path, *, page_no: int) -> Any | None:
+        image = self._render_pdf_page_image(pdf_path, page_no=page_no)
+        if image is None:
+            return None
+        return self._trim_page_candidate(image)
+
+    def _render_pdf_page_image(self, pdf_path: Path, *, page_no: int, scale: float = 2.0) -> Any | None:
+        try:
+            import pypdfium2 as pdfium  # type: ignore[import-not-found]
+
+            pdf = pdfium.PdfDocument(str(pdf_path))
+            if len(pdf) <= 0:
+                return None
+            page_index = self._clamp_page_no(page_no, page_count=len(pdf)) - 1
+            page = pdf[page_index]
+            bitmap = page.render(scale=scale)
+            return bitmap.to_pil()
+        except Exception:
+            return None
+
+    def _trim_page_candidate(self, image: Any) -> Any:
+        try:
+            from PIL import ImageChops
+
+            background = image.convert("RGB").point(lambda _value: 255)
+            diff = ImageChops.difference(image.convert("RGB"), background)
+            bbox = diff.getbbox()
+            if not bbox:
+                return image
+            margin = 24
+            left = max(0, bbox[0] - margin)
+            upper = max(0, bbox[1] - margin)
+            right = min(image.size[0], bbox[2] + margin)
+            lower = min(image.size[1], bbox[3] + margin)
+            if right <= left or lower <= upper:
+                return image
+            return image.crop((left, upper, right, lower))
+        except Exception:
+            return image
+
+    def _asset_page_size(self, asset: ParsedAsset) -> tuple[float, float] | None:
+        metadata = asset.meta or {}
+        try:
+            page_width = float(metadata.get("page_width") or 0)
+            page_height = float(metadata.get("page_height") or 0)
+        except (TypeError, ValueError):
+            return None
+        if page_width <= 0 or page_height <= 0:
+            return None
+        return page_width, page_height
+
+    def _clamp_page_no(self, page_no: int, *, page_count: int) -> int:
+        try:
+            normalized = int(page_no)
+        except (TypeError, ValueError):
+            normalized = 1
+        return max(1, min(max(page_count, 1), normalized))
+
+    def _record_asset_repair_method(self, stats: dict[str, Any], method: str) -> None:
+        methods = list(stats.get("asset_repair_methods") or [])
+        if method not in methods:
+            methods.append(method)
+        stats["asset_repair_methods"] = methods
 
     def _resolve_libreoffice_cmd(self) -> str | None:
         candidates: list[str | None] = [
