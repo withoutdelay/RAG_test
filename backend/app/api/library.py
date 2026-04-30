@@ -814,6 +814,118 @@ async def _run_rebuild_material_item_job(job_id: UUID, parent_job_id: UUID, entr
             await _update_library_parent_job(parent_job_id)
 
 
+async def recover_library_material_rebuild_jobs_on_startup() -> dict[str, int]:
+    """Requeue library material rebuild jobs left queued/running by a previous backend process."""
+
+    queue = get_background_task_queue()
+    recovered = 0
+    skipped_terminal_parent = 0
+    failed_invalid = 0
+    task_specs: list[tuple[UUID, UUID, dict[str, Any], bool]] = []
+    parent_ids_to_refresh: set[UUID] = set()
+
+    async with get_session_factory()() as session:
+        entries = await _load_all_material_entries(session=session)
+        entries_by_sample_id = {str(entry.get("sample_id") or ""): dict(entry) for entry in entries}
+        result = await session.scalars(
+            select(Job)
+            .where(Job.job_type == "library_material_rebuild")
+            .where(Job.status.in_(["queued", "running"]))
+            .order_by(Job.created_at.asc())
+        )
+        jobs = result.all()
+        for job in jobs:
+            input_ref = dict(job.input_ref or {})
+            sample_id = str(input_ref.get("sample_id") or "").strip()
+            raw_force = input_ref.get("force")
+            force = raw_force if isinstance(raw_force, bool) else str(raw_force or "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            try:
+                parent_job_id = UUID(str(input_ref.get("parent_job_id") or ""))
+            except (TypeError, ValueError):
+                job.status = "failed"
+                job.error_code = "MissingParentJobId"
+                job.output_ref = {
+                    **(job.output_ref or {}),
+                    "error": "library_material_rebuild job is missing parent_job_id",
+                    "progress": {**((job.output_ref or {}).get("progress") or {}), "stage": "failed"},
+                }
+                job.completed_at = datetime.now(timezone.utc)
+                failed_invalid += 1
+                continue
+
+            parent_job = await session.get(Job, parent_job_id)
+            if parent_job is None or parent_job.status in {"succeeded", "failed"}:
+                skipped_terminal_parent += 1
+                continue
+
+            entry = entries_by_sample_id.get(sample_id)
+            if entry is None:
+                job.status = "failed"
+                job.error_code = "MaterialEntryNotFound"
+                job.output_ref = {
+                    **(job.output_ref or {}),
+                    "error": f"Material entry not found: {sample_id}",
+                    "progress": {**((job.output_ref or {}).get("progress") or {}), "stage": "failed"},
+                }
+                job.completed_at = datetime.now(timezone.utc)
+                failed_invalid += 1
+                parent_ids_to_refresh.add(parent_job_id)
+                continue
+
+            job.status = "queued"
+            job.started_at = None
+            job.completed_at = None
+            job.error_code = None
+            job.output_ref = {
+                **(job.output_ref or {}),
+                "progress": {
+                    **((job.output_ref or {}).get("progress") or {}),
+                    "stage": "recovered_queued",
+                    "current_sample_id": sample_id,
+                    "current_file_name": str(entry.get("file_name") or input_ref.get("file_name") or ""),
+                },
+            }
+            task_specs.append((job.id, parent_job_id, entry, force))
+
+        await session.commit()
+
+    for job_id, parent_job_id, entry, force in task_specs:
+        queue.submit(
+            job_id=job_id,
+            job_type="library_material_rebuild",
+            label=f"recovered-library-material:{entry.get('file_name') or job_id}",
+            dedupe_key=_material_dedupe_key(str(entry.get("sample_id") or "")),
+            priority=30,
+            run=lambda job_id=job_id, parent_job_id=parent_job_id, entry=dict(entry), force=force: _run_rebuild_material_item_job(
+                job_id,
+                parent_job_id,
+                entry,
+                force,
+            ),
+        )
+        recovered += 1
+
+    for parent_job_id in parent_ids_to_refresh:
+        await _update_library_parent_job(parent_job_id)
+
+    if recovered or skipped_terminal_parent or failed_invalid:
+        logger.info(
+            "Recovered library_material_rebuild jobs on startup: recovered=%s skipped_terminal_parent=%s failed_invalid=%s",
+            recovered,
+            skipped_terminal_parent,
+            failed_invalid,
+        )
+    return {
+        "recovered": recovered,
+        "skipped_terminal_parent": skipped_terminal_parent,
+        "failed_invalid": failed_invalid,
+    }
+
+
 async def _update_library_parent_job(parent_job_id: UUID) -> None:
     async with get_session_factory()() as session:
         parent = await session.get(Job, parent_job_id)

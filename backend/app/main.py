@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api.documents import recover_document_parse_jobs_on_startup
+from app.api.library import recover_library_material_rebuild_jobs_on_startup
 from app.api.router import api_router
 from app.config import get_settings
 from app.db import get_engine
@@ -29,6 +30,9 @@ async def lifespan(_: FastAPI):
     recovery = await recover_document_parse_jobs_on_startup()
     if recovery.get("recovered"):
         logger.info("Queued %s recovered document parse job(s)", recovery["recovered"])
+    library_recovery = await recover_library_material_rebuild_jobs_on_startup()
+    if library_recovery.get("recovered"):
+        logger.info("Queued %s recovered library material rebuild job(s)", library_recovery["recovered"])
     yield
 
 
