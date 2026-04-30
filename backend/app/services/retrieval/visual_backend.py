@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import math
+import mimetypes
 import os
 from pathlib import Path
 from typing import Any
@@ -556,6 +558,50 @@ class _ClipVisualBackend:
             materialized.cleanup()
 
 
+class _DashScopeMultimodalVisualBackend:
+    backend_name = "dashscope-multimodal"
+    is_true_visual = True
+    max_image_bytes = 5 * 1024 * 1024
+
+    def __init__(self, *, text_embedder: Embedder, model_name: str | None = None) -> None:
+        self.text_embedder = Embedder()
+        if model_name:
+            self.text_embedder.model_name = model_name
+        if self.text_embedder.backend_name != "dashscope-multimodal":
+            raise RuntimeError("DashScope visual backend requires API embedding configuration")
+
+    async def embed_query(self, text: str) -> list[float]:
+        return await self.text_embedder.embed_text(text)
+
+    async def embed_asset(self, *, asset_uri: str, fallback_text: str) -> list[float]:
+        del fallback_text
+        storage = get_object_storage()
+        materialized = storage.materialize(asset_uri)
+        try:
+            image_bytes = materialized.path.read_bytes()
+            if len(image_bytes) > self.max_image_bytes:
+                raise RuntimeError("image is larger than DashScope qwen3-vl-embedding limit")
+            mime_type = mimetypes.guess_type(materialized.path.name)[0] or "image/png"
+            image_data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        finally:
+            materialized.cleanup()
+
+        payload: dict[str, Any] = {
+            "model": self.text_embedder.model_name,
+            "input": {"contents": [{"image": image_data_url}]},
+        }
+        if int(self.text_embedder.dimension or 0) > 0:
+            payload["parameters"] = {"dimension": int(self.text_embedder.dimension)}
+        data = await self.text_embedder._post_embedding_request(  # noqa: SLF001
+            self.text_embedder._dashscope_multimodal_embedding_url(),  # noqa: SLF001
+            payload,
+        )
+        vectors = self.text_embedder._parse_dashscope_multimodal_vectors(data)  # noqa: SLF001
+        if not vectors:
+            raise RuntimeError("DashScope visual backend returned no image embedding")
+        return vectors[0]
+
+
 class VisualEmbedder:
     def __init__(
         self,
@@ -622,6 +668,11 @@ class VisualEmbedder:
             self.is_true_visual = bool(getattr(self._true_visual_backend, "is_true_visual", True))
 
     def _build_true_visual_backend(self, *, strict: bool) -> Any | None:
+        if self.backend_mode in {"dashscope", "dashscope-multimodal", "dashscope_multimodal", "multimodal"}:
+            return _DashScopeMultimodalVisualBackend(
+                text_embedder=self.text_embedder,
+                model_name=self.model_name,
+            )
         try:
             return _ClipVisualBackend(
                 model_name=self.model_name,

@@ -45,6 +45,35 @@ class FakeTrueVisualBackend:
         return [0.2, 0.8]
 
 
+class FakeDashScopeEmbedder:
+    backend_name = "dashscope-multimodal"
+
+    def __init__(self) -> None:
+        self.model_name = "qwen3-vl-embedding"
+        self.dimension = 3
+        self.payloads: list[dict] = []
+
+    async def embed_text(self, text: str) -> list[float]:
+        del text
+        return [0.1, 0.2, 0.3]
+
+    def _dashscope_multimodal_embedding_url(self) -> str:
+        return "https://dashscope.example.test/multimodal"
+
+    async def _post_embedding_request(self, url: str, payload: dict) -> dict:
+        self.payloads.append({"url": url, "payload": payload})
+        return {
+            "output": {
+                "embeddings": [
+                    {"index": 0, "type": "image", "embedding": [0.3, 0.4, 0.5]},
+                ]
+            }
+        }
+
+    def _parse_dashscope_multimodal_vectors(self, data: dict) -> list[list[float]]:
+        return [list(item["embedding"]) for item in data["output"]["embeddings"]]
+
+
 class FakeQdrantService:
     collections: dict[str, list[object]] = {}
 
@@ -112,6 +141,39 @@ class VisualBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("image", query_vectors)
         self.assertEqual(source, "image")
         self.assertEqual(asset_vector, [0.2, 0.8])
+
+    async def test_dashscope_mode_embeds_local_image_asset(self) -> None:
+        fake_embedder = FakeDashScopeEmbedder()
+        with TemporaryDirectory() as tmp_dir:
+            image_path = Path(tmp_dir) / "diagram.png"
+            image_path.write_bytes(b"fake image bytes")
+            fake_storage = SimpleNamespace(
+                materialize=lambda _uri: SimpleNamespace(path=image_path, cleanup=lambda: None)
+            )
+            with (
+                patch("app.services.retrieval.visual_backend.Embedder", return_value=fake_embedder),
+                patch("app.services.retrieval.visual_backend.get_object_storage", return_value=fake_storage),
+            ):
+                embedder = VisualEmbedder(
+                    text_embedder=FakeTextEmbedder(),
+                    backend_mode="dashscope-multimodal",
+                    model_name="qwen3-vl-embedding",
+                )
+                query_vectors = await embedder.build_query_vectors("主回路拓扑图")
+                asset_vector, source = await embedder.embed_asset(
+                    asset_uri=str(image_path),
+                    fallback_text="display_title:主回路拓扑图",
+                )
+
+        self.assertEqual(embedder.backend_name, "dashscope-multimodal")
+        self.assertIn("image", query_vectors)
+        self.assertEqual(source, "image")
+        self.assertEqual(asset_vector, [0.3, 0.4, 0.5])
+        self.assertEqual(fake_embedder.payloads[0]["url"], "https://dashscope.example.test/multimodal")
+        self.assertEqual(fake_embedder.payloads[0]["payload"]["model"], "qwen3-vl-embedding")
+        self.assertEqual(fake_embedder.payloads[0]["payload"]["parameters"]["dimension"], 3)
+        image_input = fake_embedder.payloads[0]["payload"]["input"]["contents"][0]["image"]
+        self.assertTrue(image_input.startswith("data:image/png;base64,"))
 
     async def test_auto_mode_prefers_cached_image_embedding_when_available(self) -> None:
         with TemporaryDirectory() as tmp_dir:

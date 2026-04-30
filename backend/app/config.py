@@ -103,7 +103,15 @@ class Settings(BaseSettings):
     embedding_timeout_seconds: float = Field(default=45.0, validation_alias="EMBEDDING_TIMEOUT_SECONDS")
     embedding_batch_size: int = Field(default=16, validation_alias="EMBEDDING_BATCH_SIZE")
     background_job_worker_count: int = Field(default=1, validation_alias="BACKGROUND_JOB_WORKER_COUNT")
-    visual_embedding_backend: Literal["proxy", "auto", "clip"] = "proxy"
+    visual_embedding_backend: Literal[
+        "proxy",
+        "auto",
+        "clip",
+        "dashscope",
+        "dashscope-multimodal",
+        "dashscope_multimodal",
+        "multimodal",
+    ] = "proxy"
     visual_embedding_model: str = "openai/clip-vit-base-patch32"
     visual_embedding_local_files_only: bool = True
     visual_embedding_device: str = "cpu"
