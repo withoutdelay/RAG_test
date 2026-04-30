@@ -71,6 +71,8 @@ services:
       GATEWAY_URL: http://gateway:8001
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - backend_data:/app/data
     depends_on:
       - postgres
       - redis
@@ -104,3 +106,4 @@ volumes:
   redis_data:
   qdrant_data:
   minio_data:
+  backend_data:

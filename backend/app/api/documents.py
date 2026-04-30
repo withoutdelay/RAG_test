@@ -523,7 +523,7 @@ async def _run_document_parse_job(job_id: UUID, document_id: UUID, base_metadata
             raise
 
     if _should_refresh_history_library(doc_type=parsed_doc_type):
-        request_case_library_refresh()
+        await request_case_library_refresh()
 
 
 async def _upsert_raw_document(
