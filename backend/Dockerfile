@@ -14,16 +14,8 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN if [ -n "$PIP_INDEX_URL" ]; then pip config set global.index-url "$PIP_INDEX_URL"; fi && \
     if [ -n "$PIP_TRUSTED_HOST" ]; then pip config set global.trusted-host "$PIP_TRUSTED_HOST"; fi
 
-COPY app ./app
-RUN mkdir -p \
-    data/case_library \
-    data/knowledge_wiki \
-    data/pdf_audits \
-    data/sample_manifests \
-    data/uploads \
-    data/visual_index
-COPY data/case_library ./data/case_library
 COPY pyproject.toml .
+RUN mkdir -p app && touch app/__init__.py
 RUN case ",${BACKEND_EXTRAS}," in \
       *",parsing,"*|*",embeddings,"*|*",full,"*) \
         if [ "${INSTALL_CPU_TORCH}" = "true" ]; then \
@@ -33,6 +25,16 @@ RUN case ",${BACKEND_EXTRAS}," in \
         ;; \
     esac
 RUN if [ -n "$BACKEND_EXTRAS" ]; then pip install --no-cache-dir ".[$BACKEND_EXTRAS]"; else pip install --no-cache-dir .; fi
+
+COPY app ./app
+RUN mkdir -p \
+    data/case_library \
+    data/knowledge_wiki \
+    data/pdf_audits \
+    data/sample_manifests \
+    data/uploads \
+    data/visual_index
+COPY data/case_library ./data/case_library
 
 COPY alembic.ini .
 COPY alembic ./alembic
