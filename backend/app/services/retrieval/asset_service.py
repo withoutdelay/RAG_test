@@ -1270,6 +1270,8 @@ def _should_skip_unusable_asset_card(card: AssetCard) -> bool:
     if str(metadata.get("asset_audit_status") or "").strip().lower() == "rejected":
         return True
     if card.asset_type == "figure":
+        if bool(metadata.get("storage_fallback")):
+            return True
         if card.visual_role in {"page_furniture", "asset_fragment", "text_fragment"}:
             return True
         return metadata.get("preserve_in_vector_db") is False

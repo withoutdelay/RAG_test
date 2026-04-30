@@ -36,9 +36,10 @@ def _build_quality_metadata(*, asset: ParsedAsset, confidence_threshold: float) 
 
     if asset.asset_type == "figure":
         if not asset.image_bytes:
-            status = _max_status(status, "review_pending")
-            score = min(score, 0.38)
+            status = "rejected"
+            score = min(score, 0.08)
             reasons.append("figure_without_image_bytes")
+            metadata["preserve_in_vector_db"] = False
         if visual_role in BAD_VISUAL_ROLES:
             status = "rejected"
             score = min(score, 0.08)

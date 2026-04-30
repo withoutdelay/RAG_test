@@ -311,6 +311,8 @@ def _should_include_visual_cache_asset(asset: FigureAsset) -> bool:
     metadata = asset.meta if isinstance(asset.meta, dict) else {}
     if str(metadata.get("asset_audit_status") or "").strip().lower() == "rejected":
         return False
+    if bool(metadata.get("storage_fallback")):
+        return False
     if metadata.get("preserve_in_vector_db") is False:
         return False
     visual_role = str(metadata.get("visual_role") or "").strip().lower()

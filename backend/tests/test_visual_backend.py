@@ -16,6 +16,7 @@ from app.services.retrieval.visual_backend import (
     load_visual_embedding_cache,
     sync_visual_embedding_cache_payload_to_qdrant,
     VisualEmbeddingCacheEntry,
+    _should_include_visual_cache_asset,
 )
 
 
@@ -220,6 +221,17 @@ class VisualBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["entries"][0]["visual_source"], "text_proxy")
         self.assertEqual(stats["visual_cache_entry_count"], 1)
         self.assertEqual(stats["visual_cache_source_breakdown"]["text_proxy"], 1)
+
+    def test_visual_cache_excludes_storage_fallback_figures(self) -> None:
+        asset = SimpleNamespace(
+            asset_type="figure",
+            meta={
+                "storage_fallback": True,
+                "visual_role": "engineering_figure",
+            },
+        )
+
+        self.assertFalse(_should_include_visual_cache_asset(asset))
 
     def test_build_visual_asset_fallback_text_includes_semantic_summary(self) -> None:
         text = build_visual_asset_fallback_text(
