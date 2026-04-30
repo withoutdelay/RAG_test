@@ -41,6 +41,7 @@ MIN_REUSABLE_FIGURE_DIMENSION = 80
 MIN_REUSABLE_FIGURE_AREA = 12000
 DOCX_RASTER_MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 DOCX_VECTOR_MEDIA_EXTENSIONS = {".wmf", ".emf"}
+OFFICE_HTML_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 LAYOUT_DRAWING_MARKERS = ("外观图", "高度关系", "平面间距", "间距示意", "外形", "柜体分段", "顶部通风", "布置图", "尺寸图", "检修通道")
 
 
@@ -288,6 +289,7 @@ class DoclingParser:
             "asset_repair_missing_figure_count": len(missing_indexes),
             "asset_repair_success_count": 0,
             "asset_repair_raster_media_success_count": 0,
+            "asset_repair_html_media_success_count": 0,
             "asset_repair_pdf_render_success_count": 0,
             "asset_repair_vector_media_count": 0,
             "asset_repair_unsupported_media_count": 0,
@@ -300,6 +302,14 @@ class DoclingParser:
             effective_path=effective_path,
             stats=stats,
         )
+        if remaining:
+            remaining = self._repair_from_office_html_media(
+                assets,
+                missing_indexes=remaining,
+                source_path=source_path,
+                effective_path=effective_path,
+                stats=stats,
+            )
         if remaining:
             remaining = self._repair_from_pdf_render(
                 assets,
@@ -352,8 +362,12 @@ class DoclingParser:
                 remaining.append(index)
                 continue
             asset = assets[index]
-            asset.image_bytes = bytes(media_item["bytes"])
-            asset.image_ext = str(media_item["extension"])
+            image_bytes, image_ext, image_size = self._prepare_repaired_image_bytes(
+                bytes(media_item["bytes"]),
+                source_ext=str(media_item["extension"]),
+            )
+            asset.image_bytes = image_bytes
+            asset.image_ext = image_ext
             asset.meta = {
                 **(asset.meta or {}),
                 "asset_repair_method": "docx_embedded_raster_media",
@@ -361,6 +375,9 @@ class DoclingParser:
                 "storage_fallback": False,
                 "review_required": True,
             }
+            if image_size is not None:
+                asset.meta["width"] = image_size[0]
+                asset.meta["height"] = image_size[1]
             self._record_asset_repair_method(stats, "docx_embedded_raster_media")
             stats["asset_repair_raster_media_success_count"] += 1
         return remaining
@@ -385,6 +402,146 @@ class DoclingParser:
                 ]
         except (OSError, zipfile.BadZipFile, KeyError):
             return []
+
+    def _repair_from_office_html_media(
+        self,
+        assets: list[ParsedAsset],
+        *,
+        missing_indexes: list[int],
+        source_path: Path,
+        effective_path: Path,
+        stats: dict[str, Any],
+    ) -> list[int]:
+        if not missing_indexes:
+            return []
+
+        media_items: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        for candidate_path in (source_path, effective_path):
+            candidate_key = str(candidate_path)
+            if candidate_key in seen_paths:
+                continue
+            seen_paths.add(candidate_key)
+            media_items = self._extract_office_html_media_items(candidate_path)
+            if media_items:
+                stats["asset_repair_html_media_count"] = len(media_items)
+                stats["asset_repair_html_media_extensions"] = sorted({item["extension"].lstrip(".") for item in media_items})
+                break
+        if not media_items:
+            return missing_indexes
+
+        remaining: list[int] = []
+        media_iter = iter(media_items)
+        for index in missing_indexes:
+            media_item = next(media_iter, None)
+            if media_item is None:
+                remaining.append(index)
+                continue
+            image_bytes, image_ext, image_size = self._prepare_repaired_image_bytes(
+                bytes(media_item["bytes"]),
+                source_ext=str(media_item["extension"]),
+            )
+            if not image_bytes:
+                remaining.append(index)
+                continue
+            asset = assets[index]
+            asset.image_bytes = image_bytes
+            asset.image_ext = image_ext
+            asset.meta = {
+                **(asset.meta or {}),
+                "asset_repair_method": "libreoffice_html_media",
+                "asset_repair_source": media_item["name"],
+                "asset_repair_precision": "embedded_media_export",
+                "storage_fallback": False,
+                "review_required": True,
+            }
+            if image_size is not None:
+                asset.meta["width"] = image_size[0]
+                asset.meta["height"] = image_size[1]
+            self._record_asset_repair_method(stats, "libreoffice_html_media")
+            stats["asset_repair_html_media_success_count"] += 1
+        return remaining
+
+    def _extract_office_html_media_items(self, path: Path) -> list[dict[str, Any]]:
+        if not self.resolved_libreoffice_cmd:
+            return []
+        html_path = self._convert_office_document(path, target_ext=".html", convert_to="html")
+        if html_path is None:
+            return []
+        directory = html_path.parent
+        media_paths = sorted(
+            candidate
+            for candidate in directory.iterdir()
+            if candidate.is_file()
+            and candidate != html_path
+            and candidate.suffix.lower() in OFFICE_HTML_IMAGE_EXTENSIONS
+        )
+        media_items: list[dict[str, Any]] = []
+        for media_path in media_paths:
+            try:
+                media_items.append(
+                    {
+                        "name": media_path.name,
+                        "extension": media_path.suffix.lower(),
+                        "bytes": media_path.read_bytes(),
+                    }
+                )
+            except OSError:
+                continue
+        return media_items
+
+    def _prepare_repaired_image_bytes(
+        self,
+        image_bytes: bytes,
+        *,
+        source_ext: str,
+    ) -> tuple[bytes | None, str, tuple[int, int] | None]:
+        normalized_ext = source_ext.lower() if source_ext.startswith(".") else f".{source_ext.lower()}"
+        if normalized_ext not in {".gif", ".bmp", ".tif", ".tiff"}:
+            return image_bytes, normalized_ext or ".png", self._read_image_size(image_bytes)
+        try:
+            from PIL import Image
+
+            with Image.open(BytesIO(image_bytes)) as image:
+                prepared = self._remove_dominant_magenta_background(image.convert("RGBA"))
+                handle = BytesIO()
+                prepared.save(handle, format="PNG")
+                return handle.getvalue(), ".png", prepared.size
+        except Exception:
+            return image_bytes, normalized_ext or ".png", self._read_image_size(image_bytes)
+
+    def _read_image_size(self, image_bytes: bytes) -> tuple[int, int] | None:
+        try:
+            from PIL import Image
+
+            with Image.open(BytesIO(image_bytes)) as image:
+                return image.size
+        except Exception:
+            return None
+
+    def _remove_dominant_magenta_background(self, image: Any) -> Any:
+        try:
+            raw_pixels = image.get_flattened_data() if hasattr(image, "get_flattened_data") else image.getdata()
+            pixels = list(raw_pixels)
+            if not pixels:
+                return image
+            magenta_count = sum(1 for red, green, blue, _alpha in pixels if red >= 240 and green <= 30 and blue >= 240)
+            if magenta_count / len(pixels) < 0.15:
+                return image
+            cleaned = image.copy()
+            cleaned.putdata(
+                [
+                    (red, green, blue, 0) if red >= 240 and green <= 30 and blue >= 240 else (red, green, blue, alpha)
+                    for red, green, blue, alpha in pixels
+                ]
+            )
+            alpha = cleaned.getchannel("A")
+            bbox = alpha.getbbox()
+            if bbox:
+                return cleaned.crop(bbox)
+            return cleaned
+        except Exception:
+            return image
 
     def _repair_from_pdf_render(
         self,

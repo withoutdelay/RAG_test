@@ -249,6 +249,7 @@ class ParsingTests(unittest.TestCase):
             ]
             parser = DoclingParser()
             with (
+                patch.object(parser, "_extract_office_html_media_items", return_value=[]),
                 patch.object(parser, "_convert_office_document_to_pdf", return_value=pdf_path),
                 patch.object(parser, "_get_pdf_page_count", return_value=1),
                 patch.object(parser, "_render_pdf_page_candidate", return_value=Image.new("RGB", (120, 80), color="white")),
@@ -268,6 +269,65 @@ class ParsingTests(unittest.TestCase):
         self.assertIn("pdf_page_render_candidate_requires_review", repaired[0].meta["quality_flags"])
         self.assertEqual(metadata["asset_repair_vector_media_count"], 1)
         self.assertEqual(metadata["asset_repair_pdf_render_success_count"], 1)
+
+    def test_vector_media_repair_prefers_office_html_export_before_pdf_page_candidate(self) -> None:
+        try:
+            from PIL import Image
+        except Exception:
+            self.skipTest("pillow required")
+
+        image_handle = BytesIO()
+        Image.new("RGB", (120, 80), color=(255, 0, 255)).save(image_handle, format="GIF")
+        with tempfile.NamedTemporaryFile("wb", suffix=".docx", delete=False) as handle:
+            path = Path(handle.name)
+        try:
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("word/media/image1.wmf", b"emf-with-wmf-extension")
+            assets = [
+                ParsedAsset(
+                    asset_type="figure",
+                    page_no=None,
+                    title="水阻柜一次方案",
+                    caption=None,
+                    heading_path="2.1 一次方案",
+                    context_before=None,
+                    context_after=None,
+                    bbox=None,
+                    source_ref="fig-1",
+                    image_bytes=None,
+                    meta={"visual_role": "engineering_figure"},
+                )
+            ]
+            parser = DoclingParser()
+            with (
+                patch.object(
+                    parser,
+                    "_extract_office_html_media_items",
+                    return_value=[
+                        {
+                            "name": "exported.gif",
+                            "extension": ".gif",
+                            "bytes": image_handle.getvalue(),
+                        }
+                    ],
+                ),
+                patch.object(parser, "_convert_office_document_to_pdf") as pdf_mock,
+            ):
+                repaired, metadata = parser._repair_missing_figure_images(
+                    assets,
+                    source_path=path,
+                    effective_path=path,
+                )
+        finally:
+            path.unlink(missing_ok=True)
+
+        self.assertTrue(repaired[0].image_bytes)
+        self.assertEqual(repaired[0].image_ext, ".png")
+        self.assertEqual(repaired[0].meta["asset_repair_method"], "libreoffice_html_media")
+        self.assertEqual(repaired[0].meta["asset_repair_precision"], "embedded_media_export")
+        self.assertEqual(metadata["asset_repair_html_media_success_count"], 1)
+        self.assertEqual(metadata["asset_repair_success_count"], 1)
+        pdf_mock.assert_not_called()
 
     def test_docling_parser_marks_footer_banner_as_page_furniture_even_with_figure_context(self) -> None:
         parser = DoclingParser()
