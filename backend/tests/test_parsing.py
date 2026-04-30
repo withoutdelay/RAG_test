@@ -81,14 +81,61 @@ class ParsingTests(unittest.TestCase):
             path = Path(handle.name)
 
         try:
-            parsed = asyncio.run(DoclingParser().parse(str(path)))
+            with patch("app.services.parsing.docling_parser.DocumentConverter", None):
+                parsed = asyncio.run(DoclingParser().parse(str(path)))
         finally:
             path.unlink(missing_ok=True)
 
         self.assertEqual(parsed.metadata["parser_backend_used"], "legacy_doc_placeholder")
         self.assertEqual(parsed.metadata["parse_warning"], "legacy_doc_requires_conversion")
         self.assertEqual(parsed.metadata["format"], "doc")
-        self.assertIn("Please convert this file to DOCX or PDF", parsed.markdown)
+        self.assertIn("could not be converted automatically", parsed.markdown)
+
+    def test_legacy_doc_auto_converts_to_pdf_when_libreoffice_is_available(self) -> None:
+        class FakeDocument:
+            def iterate_items(self):
+                return []
+
+            def export_to_markdown(self) -> str:
+                return "# 转换后的 DOC\n\n自动转换正文。"
+
+        class FakeResult:
+            document = FakeDocument()
+
+        class FakeConverter:
+            def convert(self, path: str):
+                self.converted_path = path
+                return FakeResult()
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".doc", delete=False) as handle:
+            handle.write(b"\xd0\xcf\x11\xe0legacy-doc")
+            doc_path = Path(handle.name)
+        with tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False) as handle:
+            handle.write(b"%PDF-1.4")
+            pdf_path = Path(handle.name)
+
+        try:
+            with patch.dict(os.environ, {"DOCLING_LIBREOFFICE_CMD": "/bin/sh"}, clear=False):
+                get_settings.cache_clear()
+                parser = DoclingParser()
+                get_settings.cache_clear()
+            fake_converter = FakeConverter()
+            with (
+                patch("app.services.parsing.docling_parser.DocumentConverter", object),
+                patch.object(parser, "_convert_office_document_to_pdf", return_value=pdf_path),
+                patch.object(parser, "_build_converter", return_value=fake_converter),
+            ):
+                parsed = asyncio.run(parser.parse(str(doc_path), include_assets=False))
+        finally:
+            doc_path.unlink(missing_ok=True)
+            pdf_path.unlink(missing_ok=True)
+
+        self.assertEqual(parsed.metadata["parser_backend_used"], "docling")
+        self.assertEqual(parsed.metadata["format"], "pdf")
+        self.assertEqual(parsed.metadata["original_format"], "doc")
+        self.assertEqual(parsed.metadata["docling_office_conversion_source_format"], "doc")
+        self.assertEqual(parsed.metadata["docling_office_conversion_target_format"], "pdf")
+        self.assertIn("转换后的 DOC", parsed.markdown)
 
     def test_docling_parser_detects_configured_libreoffice_binary(self) -> None:
         with patch.dict(os.environ, {"DOCLING_LIBREOFFICE_CMD": "/bin/sh"}, clear=False):

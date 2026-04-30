@@ -88,37 +88,27 @@ class DoclingParser:
         path = Path(file_path)
         suffix = path.suffix.lower()
 
-        if suffix == ".doc":
-            return ParsedDocument(
-                markdown=self._normalize_text(
-                    "Legacy DOC binary format is not directly supported in the current pipeline.\n\n"
-                    "Please convert this file to DOCX or PDF before using it for main retrieval or reuse-first generation.",
-                    path.name,
-                ),
-                metadata={
-                    "source_name": path.name,
-                    "parser": "legacy-doc-placeholder",
-                    "parser_backend_requested": self.backend_mode,
-                    "parser_backend_used": "legacy_doc_placeholder",
-                    "parse_warning": "legacy_doc_requires_conversion",
-                    "format": suffix.lstrip("."),
-                },
-            )
+        if suffix == ".doc" and (
+            self.backend_mode == "fallback" or DocumentConverter is None or not self.resolved_libreoffice_cmd
+        ):
+            return self._legacy_doc_placeholder(path)
 
         if self._should_use_docling(suffix):
             try:
                 self._configure_docling_environment()
                 effective_path = path
                 conversion_note: dict[str, Any] = {}
-                if suffix == ".docx" and self._docx_prefers_pdf_conversion(path):
+                if self._office_document_prefers_pdf_conversion(path):
                     converted_pdf = self._convert_office_document_to_pdf(path)
                     if converted_pdf is not None:
                         effective_path = converted_pdf
                         conversion_note = {
-                            "docling_docx_conversion": "libreoffice_pdf",
-                            "docling_docx_conversion_source_format": "docx",
-                            "docling_docx_conversion_target_format": "pdf",
+                            "docling_office_conversion": "libreoffice_pdf",
+                            "docling_office_conversion_source_format": suffix.lstrip("."),
+                            "docling_office_conversion_target_format": "pdf",
                         }
+                    elif suffix == ".doc":
+                        return self._legacy_doc_placeholder(path)
                 converter = self._build_converter(effective_path.suffix.lower(), include_assets=include_assets)
                 result = converter.convert(str(effective_path))
                 items = list(result.document.iterate_items())
@@ -137,7 +127,8 @@ class DoclingParser:
                         "docling_libreoffice_available": bool(self.resolved_libreoffice_cmd),
                         "asset_extraction_enabled": include_assets,
                         "parser_structure_heading_count": len(structure.get("heading_hints") or []),
-                        "format": suffix.lstrip("."),
+                        "format": effective_path.suffix.lower().lstrip(".") or suffix.lstrip("."),
+                        "original_format": suffix.lstrip("."),
                         **conversion_note,
                     },
                     assets=assets,
@@ -146,6 +137,11 @@ class DoclingParser:
             except Exception:
                 if self.backend_mode == "docling":
                     raise
+                if suffix == ".doc":
+                    return self._legacy_doc_placeholder(path)
+
+        if suffix == ".doc":
+            return self._legacy_doc_placeholder(path)
 
         if suffix in {".md", ".txt"}:
             text = path.read_text(encoding="utf-8")
@@ -169,6 +165,25 @@ class DoclingParser:
             structure={},
         )
 
+    def _legacy_doc_placeholder(self, path: Path) -> ParsedDocument:
+        return ParsedDocument(
+            markdown=self._normalize_text(
+                "Legacy DOC binary format could not be converted automatically in the current runtime.\n\n"
+                "Please convert this file to DOCX or PDF before using it for main retrieval or reuse-first generation.",
+                path.name,
+            ),
+            metadata={
+                "source_name": path.name,
+                "parser": "legacy-doc-placeholder",
+                "parser_backend_requested": self.backend_mode,
+                "parser_backend_used": "legacy_doc_placeholder",
+                "parse_warning": "legacy_doc_requires_conversion",
+                "docling_libreoffice_cmd": self.resolved_libreoffice_cmd,
+                "docling_libreoffice_available": bool(self.resolved_libreoffice_cmd),
+                "format": path.suffix.lower().lstrip("."),
+            },
+        )
+
     def _configure_docling_environment(self) -> None:
         if self.resolved_libreoffice_cmd:
             os.environ["DOCLING_LIBREOFFICE_CMD"] = self.resolved_libreoffice_cmd
@@ -185,6 +200,16 @@ class DoclingParser:
         media_names = [name.lower() for name in names if name.lower().startswith("word/media/")]
         if any(name.endswith((".wmf", ".emf")) for name in media_names):
             return True
+        return False
+
+    def _office_document_prefers_pdf_conversion(self, path: Path) -> bool:
+        suffix = path.suffix.lower()
+        if not self.resolved_libreoffice_cmd:
+            return False
+        if suffix == ".doc":
+            return True
+        if suffix == ".docx":
+            return self._docx_prefers_pdf_conversion(path)
         return False
 
     def _convert_office_document_to_pdf(self, path: Path) -> Path | None:

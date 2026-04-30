@@ -8,8 +8,18 @@ ARG INSTALL_CPU_TORCH=true
 ARG TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 ARG PIP_INDEX_URL=
 ARG PIP_TRUSTED_HOST=
+ARG INSTALL_LIBREOFFICE=true
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN if [ "${INSTALL_LIBREOFFICE}" = "true" ]; then \
+      apt-get update && \
+      apt-get install -y --no-install-recommends \
+        libreoffice-writer \
+        fontconfig \
+        fonts-noto-cjk && \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
 
 RUN if [ -n "$PIP_INDEX_URL" ]; then pip config set global.index-url "$PIP_INDEX_URL"; fi && \
     if [ -n "$PIP_TRUSTED_HOST" ]; then pip config set global.trusted-host "$PIP_TRUSTED_HOST"; fi
