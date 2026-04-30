@@ -127,6 +127,14 @@ MINIO_IMAGE=registry.company.com/minio/minio:latest
 
 如果只是 Docker Hub 访问慢，优先在 Docker Desktop 里配置国内镜像加速器；如果公司网络完全禁止 Docker Hub，再使用企业内网镜像仓库或离线镜像包。
 
+如果 Python/npm 依赖下载慢，也可以在 `.env` 里配置构建期镜像源。留空则使用默认源：
+
+```env
+PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+PIP_TRUSTED_HOST=mirrors.aliyun.com
+NPM_REGISTRY=https://registry.npmmirror.com
+```
+
 ## Backend Python 依赖体积
 
 默认生产安装使用：

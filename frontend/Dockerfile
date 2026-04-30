@@ -4,12 +4,13 @@ FROM ${NODE_BASE_IMAGE}
 WORKDIR /app
 
 ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1
+ARG NPM_REGISTRY=
 
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
 
 COPY package.json package-lock.json ./
-RUN npm ci --include=dev
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi && npm ci --include=dev
 
 COPY . .
 RUN npm run build && npm prune --omit=dev
