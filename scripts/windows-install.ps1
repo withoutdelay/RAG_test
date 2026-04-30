@@ -392,6 +392,19 @@ function Ensure-EnvFile {
   Set-DotEnvValue -Key "EMBEDDING_DIMENSION" -Value "1024"
   Set-DotEnvValue -Key "EMBEDDING_BATCH_SIZE" -Value "16"
   Set-DotEnvValue -Key "EMBEDDING_LOCAL_FILES_ONLY" -Value "false"
+  Set-DotEnvValue -Key "VISUAL_EMBEDDING_BACKEND" -Value "dashscope-multimodal"
+  Set-DotEnvValue -Key "VISUAL_EMBEDDING_MODEL" -Value "qwen3-vl-embedding"
+  Set-DotEnvValue -Key "VISUAL_EMBEDDING_LOCAL_FILES_ONLY" -Value "false"
+  Set-DotEnvValue -Key "PARSER_LLM_ASSET_REVIEW_ENABLED" -Value "true"
+  Set-DotEnvValue -Key "PARSER_LLM_ASSET_REVIEW_MAX_ASSETS" -Value "24"
+  Set-DotEnvValue -Key "PARSER_LLM_ASSET_REVIEW_MAX_IMAGE_BYTES" -Value "2000000"
+  Set-DotEnvValue -Key "PARSER_LLM_ASSET_SUMMARY_ENABLED" -Value "true"
+  Set-DotEnvValue -Key "PARSER_LLM_ASSET_SUMMARY_MAX_ASSETS" -Value "24"
+  Set-DotEnvValue -Key "PARSER_LLM_ASSET_SUMMARY_MAX_IMAGE_BYTES" -Value "2000000"
+  Set-DotEnvValue -Key "RUNTIME_ASSET_VISION_GATE_MAX_ASSETS" -Value "8"
+  Set-DotEnvValue -Key "RUNTIME_ASSET_VISION_GATE_MAX_IMAGE_BYTES" -Value "2000000"
+  Set-DotEnvValue -Key "CASE_LIBRARY_SECTION_RERANK_ENABLED" -Value "true"
+  Set-DotEnvValue -Key "CASE_LIBRARY_SECTION_SEMANTIC_ENABLED" -Value "true"
   Set-DotEnvValue -Key "FORMULA_OCR_BACKEND" -Value "none"
 
   Write-Warn ".env was created with mock LLM settings. Edit .env with the real Qwen/OpenAI-compatible API settings before customer testing."
@@ -443,6 +456,32 @@ function Apply-CustomerEnvMigrations {
     Set-DotEnvValue -Key "EMBEDDING_LOCAL_FILES_ONLY" -Value "false"
     Set-DotEnvValue -Key "FORMULA_OCR_BACKEND" -Value "none"
     $changed = $true
+  }
+
+  $qualityMigrations = @(
+    @{ Key = "VISUAL_EMBEDDING_BACKEND"; Value = "dashscope-multimodal"; OldValues = @("", "proxy") },
+    @{ Key = "VISUAL_EMBEDDING_MODEL"; Value = "qwen3-vl-embedding"; OldValues = @("", "openai/clip-vit-base-patch32") },
+    @{ Key = "VISUAL_EMBEDDING_LOCAL_FILES_ONLY"; Value = "false"; OldValues = @("", "true") },
+    @{ Key = "PARSER_LLM_ASSET_REVIEW_ENABLED"; Value = "true"; OldValues = @("", "false") },
+    @{ Key = "PARSER_LLM_ASSET_REVIEW_MAX_ASSETS"; Value = "24"; OldValues = @("", "12") },
+    @{ Key = "PARSER_LLM_ASSET_REVIEW_MAX_IMAGE_BYTES"; Value = "2000000"; OldValues = @("", "800000") },
+    @{ Key = "PARSER_LLM_ASSET_SUMMARY_ENABLED"; Value = "true"; OldValues = @("", "false") },
+    @{ Key = "PARSER_LLM_ASSET_SUMMARY_MAX_ASSETS"; Value = "24"; OldValues = @("", "12") },
+    @{ Key = "PARSER_LLM_ASSET_SUMMARY_MAX_IMAGE_BYTES"; Value = "2000000"; OldValues = @("", "800000") },
+    @{ Key = "RUNTIME_ASSET_VISION_GATE_MAX_ASSETS"; Value = "8"; OldValues = @("", "4") },
+    @{ Key = "RUNTIME_ASSET_VISION_GATE_MAX_IMAGE_BYTES"; Value = "2000000"; OldValues = @("", "800000") },
+    @{ Key = "CASE_LIBRARY_SECTION_RERANK_ENABLED"; Value = "true"; OldValues = @("", "false") },
+    @{ Key = "CASE_LIBRARY_SECTION_SEMANTIC_ENABLED"; Value = "true"; OldValues = @("", "false") }
+  )
+  foreach ($rule in $qualityMigrations) {
+    $currentValue = ""
+    if ($values.ContainsKey($rule.Key)) {
+      $currentValue = $values[$rule.Key]
+    }
+    if ((-not $values.ContainsKey($rule.Key)) -or ($rule.OldValues -contains $currentValue)) {
+      Set-DotEnvValue -Key $rule.Key -Value $rule.Value
+      $changed = $true
+    }
   }
 
   if (-not $values.ContainsKey("QDRANT_COLLECTION") -or $values["QDRANT_COLLECTION"] -eq "presale_knowledge") {
