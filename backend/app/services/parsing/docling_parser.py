@@ -531,7 +531,7 @@ class DoclingParser:
             cleaned = image.copy()
             cleaned.putdata(
                 [
-                    (red, green, blue, 0) if red >= 240 and green <= 30 and blue >= 240 else (red, green, blue, alpha)
+                    (255, 255, 255, 0) if red >= 240 and green <= 30 and blue >= 240 else (red, green, blue, alpha)
                     for red, green, blue, alpha in pixels
                 ]
             )

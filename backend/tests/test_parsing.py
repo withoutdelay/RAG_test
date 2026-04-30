@@ -277,7 +277,14 @@ class ParsingTests(unittest.TestCase):
             self.skipTest("pillow required")
 
         image_handle = BytesIO()
-        Image.new("RGB", (120, 80), color=(255, 0, 255)).save(image_handle, format="GIF")
+        html_export = Image.new("RGB", (120, 80), color=(255, 0, 255))
+        for x in range(20, 100):
+            html_export.putpixel((x, 20), (0, 0, 0))
+            html_export.putpixel((x, 60), (0, 0, 0))
+        for y in range(20, 61):
+            html_export.putpixel((20, y), (0, 0, 0))
+            html_export.putpixel((99, y), (0, 0, 0))
+        html_export.save(image_handle, format="GIF")
         with tempfile.NamedTemporaryFile("wb", suffix=".docx", delete=False) as handle:
             path = Path(handle.name)
         try:
@@ -327,6 +334,9 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(repaired[0].meta["asset_repair_precision"], "embedded_media_export")
         self.assertEqual(metadata["asset_repair_html_media_success_count"], 1)
         self.assertEqual(metadata["asset_repair_success_count"], 1)
+        with Image.open(BytesIO(repaired[0].image_bytes or b"")) as repaired_image:
+            red, green, blue, alpha = repaired_image.convert("RGBA").getpixel((1, 1))
+            self.assertEqual((red, green, blue, alpha), (255, 255, 255, 0))
         pdf_mock.assert_not_called()
 
     def test_docling_parser_marks_footer_banner_as_page_furniture_even_with_figure_context(self) -> None:
