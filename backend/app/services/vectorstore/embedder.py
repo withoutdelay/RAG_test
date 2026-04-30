@@ -20,6 +20,8 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 
 
 class Embedder:
+    DASHSCOPE_MULTIMODAL_ENDPOINT = "/services/embeddings/multimodal-embedding/multimodal-embedding"
+
     def __init__(self) -> None:
         if get_settings is not None:
             settings = get_settings()
@@ -66,9 +68,19 @@ class Embedder:
             self.backend_name = "openai-compatible"
             return
 
+        if self.backend_mode == "dashscope-multimodal":
+            self._validate_dashscope_multimodal_config(strict=True)
+            self.backend_name = "dashscope-multimodal"
+            return
+
         if self.backend_mode == "sentence-transformers":
             self._model = self._load_sentence_transformer(strict=True)
         elif self.backend_mode == "auto":
+            if self._looks_like_dashscope_multimodal_config() and self._validate_dashscope_multimodal_config(
+                strict=False
+            ):
+                self.backend_name = "dashscope-multimodal"
+                return
             if self._validate_openai_compatible_config(strict=False):
                 self.backend_name = "openai-compatible"
                 return
@@ -93,6 +105,11 @@ class Embedder:
             vectors: list[list[float]] = []
             for start in range(0, len(texts), max(1, int(self.batch_size or 1))):
                 vectors.extend(await self._embed_texts_openai_compatible(texts[start : start + self.batch_size]))
+            return vectors
+        if self.backend_name == "dashscope-multimodal":
+            vectors = []
+            for start in range(0, len(texts), max(1, int(self.batch_size or 1))):
+                vectors.extend(await self._embed_texts_dashscope_multimodal(texts[start : start + self.batch_size]))
             return vectors
         if self._model is not None:
             vectors = await asyncio.to_thread(self._model.encode, texts, normalize_embeddings=True)
@@ -149,6 +166,56 @@ class Embedder:
             raise RuntimeError(f"embedding provider returned {len(vectors)} vectors for {len(texts)} inputs")
         return vectors
 
+    async def _embed_texts_dashscope_multimodal(self, texts: list[str]) -> list[list[float]]:
+        payload = self._dashscope_multimodal_payload(texts)
+        data = await self._post_embedding_request(self._dashscope_multimodal_embedding_url(), payload)
+        vectors = self._parse_dashscope_multimodal_vectors(data)
+        if len(vectors) == len(texts):
+            return vectors
+
+        if len(texts) > 1:
+            # qwen3-vl-embedding should return one vector per separate content item.
+            # If a relay/provider returns a fused vector instead, fall back to one
+            # request per text to preserve the vectorstore contract.
+            fallback_vectors: list[list[float]] = []
+            for text in texts:
+                single_data = await self._post_embedding_request(
+                    self._dashscope_multimodal_embedding_url(),
+                    self._dashscope_multimodal_payload([text]),
+                )
+                single_vectors = self._parse_dashscope_multimodal_vectors(single_data)
+                if len(single_vectors) != 1:
+                    raise RuntimeError(
+                        f"dashscope multimodal embedding provider returned {len(single_vectors)} vectors "
+                        "for one input"
+                    )
+                fallback_vectors.extend(single_vectors)
+            return fallback_vectors
+
+        raise RuntimeError(
+            f"dashscope multimodal embedding provider returned {len(vectors)} vectors for {len(texts)} inputs"
+        )
+
+    async def _post_embedding_request(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=float(self.timeout_seconds or 45.0)) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("embedding provider returned a non-object response")
+        status_code = data.get("status_code")
+        if isinstance(status_code, int) and status_code >= 400:
+            message = data.get("message") or data.get("code") or "unknown error"
+            raise RuntimeError(f"embedding provider failed: {message}")
+        if str(data.get("code") or "").strip():
+            message = data.get("message") or data.get("code")
+            raise RuntimeError(f"embedding provider failed: {message}")
+        return data
+
     def _embedding_url(self) -> str:
         base_url = str(self.base_url or "").strip()
         endpoint_path = str(self.endpoint_path or "/embeddings").strip() or "/embeddings"
@@ -157,6 +224,60 @@ class Embedder:
         if not endpoint_path.startswith("/"):
             endpoint_path = "/" + endpoint_path
         return urljoin(base_url.rstrip("/") + "/", endpoint_path.lstrip("/"))
+
+    def _dashscope_multimodal_embedding_url(self) -> str:
+        base_url = str(self.base_url or "").strip()
+        if not base_url:
+            raise RuntimeError("EMBEDDING_BASE_URL is required for dashscope-multimodal embeddings")
+
+        endpoint_path = str(self.endpoint_path or "").strip()
+        if not endpoint_path or endpoint_path == "/embeddings":
+            endpoint_path = self.DASHSCOPE_MULTIMODAL_ENDPOINT
+        if not endpoint_path.startswith("/"):
+            endpoint_path = "/" + endpoint_path
+
+        normalized_base = base_url.rstrip("/")
+        if normalized_base.endswith("/compatible-mode/v1"):
+            normalized_base = normalized_base[: -len("/compatible-mode/v1")] + "/api/v1"
+        elif normalized_base.endswith("/compatible-mode"):
+            normalized_base = normalized_base[: -len("/compatible-mode")] + "/api/v1"
+        elif not normalized_base.endswith("/api/v1"):
+            normalized_base = normalized_base + "/api/v1"
+        return urljoin(normalized_base.rstrip("/") + "/", endpoint_path.lstrip("/"))
+
+    def _dashscope_multimodal_payload(self, texts: list[str]) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.model_name,
+            "input": {"contents": [{"text": text} for text in texts]},
+        }
+        if int(self.dimension or 0) > 0:
+            payload["parameters"] = {"dimension": int(self.dimension)}
+        return payload
+
+    def _parse_dashscope_multimodal_vectors(self, data: dict[str, Any]) -> list[list[float]]:
+        output = data.get("output")
+        if not isinstance(output, dict):
+            raise RuntimeError("dashscope multimodal embedding provider returned no output object")
+        items = output.get("embeddings")
+        if not isinstance(items, list):
+            raise RuntimeError("dashscope multimodal embedding provider returned no embeddings list")
+        ordered_items = sorted(
+            items,
+            key=lambda item: int(item.get("index", item.get("text_index", 0))) if isinstance(item, dict) else 0,
+        )
+        vectors: list[list[float]] = []
+        for item in ordered_items:
+            if isinstance(item, dict) and "message" in item and "embedding" not in item:
+                raise RuntimeError(f"dashscope multimodal embedding item failed: {item.get('message')}")
+            vectors.append(self._extract_embedding_vector(item))
+        return vectors
+
+    def _extract_embedding_vector(self, item: Any) -> list[float]:
+        if isinstance(item, dict):
+            if "embedding" not in item:
+                raise RuntimeError("embedding provider returned an invalid embedding item")
+            return self._coerce_vector(item["embedding"])
+        return self._coerce_vector(item)
 
     def _validate_openai_compatible_config(self, *, strict: bool) -> bool:
         missing = []
@@ -176,6 +297,34 @@ class Embedder:
             return False
         return True
 
+    def _validate_dashscope_multimodal_config(self, *, strict: bool) -> bool:
+        missing = []
+        if self._is_blank_or_placeholder(self.api_key):
+            missing.append("EMBEDDING_API_KEY")
+        if not str(self.base_url or "").strip():
+            missing.append("EMBEDDING_BASE_URL")
+        if not str(self.model_name or "").strip():
+            missing.append("EMBEDDING_MODEL")
+        if missing:
+            if strict:
+                raise RuntimeError(
+                    "dashscope-multimodal embedding backend requires "
+                    + ", ".join(missing)
+                    + " (QWEN_API_KEY can be used as API key fallback)"
+                )
+            return False
+        return True
+
+    def _looks_like_dashscope_multimodal_config(self) -> bool:
+        model_name = str(self.model_name or "").strip().lower()
+        endpoint_path = str(self.endpoint_path or "").strip().lower()
+        base_url = str(self.base_url or "").strip().lower()
+        return (
+            "vl-embedding" in model_name
+            or "multimodal-embedding" in endpoint_path
+            or ("dashscope.aliyuncs.com" in base_url and endpoint_path != "/embeddings")
+        )
+
     def _coerce_vector(self, vector: Any) -> list[float]:
         if hasattr(vector, "tolist"):
             vector = vector.tolist()
@@ -193,6 +342,8 @@ class Embedder:
         normalized = str(value or "fallback").strip().lower().replace("_", "-")
         if normalized in {"openai", "openai-compatible", "api", "remote"}:
             return "openai-compatible"
+        if normalized in {"dashscope", "dashscope-multimodal", "dashscope-multimodal-embedding", "multimodal"}:
+            return "dashscope-multimodal"
         return normalized
 
     @staticmethod

@@ -62,9 +62,17 @@ class Settings(BaseSettings):
     formula_ocr_backend: Literal["none", "pix2tex"] = "none"
     formula_ocr_max_assets: int = 3
     formula_ocr_max_regions_per_asset: int = 3
-    embedding_backend: Literal["auto", "sentence-transformers", "openai-compatible", "openai_compatible", "fallback"] = (
-        "fallback"
-    )
+    embedding_backend: Literal[
+        "auto",
+        "sentence-transformers",
+        "openai-compatible",
+        "openai_compatible",
+        "dashscope",
+        "multimodal",
+        "dashscope-multimodal",
+        "dashscope_multimodal",
+        "fallback",
+    ] = "fallback"
     embedding_model: str = "BAAI/bge-large-zh-v1.5"
     embedding_dimension: int = 1024
     embedding_local_files_only: bool = True

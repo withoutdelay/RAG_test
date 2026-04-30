@@ -534,6 +534,148 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
                 Embedder()
         get_settings.cache_clear()
 
+    def test_embedder_uses_dashscope_multimodal_embedding_backend(self) -> None:
+        requests: list[dict] = []
+
+        class FakeResponse:
+            def __init__(self, inputs: list[dict]) -> None:
+                self.inputs = inputs
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "status_code": 200,
+                    "request_id": "test-request",
+                    "code": "",
+                    "message": "",
+                    "output": {
+                        "embeddings": [
+                            {
+                                "index": index,
+                                "type": "text",
+                                "embedding": [float(index), float(index + 1), float(index + 2)],
+                            }
+                            for index, _item in enumerate(self.inputs)
+                        ]
+                    },
+                }
+
+        class FakeAsyncClient:
+            def __init__(self, *, timeout: float) -> None:
+                self.timeout = timeout
+
+            async def __aenter__(self) -> "FakeAsyncClient":
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def post(self, url: str, *, headers: dict, json: dict) -> FakeResponse:
+                requests.append({"url": url, "headers": headers, "json": json, "timeout": self.timeout})
+                return FakeResponse(list(json["input"]["contents"]))
+
+        with patch("app.services.vectorstore.embedder.httpx.AsyncClient", FakeAsyncClient):
+            with patch.dict(
+                os.environ,
+                {
+                    "EMBEDDING_BACKEND": "dashscope-multimodal",
+                    "EMBEDDING_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "EMBEDDING_API_KEY": "sk-real",
+                    "EMBEDDING_ENDPOINT_PATH": "/services/embeddings/multimodal-embedding/multimodal-embedding",
+                    "EMBEDDING_MODEL": "qwen3-vl-embedding",
+                    "EMBEDDING_DIMENSION": "3",
+                    "EMBEDDING_BATCH_SIZE": "2",
+                    "QWEN_API_KEY": "",
+                    "OPENAI_API_KEY": "",
+                },
+                clear=False,
+            ):
+                get_settings.cache_clear()
+                embedder = Embedder()
+                vectors = asyncio.run(embedder.embed_texts(["alpha", "beta", "gamma"]))
+
+        get_settings.cache_clear()
+
+        self.assertEqual(embedder.backend_name, "dashscope-multimodal")
+        self.assertEqual(vectors, [[0.0, 1.0, 2.0], [1.0, 2.0, 3.0], [0.0, 1.0, 2.0]])
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            requests[0]["url"],
+            "https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding",
+        )
+        self.assertEqual(requests[0]["headers"]["Authorization"], "Bearer sk-real")
+        self.assertEqual(requests[0]["json"]["model"], "qwen3-vl-embedding")
+        self.assertEqual(requests[0]["json"]["input"]["contents"], [{"text": "alpha"}, {"text": "beta"}])
+        self.assertEqual(requests[0]["json"]["parameters"]["dimension"], 3)
+
+    def test_dashscope_multimodal_batch_falls_back_when_provider_fuses_vectors(self) -> None:
+        requests: list[dict] = []
+
+        class FakeResponse:
+            def __init__(self, inputs: list[dict]) -> None:
+                self.inputs = inputs
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "status_code": 200,
+                    "code": "",
+                    "message": "",
+                    "output": {
+                        "embeddings": [
+                            {
+                                "index": 0,
+                                "embedding": [float(len(self.inputs)), 1.0, 2.0],
+                            }
+                        ]
+                    },
+                }
+
+        class FakeAsyncClient:
+            def __init__(self, *, timeout: float) -> None:
+                self.timeout = timeout
+
+            async def __aenter__(self) -> "FakeAsyncClient":
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def post(self, url: str, *, headers: dict, json: dict) -> FakeResponse:
+                requests.append({"url": url, "json": json})
+                return FakeResponse(list(json["input"]["contents"]))
+
+        with patch("app.services.vectorstore.embedder.httpx.AsyncClient", FakeAsyncClient):
+            with patch.dict(
+                os.environ,
+                {
+                    "EMBEDDING_BACKEND": "dashscope-multimodal",
+                    "EMBEDDING_BASE_URL": "https://dashscope.aliyuncs.com/api/v1",
+                    "EMBEDDING_API_KEY": "sk-real",
+                    "EMBEDDING_MODEL": "qwen3-vl-embedding",
+                    "EMBEDDING_DIMENSION": "3",
+                    "EMBEDDING_BATCH_SIZE": "2",
+                    "QWEN_API_KEY": "",
+                    "OPENAI_API_KEY": "",
+                },
+                clear=False,
+            ):
+                get_settings.cache_clear()
+                embedder = Embedder()
+                vectors = asyncio.run(embedder.embed_texts(["alpha", "beta"]))
+
+        get_settings.cache_clear()
+
+        self.assertEqual(vectors, [[1.0, 1.0, 2.0], [1.0, 1.0, 2.0]])
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(requests[0]["json"]["input"]["contents"], [{"text": "alpha"}, {"text": "beta"}])
+        self.assertEqual(requests[1]["json"]["input"]["contents"], [{"text": "alpha"}])
+        self.assertEqual(requests[2]["json"]["input"]["contents"], [{"text": "beta"}])
+
     def test_asset_taxonomy_boost_prefers_main_circuit_figure(self) -> None:
         target = infer_target_taxonomy(
             {

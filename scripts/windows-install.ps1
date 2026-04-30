@@ -372,14 +372,14 @@ function Ensure-EnvFile {
   Set-DotEnvValue -Key "APP_ENV" -Value "production"
   Set-DotEnvValue -Key "COMPOSE_PROJECT_NAME" -Value $ProjectName
   Set-DotEnvValue -Key "BACKEND_EXTRAS" -Value "parsing"
-  Set-DotEnvValue -Key "QDRANT_COLLECTION" -Value "presale_knowledge_api_embedding"
+  Set-DotEnvValue -Key "QDRANT_COLLECTION" -Value "presale_knowledge_qwen3_vl_embedding"
   Set-DotEnvValue -Key "BACKEND_PORT" -Value ([string]$BackendPort)
   Set-DotEnvValue -Key "FRONTEND_PORT" -Value ([string]$FrontendPort)
   Set-DotEnvValue -Key "NEXT_PUBLIC_API_BASE_URL" -Value "http://localhost:$BackendPort/api/v1"
-  Set-DotEnvValue -Key "EMBEDDING_BACKEND" -Value "openai-compatible"
+  Set-DotEnvValue -Key "EMBEDDING_BACKEND" -Value "dashscope-multimodal"
   Set-DotEnvValue -Key "EMBEDDING_BASE_URL" -Value "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  Set-DotEnvValue -Key "EMBEDDING_ENDPOINT_PATH" -Value "/embeddings"
-  Set-DotEnvValue -Key "EMBEDDING_MODEL" -Value "text-embedding-v4"
+  Set-DotEnvValue -Key "EMBEDDING_ENDPOINT_PATH" -Value "/services/embeddings/multimodal-embedding/multimodal-embedding"
+  Set-DotEnvValue -Key "EMBEDDING_MODEL" -Value "qwen3-vl-embedding"
   Set-DotEnvValue -Key "EMBEDDING_DIMENSION" -Value "1024"
   Set-DotEnvValue -Key "EMBEDDING_BATCH_SIZE" -Value "16"
   Set-DotEnvValue -Key "EMBEDDING_LOCAL_FILES_ONLY" -Value "false"
@@ -406,11 +406,28 @@ function Apply-CustomerEnvMigrations {
   if ($values.ContainsKey("EMBEDDING_BACKEND")) {
     $embeddingBackend = $values["EMBEDDING_BACKEND"].ToLowerInvariant().Replace("_", "-")
   }
-  if ($embeddingBackend -eq "" -or $embeddingBackend -eq "sentence-transformers") {
-    Set-DotEnvValue -Key "EMBEDDING_BACKEND" -Value "openai-compatible"
+  $embeddingModel = ""
+  if ($values.ContainsKey("EMBEDDING_MODEL")) {
+    $embeddingModel = $values["EMBEDDING_MODEL"].ToLowerInvariant()
+  }
+  $embeddingEndpoint = ""
+  if ($values.ContainsKey("EMBEDDING_ENDPOINT_PATH")) {
+    $embeddingEndpoint = $values["EMBEDDING_ENDPOINT_PATH"].ToLowerInvariant()
+  }
+  $shouldMigrateEmbedding = (
+    $embeddingBackend -eq "" -or
+    $embeddingBackend -eq "sentence-transformers" -or
+    (
+      $embeddingBackend -eq "openai-compatible" -and
+      ($embeddingModel -eq "" -or $embeddingModel -eq "text-embedding-v4") -and
+      ($embeddingEndpoint -eq "" -or $embeddingEndpoint -eq "/embeddings")
+    )
+  )
+  if ($shouldMigrateEmbedding) {
+    Set-DotEnvValue -Key "EMBEDDING_BACKEND" -Value "dashscope-multimodal"
     Set-DotEnvValue -Key "EMBEDDING_BASE_URL" -Value "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    Set-DotEnvValue -Key "EMBEDDING_ENDPOINT_PATH" -Value "/embeddings"
-    Set-DotEnvValue -Key "EMBEDDING_MODEL" -Value "text-embedding-v4"
+    Set-DotEnvValue -Key "EMBEDDING_ENDPOINT_PATH" -Value "/services/embeddings/multimodal-embedding/multimodal-embedding"
+    Set-DotEnvValue -Key "EMBEDDING_MODEL" -Value "qwen3-vl-embedding"
     Set-DotEnvValue -Key "EMBEDDING_DIMENSION" -Value "1024"
     Set-DotEnvValue -Key "EMBEDDING_BATCH_SIZE" -Value "16"
     Set-DotEnvValue -Key "EMBEDDING_LOCAL_FILES_ONLY" -Value "false"
@@ -419,7 +436,7 @@ function Apply-CustomerEnvMigrations {
   }
 
   if (-not $values.ContainsKey("QDRANT_COLLECTION") -or $values["QDRANT_COLLECTION"] -eq "presale_knowledge") {
-    Set-DotEnvValue -Key "QDRANT_COLLECTION" -Value "presale_knowledge_api_embedding"
+    Set-DotEnvValue -Key "QDRANT_COLLECTION" -Value "presale_knowledge_qwen3_vl_embedding"
     $changed = $true
   }
 
@@ -522,7 +539,7 @@ function Warn-EnvIssues {
   if ($EnvValues.ContainsKey("EMBEDDING_BACKEND")) {
     $embeddingBackend = $EnvValues["EMBEDDING_BACKEND"].ToLowerInvariant().Replace("_", "-")
   }
-  if ($embeddingBackend -eq "openai-compatible") {
+  if ($embeddingBackend -eq "openai-compatible" -or $embeddingBackend -eq "dashscope-multimodal") {
     $embeddingKey = ""
     foreach ($keyName in @("EMBEDDING_API_KEY", "QWEN_API_KEY", "OPENAI_API_KEY")) {
       if ($EnvValues.ContainsKey($keyName) -and -not [string]::IsNullOrWhiteSpace($EnvValues[$keyName])) {
@@ -531,7 +548,7 @@ function Warn-EnvIssues {
       }
     }
     if ($embeddingKey -in @("", "sk-xxxxx", "replace-with-real-key", "your-api-key", "xxx")) {
-      Write-Warn "EMBEDDING_BACKEND=openai-compatible but no real embedding API key is configured. Document import/retrieval will fail until EMBEDDING_API_KEY or QWEN_API_KEY is set."
+      Write-Warn "EMBEDDING_BACKEND=$embeddingBackend but no real embedding API key is configured. Document import/retrieval will fail until EMBEDDING_API_KEY or QWEN_API_KEY is set."
     }
   }
 
@@ -539,7 +556,7 @@ function Warn-EnvIssues {
     Write-Warn "EMBEDDING_BACKEND=fallback can start the app but retrieval quality will be weak."
   }
 
-  if ($embeddingBackend -eq "openai-compatible" -and $EnvValues.ContainsKey("QDRANT_COLLECTION")) {
+  if (($embeddingBackend -eq "openai-compatible" -or $embeddingBackend -eq "dashscope-multimodal") -and $EnvValues.ContainsKey("QDRANT_COLLECTION")) {
     if ($EnvValues["QDRANT_COLLECTION"] -eq "presale_knowledge") {
       Write-Warn "QDRANT_COLLECTION is still presale_knowledge. Use a new collection name or rebuild the library when switching embedding models."
     }

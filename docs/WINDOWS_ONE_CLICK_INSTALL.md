@@ -54,23 +54,23 @@ VISION_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 VISION_LLM_MODEL=replace-with-vision-model
 VISION_LLM_API_STYLE=auto
 
-EMBEDDING_BACKEND=openai-compatible
+EMBEDDING_BACKEND=dashscope-multimodal
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_API_KEY=replace-with-real-key
-EMBEDDING_ENDPOINT_PATH=/embeddings
-EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_ENDPOINT_PATH=/services/embeddings/multimodal-embedding/multimodal-embedding
+EMBEDDING_MODEL=qwen3-vl-embedding
 EMBEDDING_DIMENSION=1024
 EMBEDDING_BATCH_SIZE=16
 ```
 
-第三方 embedding 是默认推荐路径。这样 backend 镜像不需要安装本地 `sentence-transformers`、`torch` 和本地 embedding 模型，能显著降低客户机安装复杂度。`EMBEDDING_API_KEY` 可以单独配置；如果留空，系统会尝试复用 `QWEN_API_KEY` 或 `OPENAI_API_KEY`。
+第三方 embedding 是默认推荐路径。这样 backend 镜像不需要安装本地 `sentence-transformers`、`torch` 和本地 embedding 模型，能显著降低客户机安装复杂度。`dashscope-multimodal` 会调用阿里云百炼的多模态向量 HTTP 接口；`EMBEDDING_API_KEY` 可以单独配置，如果留空，系统会尝试复用 `QWEN_API_KEY`。
 
 Windows 安装脚本会把旧 `.env` 中的 `BACKEND_EXTRAS=full` / `BACKEND_EXTRAS=parsing,embeddings` 自动迁移为 `BACKEND_EXTRAS=parsing`，并把旧的本地 embedding 配置迁移为第三方 embedding 默认配置。脚本不会覆盖已有的 LLM/API key。
 
 切换 embedding 模型或维度后，旧 Qdrant 向量不能混用。新环境建议使用新的 collection 名称，或重建历史方案库：
 
 ```env
-QDRANT_COLLECTION=presale_knowledge_api_embedding
+QDRANT_COLLECTION=presale_knowledge_qwen3_vl_embedding
 ```
 
 修改 `.env` 后，从项目根目录执行：
@@ -133,7 +133,7 @@ MINIO_IMAGE=registry.company.com/minio/minio:latest
 
 ```env
 BACKEND_EXTRAS=parsing
-EMBEDDING_BACKEND=openai-compatible
+EMBEDDING_BACKEND=dashscope-multimodal
 FORMULA_OCR_BACKEND=none
 ```
 
@@ -155,7 +155,7 @@ cuda_toolkit
 
 ```env
 BACKEND_EXTRAS=parsing
-EMBEDDING_BACKEND=openai-compatible
+EMBEDDING_BACKEND=dashscope-multimodal
 FORMULA_OCR_BACKEND=none
 ```
 
