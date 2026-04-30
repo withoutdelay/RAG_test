@@ -9,10 +9,14 @@ ARG TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 ARG PIP_INDEX_URL=
 ARG PIP_TRUSTED_HOST=
 ARG INSTALL_LIBREOFFICE=true
+ARG APT_MIRROR=
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN if [ "${INSTALL_LIBREOFFICE}" = "true" ]; then \
+      if [ -n "${APT_MIRROR}" ] && [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g; s|http://deb.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources; \
+      fi && \
       apt-get update && \
       apt-get install -y --no-install-recommends \
         libreoffice-writer \
