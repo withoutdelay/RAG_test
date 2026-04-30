@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import mimetypes
 import uuid
 from pathlib import Path
@@ -55,6 +56,7 @@ from app.utils.object_storage import MaterializedObject, get_object_storage
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE = {
     "main_indexed": "historical_proposal",
@@ -63,6 +65,24 @@ LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE = {
 }
 LIBRARY_IMPORT_DOC_TYPES = frozenset(LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE.values())
 DEDUPABLE_LIBRARY_PARSE_STATUSES = {"pending", "queued", "parsing", "done", "parse_insufficient", "failed"}
+RECOVERABLE_DOCUMENT_PARSE_STATUSES = {"pending", "queued", "parsing"}
+
+
+def _extract_document_id_from_parse_job(job: Job) -> UUID | None:
+    for payload in (job.input_ref or {}, job.output_ref or {}):
+        raw_document_id = None
+        if isinstance(payload, dict):
+            raw_document_id = payload.get("document_id")
+            progress = payload.get("progress")
+            if raw_document_id is None and isinstance(progress, dict):
+                raw_document_id = progress.get("document_id")
+        if not raw_document_id:
+            continue
+        try:
+            return UUID(str(raw_document_id))
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _should_refresh_history_library(*, doc_type: str) -> bool:
@@ -528,6 +548,123 @@ async def _run_document_parse_job(job_id: UUID, document_id: UUID, base_metadata
 
     if _should_refresh_history_library(doc_type=parsed_doc_type):
         await request_case_library_refresh()
+
+
+async def recover_document_parse_jobs_on_startup() -> dict[str, int]:
+    """Requeue document parse jobs left queued/running by a previous backend process."""
+
+    queue = get_background_task_queue()
+    task_specs: list[tuple[UUID, UUID, dict, str]] = []
+    recovered = 0
+    skipped_terminal = 0
+    failed_invalid = 0
+
+    async with get_session_factory()() as session:
+        result = await session.scalars(
+            select(Job)
+            .where(Job.job_type == "document_parse")
+            .where(Job.status.in_(["queued", "running"]))
+            .order_by(Job.created_at.asc())
+        )
+        jobs = result.all()
+        for job in jobs:
+            document_id = _extract_document_id_from_parse_job(job)
+            if document_id is None:
+                job.status = "failed"
+                job.error_code = "MissingDocumentId"
+                job.output_ref = {
+                    **(job.output_ref or {}),
+                    "error": "document_parse job is missing document_id",
+                    "progress": {"stage": "failed"},
+                }
+                job.completed_at = datetime.now(timezone.utc)
+                failed_invalid += 1
+                continue
+
+            document = await session.get(Document, document_id)
+            if document is None:
+                job.status = "failed"
+                job.error_code = "DocumentNotFound"
+                job.output_ref = {
+                    **(job.output_ref or {}),
+                    "error": f"Document not found: {document_id}",
+                    "progress": {"stage": "failed", "document_id": str(document_id)},
+                }
+                job.completed_at = datetime.now(timezone.utc)
+                failed_invalid += 1
+                continue
+
+            if document.parse_status in {"done", "parse_insufficient"}:
+                job.status = "succeeded"
+                job.error_code = None
+                job.output_ref = {
+                    **(job.output_ref or {}),
+                    "document_id": str(document.id),
+                    "parse_status": document.parse_status,
+                    "progress": {"stage": "completed", "document_id": str(document.id), "recovered": True},
+                }
+                job.completed_at = job.completed_at or datetime.now(timezone.utc)
+                skipped_terminal += 1
+                continue
+
+            if document.parse_status == "failed":
+                job.status = "failed"
+                job.error_code = job.error_code or "DocumentParseFailed"
+                job.output_ref = {
+                    **(job.output_ref or {}),
+                    "document_id": str(document.id),
+                    "parse_status": document.parse_status,
+                    "progress": {"stage": "failed", "document_id": str(document.id), "recovered": True},
+                }
+                job.completed_at = job.completed_at or datetime.now(timezone.utc)
+                skipped_terminal += 1
+                continue
+
+            if document.parse_status not in RECOVERABLE_DOCUMENT_PARSE_STATUSES:
+                skipped_terminal += 1
+                continue
+
+            document.parse_status = "parsing"
+            job.status = "queued"
+            job.started_at = None
+            job.completed_at = None
+            job.error_code = None
+            job.output_ref = {
+                **(job.output_ref or {}),
+                "progress": {"stage": "recovered_queued", "document_id": str(document.id)},
+            }
+            task_specs.append((job.id, document.id, dict(document.meta or {}), document.filename))
+
+        await session.commit()
+
+    for job_id, document_id, base_metadata, filename in task_specs:
+        queue.submit(
+            job_id=job_id,
+            job_type="document_parse",
+            label=f"recovered-document-parse:{filename}",
+            run=lambda job_id=job_id, document_id=document_id, base_metadata=base_metadata: _run_document_parse_job(
+                job_id,
+                document_id,
+                base_metadata,
+            ),
+            dedupe_key=f"document_parse:{document_id}",
+            priority=20,
+        )
+        recovered += 1
+
+    if recovered or skipped_terminal or failed_invalid:
+        logger.info(
+            "Recovered document_parse jobs on startup: recovered=%s skipped_terminal=%s failed_invalid=%s",
+            recovered,
+            skipped_terminal,
+            failed_invalid,
+        )
+
+    return {
+        "recovered": recovered,
+        "skipped_terminal": skipped_terminal,
+        "failed_invalid": failed_invalid,
+    }
 
 
 async def _upsert_raw_document(

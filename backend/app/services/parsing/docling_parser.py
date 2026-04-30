@@ -15,6 +15,7 @@ try:
 except Exception:  # pragma: no cover - optional during lightweight test runs
     get_settings = None
 
+from app.services.parsing.docling_runtime import configure_docling_runtime
 from app.services.parsing.section_catalog import build_section_catalog
 
 try:
@@ -205,6 +206,8 @@ class DoclingParser:
         )
 
     def _configure_docling_environment(self) -> None:
+        if get_settings is not None:
+            configure_docling_runtime(get_settings())
         if self.resolved_libreoffice_cmd:
             os.environ["DOCLING_LIBREOFFICE_CMD"] = self.resolved_libreoffice_cmd
 
@@ -746,6 +749,10 @@ class DoclingParser:
         pipeline_options.images_scale = 2.0 if include_assets else 1.0
         if hasattr(pipeline_options, "generate_table_images"):
             pipeline_options.generate_table_images = bool(include_assets)
+        if get_settings is not None:
+            artifacts_path = str(get_settings().docling_artifacts_path or "").strip()
+            if artifacts_path:
+                pipeline_options.artifacts_path = artifacts_path
         return DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),

@@ -56,6 +56,11 @@ services:
         BACKEND_EXTRAS: ${BACKEND_EXTRAS:-}
         INSTALL_CPU_TORCH: ${INSTALL_CPU_TORCH:-true}
         TORCH_CPU_INDEX_URL: ${TORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+        HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+        HF_HOME: ${HF_HOME:-/opt/huggingface}
+        DOCLING_CACHE_DIR: ${DOCLING_CACHE_DIR:-/opt/docling/cache}
+        DOCLING_ARTIFACTS_PATH: ${DOCLING_ARTIFACTS_PATH:-}
+        PREWARM_DOCLING_MODELS: ${PREWARM_DOCLING_MODELS:-false}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     env_file:
@@ -66,6 +71,9 @@ services:
       QDRANT_HOST: qdrant
       MINIO_ENDPOINT: minio:9000
       GATEWAY_URL: http://gateway:8001
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      HF_HOME: ${HF_HOME:-/opt/huggingface}
+      DOCLING_CACHE_DIR: ${DOCLING_CACHE_DIR:-/opt/docling/cache}
     depends_on:
       - postgres
       - redis

@@ -40,8 +40,16 @@ class Settings(BaseSettings):
     qdrant_collection: str = "presale_knowledge"
     case_library_outline_path: str = str(CASE_LIBRARY_ROOT / "outline_library.json")
     case_library_block_path: str = str(CASE_LIBRARY_ROOT / "block_library.json")
+    hf_endpoint: str | None = Field(default=None, validation_alias="HF_ENDPOINT")
+    hf_home: str | None = Field(default=None, validation_alias="HF_HOME")
     parser_backend: Literal["auto", "docling", "fallback"] = "auto"
     docling_libreoffice_cmd: str | None = None
+    docling_cache_dir: str | None = Field(default=None, validation_alias="DOCLING_CACHE_DIR")
+    docling_artifacts_path: str | None = Field(default=None, validation_alias="DOCLING_ARTIFACTS_PATH")
+    docling_prewarm_models_on_startup: bool = Field(
+        default=False,
+        validation_alias="DOCLING_PREWARM_MODELS_ON_STARTUP",
+    )
     parser_llm_asset_review_enabled: bool = False
     parser_llm_asset_review_max_assets: int = 12
     parser_llm_asset_review_confidence_threshold: float = 0.72

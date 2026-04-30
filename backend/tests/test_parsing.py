@@ -11,9 +11,28 @@ import zipfile
 from app.config import get_settings
 from app.services.parsing.parser import ParserService
 from app.services.parsing.docling_parser import DoclingParser, ParsedAsset
+from app.services.parsing.docling_runtime import configure_docling_runtime
 
 
 class ParsingTests(unittest.TestCase):
+    def test_configure_docling_runtime_applies_mirror_and_artifacts_path(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "HF_ENDPOINT": "https://hf-mirror.example",
+                "HF_HOME": "/tmp/hf-home",
+                "DOCLING_CACHE_DIR": "/tmp/docling-cache",
+                "DOCLING_ARTIFACTS_PATH": "/tmp/docling-models",
+            },
+            clear=False,
+        ):
+            get_settings.cache_clear()
+            settings = get_settings()
+            configure_docling_runtime(settings)
+            self.assertEqual(os.environ["HF_ENDPOINT"], "https://hf-mirror.example")
+            self.assertEqual(os.environ["DOCLING_ARTIFACTS_PATH"], "/tmp/docling-models")
+            get_settings.cache_clear()
+
     def test_parser_service_extracts_basic_metadata(self) -> None:
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
             handle.write("# 示例文档\n\n| 列1 | 列2 |\n|---|---|\n| A | B |\n")

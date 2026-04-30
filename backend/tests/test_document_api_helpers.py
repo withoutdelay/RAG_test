@@ -5,6 +5,7 @@ import unittest
 from app.api.documents import (
     _build_chunk_contextual_text,
     _build_document_upload_message,
+    _extract_document_id_from_parse_job,
     _resolve_document_parse_outcome,
     _resolve_section_anchor_from_catalog,
     _should_refresh_history_library,
@@ -14,6 +15,26 @@ from app.services.parsing.document_sources import is_library_ready_entry
 
 
 class DocumentApiHelperTests(unittest.TestCase):
+    def test_extract_document_id_from_parse_job_uses_input_ref(self) -> None:
+        class JobLike:
+            input_ref = {"document_id": "11111111-1111-1111-1111-111111111111"}
+            output_ref = {}
+
+        self.assertEqual(
+            str(_extract_document_id_from_parse_job(JobLike())),
+            "11111111-1111-1111-1111-111111111111",
+        )
+
+    def test_extract_document_id_from_parse_job_uses_progress_fallback(self) -> None:
+        class JobLike:
+            input_ref = {}
+            output_ref = {"progress": {"document_id": "22222222-2222-2222-2222-222222222222"}}
+
+        self.assertEqual(
+            str(_extract_document_id_from_parse_job(JobLike())),
+            "22222222-2222-2222-2222-222222222222",
+        )
+
     def test_resolve_section_anchor_from_catalog_matches_leaf_heading(self) -> None:
         anchor = _resolve_section_anchor_from_catalog(
             section_catalog=[
