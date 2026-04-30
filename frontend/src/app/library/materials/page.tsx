@@ -45,6 +45,17 @@ const PROCESSING_PARSE_STATUSES = new Set(['pending', 'queued', 'parsing']);
 const LIBRARY_JOB_POLL_INTERVAL_MS = 3000;
 const LIBRARY_JOB_POLL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 type MaterialFilter = MaterialRoute | 'all' | 'processing';
+type AssetFilter = 'all' | 'figure' | 'table' | 'fallback' | 'review_required' | 'repaired' | 'rejected';
+
+const ASSET_FILTER_LABELS: Record<AssetFilter, string> = {
+  all: 'All Assets',
+  figure: 'Figures',
+  table: 'Tables',
+  fallback: 'Storage Fallback',
+  review_required: 'Needs Review',
+  repaired: 'Repaired',
+  rejected: 'Rejected',
+};
 
 interface JobQueueStatus {
   worker_count: number;
@@ -112,6 +123,34 @@ function canPreviewAssetImage(asset: LibraryMaterialAsset): boolean {
   return asset.asset_type === 'figure' && !asset.storage_fallback && asset.visual_role !== 'asset_fragment';
 }
 
+function hasAssetRepair(asset: LibraryMaterialAsset): boolean {
+  return Boolean(asset.metadata?.asset_repair_method || asset.quality_flags.includes('pdf_page_render_candidate_requires_review'));
+}
+
+function matchesAssetFilter(asset: LibraryMaterialAsset, filter: AssetFilter): boolean {
+  switch (filter) {
+    case 'figure':
+      return asset.asset_type === 'figure';
+    case 'table':
+      return asset.asset_type === 'table';
+    case 'fallback':
+      return asset.storage_fallback;
+    case 'review_required':
+      return asset.review_required || asset.asset_audit_status === 'review_pending';
+    case 'repaired':
+      return hasAssetRepair(asset);
+    case 'rejected':
+      return asset.asset_audit_status === 'rejected' || asset.preserve_in_vector_db === false;
+    case 'all':
+    default:
+      return true;
+  }
+}
+
+function countAssetsByFilter(assets: LibraryMaterialAsset[], filter: AssetFilter): number {
+  return assets.filter((asset) => matchesAssetFilter(asset, filter)).length;
+}
+
 function routeBadgeClass(route: MaterialRoute): string {
   switch (route) {
     case 'main_indexed':
@@ -154,6 +193,7 @@ export default function LibraryMaterialsPage() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [selectedMaterial, setSelectedMaterial] = useState<LibraryMaterialDetail | null>(null);
+  const [assetFilter, setAssetFilter] = useState<AssetFilter>('all');
   const importFileInputRef = useRef<HTMLInputElement>(null);
 
   const loadMaterials = useCallback(async () => {
@@ -185,6 +225,7 @@ export default function LibraryMaterialsPage() {
     setDetailOpen(true);
     setDetailLoading(true);
     setSelectedMaterial(null);
+    setAssetFilter('all');
     try {
       const res = await api.get(`/library/materials/${sampleId}`);
       setSelectedMaterial(res.data as LibraryMaterialDetail);
@@ -245,6 +286,21 @@ export default function LibraryMaterialsPage() {
     }
     return allItems.filter((item) => item.route === activeRoute);
   }, [activeRoute, payload]);
+
+  const selectedAssets = useMemo(() => selectedMaterial?.assets || [], [selectedMaterial]);
+  const filteredAssets = useMemo(
+    () => selectedAssets.filter((asset) => matchesAssetFilter(asset, assetFilter)),
+    [assetFilter, selectedAssets]
+  );
+  const assetFilterOptions = useMemo(
+    () =>
+      (Object.keys(ASSET_FILTER_LABELS) as AssetFilter[]).map((filter) => ({
+        filter,
+        label: ASSET_FILTER_LABELS[filter],
+        count: countAssetsByFilter(selectedAssets, filter),
+      })),
+    [selectedAssets]
+  );
 
   const rebuildAll = async () => {
     setRebuilding(true);
@@ -569,7 +625,7 @@ export default function LibraryMaterialsPage() {
       </Card>
 
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="max-h-[92vh] max-w-[1120px] p-0">
+        <DialogContent className="h-[92vh] w-[calc(100vw-1rem)] max-w-[calc(100vw-1rem)] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0 sm:max-w-[96vw] xl:max-w-[1440px]">
           <DialogHeader className="border-b px-5 py-4">
             <DialogTitle className="pr-10">
               {selectedMaterial?.file_name || 'Material detail'}
@@ -578,7 +634,7 @@ export default function LibraryMaterialsPage() {
               Inspect parsed chunks, figure assets, table fallbacks, and quality flags before promoting this material.
             </DialogDescription>
           </DialogHeader>
-          <ScrollArea className="max-h-[78vh]">
+          <ScrollArea className="min-h-0">
             {detailLoading ? (
               <div className="flex items-center justify-center py-16 text-muted-foreground">
                 <Loader2 className="mr-2 h-5 w-5 animate-spin" />
@@ -620,18 +676,38 @@ export default function LibraryMaterialsPage() {
                 )}
 
                 <div>
-                  <div className="mb-3 flex items-center gap-2">
-                    <ImageIcon className="h-4 w-4 text-muted-foreground" />
-                    <h3 className="font-semibold">Parsed Assets</h3>
+                  <div className="mb-3 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                    <div className="flex items-center gap-2">
+                      <ImageIcon className="h-4 w-4 text-muted-foreground" />
+                      <h3 className="font-semibold">Parsed Assets</h3>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {assetFilterOptions.map((option) => (
+                        <Button
+                          key={option.filter}
+                          type="button"
+                          variant={assetFilter === option.filter ? 'default' : 'outline'}
+                          size="sm"
+                          onClick={() => setAssetFilter(option.filter)}
+                          className="h-8"
+                        >
+                          {option.label} {option.count}
+                        </Button>
+                      ))}
+                    </div>
                   </div>
                   {selectedMaterial.assets.length === 0 ? (
                     <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
                       No parsed assets for this material.
                     </div>
+                  ) : filteredAssets.length === 0 ? (
+                    <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
+                      No assets match this category.
+                    </div>
                   ) : (
-                    <div className="grid gap-3 lg:grid-cols-2">
-                      {selectedMaterial.assets.map((asset) => (
-                        <div key={asset.id} className="rounded-md border p-3">
+                    <div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-3">
+                      {filteredAssets.map((asset) => (
+                        <div key={asset.id} className="rounded-md border bg-background p-3">
                           <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                             <div className="min-w-0">
                               <div className="flex flex-wrap items-center gap-2">
@@ -650,6 +726,7 @@ export default function LibraryMaterialsPage() {
                                   </Badge>
                                 ) : null}
                                 {asset.storage_fallback ? <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">storage fallback</Badge> : null}
+                                {hasAssetRepair(asset) ? <Badge variant="outline" className="border-cyan-300 bg-cyan-50 text-cyan-800">repaired</Badge> : null}
                               </div>
                               <p className="mt-2 text-sm font-medium leading-snug">{asset.title || asset.heading_path || asset.source_ref || asset.id}</p>
                               <p className="mt-1 text-xs text-muted-foreground">
@@ -668,7 +745,7 @@ export default function LibraryMaterialsPage() {
                           {canPreviewAssetImage(asset) ? (
                             <div className="overflow-hidden rounded-md border bg-muted">
                               {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img src={buildAssetContentUrl(asset.id)} alt={asset.title || asset.id} className="max-h-56 w-full object-contain" />
+                              <img src={buildAssetContentUrl(asset.id)} alt={asset.title || asset.id} className="max-h-80 w-full object-contain" />
                             </div>
                           ) : asset.raw_table_markdown ? (
                             <pre className="max-h-44 overflow-auto rounded-md bg-muted p-3 text-xs whitespace-pre-wrap">
