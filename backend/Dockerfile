@@ -29,6 +29,7 @@ RUN if [ "${INSTALL_LIBREOFFICE}" = "true" ]; then \
       apt-get update && \
       apt-get install -y --no-install-recommends \
         libreoffice-writer \
+        libgl1 \
         fontconfig \
         fonts-noto-cjk && \
       rm -rf /var/lib/apt/lists/*; \
