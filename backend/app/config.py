@@ -42,7 +42,12 @@ class Settings(BaseSettings):
     case_library_block_path: str = str(CASE_LIBRARY_ROOT / "block_library.json")
     hf_endpoint: str | None = Field(default=None, validation_alias="HF_ENDPOINT")
     hf_home: str | None = Field(default=None, validation_alias="HF_HOME")
-    parser_backend: Literal["auto", "docling", "fallback"] = "auto"
+    parser_backend: Literal["auto", "docling", "fallback", "aliyun_docmind", "docmind"] = "auto"
+    parser_cpu_threads: int = Field(default=1, validation_alias="PARSER_CPU_THREADS")
+    parser_process_isolation_enabled: bool = Field(default=True, validation_alias="PARSER_PROCESS_ISOLATION_ENABLED")
+    parser_document_timeout_seconds: float = Field(default=7200.0, validation_alias="PARSER_DOCUMENT_TIMEOUT_SECONDS")
+    parser_cloud_fallback_enabled: bool = Field(default=True, validation_alias="PARSER_CLOUD_FALLBACK_ENABLED")
+    parser_cloud_direct_min_bytes: int = Field(default=30 * 1024 * 1024, validation_alias="PARSER_CLOUD_DIRECT_MIN_BYTES")
     docling_libreoffice_cmd: str | None = None
     docling_cache_dir: str | None = Field(default=None, validation_alias="DOCLING_CACHE_DIR")
     docling_artifacts_path: str | None = Field(default=None, validation_alias="DOCLING_ARTIFACTS_PATH")
@@ -50,6 +55,21 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="DOCLING_PREWARM_MODELS_ON_STARTUP",
     )
+    aliyun_docmind_access_key_id: str | None = Field(default=None, validation_alias="ALIYUN_DOCMIND_ACCESS_KEY_ID")
+    aliyun_docmind_access_key_secret: str | None = Field(default=None, validation_alias="ALIYUN_DOCMIND_ACCESS_KEY_SECRET")
+    aliyun_docmind_endpoint: str = Field(
+        default="docmind-api.cn-hangzhou.aliyuncs.com",
+        validation_alias="ALIYUN_DOCMIND_ENDPOINT",
+    )
+    aliyun_docmind_poll_interval_seconds: float = Field(default=2.0, validation_alias="ALIYUN_DOCMIND_POLL_INTERVAL_SECONDS")
+    aliyun_docmind_timeout_seconds: float = Field(default=900.0, validation_alias="ALIYUN_DOCMIND_TIMEOUT_SECONDS")
+    aliyun_docmind_llm_enhancement: bool = Field(default=False, validation_alias="ALIYUN_DOCMIND_LLM_ENHANCEMENT")
+    aliyun_docmind_enhancement_mode: str = Field(default="", validation_alias="ALIYUN_DOCMIND_ENHANCEMENT_MODE")
+    aliyun_docmind_formula_enhancement: bool = Field(default=False, validation_alias="ALIYUN_DOCMIND_FORMULA_ENHANCEMENT")
+    aliyun_docmind_output_html_table: bool = Field(default=True, validation_alias="ALIYUN_DOCMIND_OUTPUT_HTML_TABLE")
+    aliyun_docmind_fetch_image_assets: bool = Field(default=True, validation_alias="ALIYUN_DOCMIND_FETCH_IMAGE_ASSETS")
+    aliyun_docmind_max_image_assets: int = Field(default=80, validation_alias="ALIYUN_DOCMIND_MAX_IMAGE_ASSETS")
+    aliyun_docmind_max_image_bytes: int = Field(default=5000000, validation_alias="ALIYUN_DOCMIND_MAX_IMAGE_BYTES")
     parser_llm_asset_review_enabled: bool = False
     parser_llm_asset_review_max_assets: int = 12
     parser_llm_asset_review_confidence_threshold: float = 0.72
@@ -247,6 +267,24 @@ def get_settings() -> Settings:
         settings.parser_llm_asset_summary_timeout_seconds
     ):
         settings.parser_llm_asset_summary_timeout_seconds = 60.0
+    if settings.aliyun_docmind_poll_interval_seconds <= 0 or not math.isfinite(
+        settings.aliyun_docmind_poll_interval_seconds
+    ):
+        settings.aliyun_docmind_poll_interval_seconds = 2.0
+    if settings.aliyun_docmind_timeout_seconds <= 0 or not math.isfinite(settings.aliyun_docmind_timeout_seconds):
+        settings.aliyun_docmind_timeout_seconds = 900.0
+    if settings.aliyun_docmind_max_image_assets < 0:
+        settings.aliyun_docmind_max_image_assets = 0
+    if settings.aliyun_docmind_max_image_bytes < 0:
+        settings.aliyun_docmind_max_image_bytes = 0
+    if settings.parser_cpu_threads < 1:
+        settings.parser_cpu_threads = 1
+    if settings.parser_cpu_threads > 2:
+        settings.parser_cpu_threads = 2
+    if settings.parser_document_timeout_seconds <= 0 or not math.isfinite(settings.parser_document_timeout_seconds):
+        settings.parser_document_timeout_seconds = 7200.0
+    if settings.parser_cloud_direct_min_bytes < 0:
+        settings.parser_cloud_direct_min_bytes = 0
     if settings.section_generation_concurrency < 1:
         settings.section_generation_concurrency = 1
     if settings.background_job_worker_count < 1:

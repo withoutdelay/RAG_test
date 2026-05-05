@@ -7,24 +7,59 @@ from app.services.domain.synonyms import text_contains_domain_term
 from app.services.parsing.formula_candidates import has_garbled_formula_text, is_formula_like_text
 
 
+COMMERCIAL_MANUAL_ONLY_TERMS = (
+    "商务",
+    "报价",
+    "合同",
+    "法务",
+    "授权",
+    "保密",
+    "资料提供",
+    "提交资料",
+    "交付资料",
+    "随机资料",
+    "文档清单",
+    "交付文档",
+    "资料归档",
+    "操作维护手册",
+    "测试报告",
+    "合格证",
+    "提交节点",
+)
+_COMMERCIAL_MANUAL_EXACT_COMPOUND_TERMS = ("同步资料", "启动资料", "启动同步资料")
+_CONDITIONAL_COMMERCIAL_MANUAL_TERMS = ("技术资料", "设计图纸")
+_COMMERCIAL_MANUAL_CONTEXT_TERMS = (
+    "提交",
+    "交付",
+    "随机",
+    "提供",
+    "归档",
+    "审查",
+    "文档",
+    "资料",
+    "手册",
+    "报告",
+    "证书",
+)
+_TECHNICAL_LIST_ONLY_TERMS = ("供货清单", "设备清单", "配置清单", "物料清单", "bom")
+_SUPPLY_SCOPE_TERMS = ("供货范围", "供货内容", "供货界面", "供货边界")
+_STRONG_DELIVERY_TERMS = (
+    "资料提供",
+    "提交资料",
+    "交付资料",
+    "文档清单",
+    "交付文档",
+    "资料归档",
+    "操作维护手册",
+    "测试报告",
+    "合格证",
+    "提交节点",
+)
+
 _SECTION_TYPE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "commercial_manual_only",
-        (
-            "商务",
-            "报价",
-            "合同",
-            "法务",
-            "授权",
-            "保密",
-            "资料提供",
-            "提交资料",
-            "交付资料",
-            "随机资料",
-            "技术资料",
-            "文档清单",
-            "交付文档",
-        ),
+        COMMERCIAL_MANUAL_ONLY_TERMS,
     ),
     ("company_profile", ("公司简介", "企业简介", "企业介绍", "公司概况")),
     ("bom_or_supply_list", ("供货清单", "设备清单", "主要设备清单", "配置清单", "物料清单", "bom")),
@@ -149,6 +184,26 @@ _HEADING_NUMBER_PATTERN = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)*)")
 _FILE_LIKE_HEADING_PATTERN = re.compile(r"\.(?:doc|docx|pdf|ppt|pptx|xls|xlsx)\b", re.IGNORECASE)
 
 
+def is_commercial_manual_section_text(*texts: str) -> bool:
+    haystack = "\n".join(str(text or "") for text in texts).casefold()
+    compact = re.sub(r"\s+", "", haystack)
+    if not compact:
+        return False
+    has_supply_scope = any(term.casefold().replace(" ", "") in compact for term in _SUPPLY_SCOPE_TERMS)
+    has_strong_delivery = any(term.casefold().replace(" ", "") in compact for term in _STRONG_DELIVERY_TERMS)
+    if has_supply_scope and not has_strong_delivery:
+        return False
+    if any(term.casefold().replace(" ", "") in compact for term in COMMERCIAL_MANUAL_ONLY_TERMS):
+        return True
+    if any(term.casefold().replace(" ", "") in compact for term in _COMMERCIAL_MANUAL_EXACT_COMPOUND_TERMS):
+        return True
+    if any(term.casefold().replace(" ", "") in compact for term in _CONDITIONAL_COMMERCIAL_MANUAL_TERMS):
+        return any(term.casefold().replace(" ", "") in compact for term in _COMMERCIAL_MANUAL_CONTEXT_TERMS)
+    if any(term.casefold().replace(" ", "") in compact for term in _TECHNICAL_LIST_ONLY_TERMS):
+        return False
+    return False
+
+
 def classify_block_taxonomy(
     *,
     content: str,
@@ -167,6 +222,11 @@ def classify_block_taxonomy(
         rules=_SECTION_TYPE_RULES,
         default="unknown",
     )
+    if section_type not in {"supply_scope", "bom_or_supply_list"} and is_commercial_manual_section_text(
+        heading_text,
+        content_text,
+    ):
+        section_type = "commercial_manual_only"
     heading_lower = heading_text.casefold()
     if any(keyword.casefold() in heading_lower for keyword in _OVERALL_SOLUTION_HEADING_TERMS) and not any(
         keyword.casefold() in heading_lower for keyword in _SPECIALIZED_HEADING_TERMS
@@ -232,10 +292,13 @@ def infer_target_taxonomy(section: dict[str, Any]) -> dict[str, Any]:
         if any(keyword.casefold() in hint_text for keyword in ("清单", "设备", "bom", "物料")):
             taxonomy["section_type"] = "bom_or_supply_list"
 
-    preferred_content_forms = {"narrative"}
+    if taxonomy["section_type"] == "commercial_manual_only":
+        preferred_content_forms = {"narrative", "bom_table"}
+    else:
+        preferred_content_forms = {"narrative"}
     if taxonomy["section_type"] in {"bom_or_supply_list", "supply_scope"}:
         preferred_content_forms.add("bom_table")
-    if prefer_table:
+    if prefer_table and taxonomy["section_type"] != "commercial_manual_only":
         preferred_content_forms.add("parameter_table")
     if bool(expected_types & {"interface", "communication"}):
         preferred_content_forms.add("interface_table")

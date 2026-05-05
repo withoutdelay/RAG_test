@@ -158,6 +158,33 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(section["generation_mode"], "reuse_first")
         self.assertIn("table", section["expected_evidence_types"])
 
+    def test_normalize_outline_payload_routes_document_delivery_without_asset_bias(self) -> None:
+        payload = {
+            "title": "测试项目技术方案",
+            "sections": [
+                {
+                    "title": "项目交付资料与文档清单",
+                    "purpose": "列明设计图纸、技术说明书、操作维护手册、测试报告及合格证等交付文档。",
+                    "keywords": ["交付文档", "技术图纸", "table", "parameter"],
+                    "expected_evidence_types": ["table", "parameter", "section"],
+                    "section_class": "configuration",
+                    "asset_required": True,
+                    "parameter_sensitive": True,
+                }
+            ],
+        }
+
+        normalized = normalize_outline_payload(payload, project_name="测试项目")
+        section = normalized["sections"][0]
+
+        self.assertEqual(section["target_section_type"], "commercial_manual_only")
+        self.assertEqual(section["section_class"], "service")
+        self.assertEqual(section["expected_evidence_types"], ["section"])
+        self.assertFalse(section["asset_required"])
+        self.assertFalse(section["parameter_sensitive"])
+        self.assertNotIn("table", section["keywords"])
+        self.assertNotIn("parameter", section["keywords"])
+
     def test_normalize_outline_payload_routes_interface_section_to_reuse_first(self) -> None:
         payload = {
             "title": "测试项目技术方案",
@@ -728,6 +755,25 @@ class CompositionHelperTests(unittest.TestCase):
         )
 
         self.assertIsNone(asset_types)
+
+    def test_build_section_asset_types_suppresses_document_delivery_assets(self) -> None:
+        section = {
+            "title": "项目交付资料与文档清单",
+            "purpose": "列明设计图纸、操作维护手册、测试报告及合格证等交付文档。",
+            "keywords": ["交付文档", "技术图纸", "table", "parameter"],
+            "expected_evidence_types": ["table", "parameter", "section"],
+            "asset_required": True,
+            "parameter_sensitive": True,
+        }
+
+        self.assertIsNone(build_section_asset_types(section))
+        self.assertTrue(
+            _should_skip_optional_asset_search(
+                section=section,
+                target_taxonomy=infer_target_taxonomy(section),
+                asset_types=None,
+            )
+        )
 
     def test_should_skip_optional_asset_search_for_non_required_installation_section(self) -> None:
         section = {
@@ -2375,6 +2421,30 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("### 3.3.1 负载数据 Load Data\n\n[[ASSET:FIGURE:asset_load]]", cleaned)
         self.assertNotIn("### 3.1 变频软起系统单线图\n\n[[ASSET:FIGURE:asset_load]]", cleaned)
 
+    def test_remove_mismatched_asset_placeholders_keeps_same_source_recovered_asset(self) -> None:
+        content = """## LCI/SFC变频软起动系统总体方案
+
+### 主回路拓扑与关键设备
+[[ASSET:FIGURE:asset_single_line]] 图X LCI/SFC变频软起动系统主接线示意图
+"""
+        cleaned = _remove_mismatched_asset_placeholders(
+            content_md=content,
+            recommended_assets=[
+                {
+                    "asset_id": "asset_single_line",
+                    "asset_type": "figure",
+                    "title": "3.1 变频软起系统单线图 Single line Diagram",
+                    "heading_path": "3.1 变频软起系统单线图 Single line Diagram",
+                    "score_breakdown": {
+                        "source_section_asset_recovery": 0.2,
+                        "source_section_relation": "descendant",
+                    },
+                }
+            ],
+        )
+
+        self.assertIn("[[ASSET:FIGURE:asset_single_line]]", cleaned)
+
     def test_remove_mismatched_asset_placeholders_removes_empty_related_asset_section(self) -> None:
         content = """## 系统方案
 
@@ -2527,6 +2597,39 @@ class CompositionHelperTests(unittest.TestCase):
         )
 
         self.assertEqual([item["asset_id"] for item in filtered], ["asset_topology"])
+
+    def test_filter_recommended_assets_keeps_same_source_recovered_illustration_diagram(self) -> None:
+        filtered = filter_recommended_assets_for_section(
+            [
+                {
+                    "asset_id": "asset_single_line",
+                    "asset_type": "figure",
+                    "visual_role": "illustration",
+                    "title": "3.1 变频软起系统单线图 Single line Diagram",
+                    "heading_path": "3.1 变频软起系统单线图 Single line Diagram",
+                    "preview_text": "单套变频驱动系统的单线图如下所示。",
+                    "score": 0.24,
+                    "score_breakdown": {
+                        "final": 0.24,
+                        "source_section_asset_recovery": 0.2,
+                        "source_section_relation": "descendant",
+                    },
+                    "metadata": {
+                        "asset_audit_status": "review_passed",
+                        "asset_quality_score": 0.86,
+                    },
+                }
+            ],
+            section={
+                "title": "LCI/SFC变频软起动系统总体方案",
+                "purpose": "阐述LCI/SFC软起动系统的整体架构与工作原理，涵盖输入隔离、功率变换单元、励磁配合及旁路回路设计。",
+                "expected_evidence_types": ["section", "figure"],
+                "section_class": "architecture",
+                "asset_required": True,
+            },
+        )
+
+        self.assertEqual([item["asset_id"] for item in filtered], ["asset_single_line"])
 
     def test_filter_recommended_assets_for_protection_section_drops_main_circuit_noise(self) -> None:
         filtered = filter_recommended_assets_for_section(
@@ -3064,6 +3167,28 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertIn("DCS/PLC", intents["detail_text"])
         self.assertIn("hv_vfd", intents["context_text"])
         self.assertIn("钢铁", intents["context_terms"])
+
+    def test_build_section_reuse_query_intents_sanitizes_document_delivery_query(self) -> None:
+        intents = build_section_reuse_query_intents(
+            section={
+                "title": "项目交付资料与文档清单",
+                "purpose": "列明设计图纸、技术说明书、操作维护手册、测试报告及合格证等交付文档。",
+                "keywords": ["交付文档", "技术图纸", "table", "parameter"],
+                "expected_evidence_types": ["table", "parameter", "section"],
+                "section_class": "configuration",
+                "asset_required": True,
+                "parameter_sensitive": True,
+            },
+            global_params={"project_name": "某钢铁厂 LCI 变频软起项目", "product_line": "hv_vfd", "industry": "钢铁"},
+            extra_terms=["LCI", "变频软起方案族", "控制柜", "PLC"],
+        )
+
+        self.assertIn("交付文档", intents["title_text"])
+        self.assertIn("提交资料", intents["detail_text"])
+        self.assertNotIn("table", intents["title_text"])
+        self.assertNotIn("parameter", intents["title_text"])
+        self.assertNotIn("LCI", intents["detail_text"])
+        self.assertEqual(intents["context_text"], "")
 
     def test_build_reuse_query_terms_expands_domain_synonyms(self) -> None:
         intents = build_section_reuse_query_intents(

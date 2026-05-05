@@ -89,7 +89,7 @@ def build_section_quality_prompts(
         "3. pass=false 仅用于存在明确内部提示语泄露、重大技术矛盾、关键内容缺失、表格损坏或结构失真等阻断问题的场景。\n"
         "4. 如果正文对推荐资产的证据类型作出明显错误描述，例如把照片、布置图、文字截图、碎片或待审资产写成工程拓扑/主接线/控制原理图，应判定为阻断问题。\n"
         "5. 如果只是建议优化标题、措辞、结构收束或客户语气，请保持 pass=true，并在 issues 中给出建议。\n"
-        "6. 如果不通过，rewrite_instruction 要能直接用于重写，明确指出要保留技术密度、统一标题风格、删除内部提示、修正证据类型错配并保持 [[ASSET:...]] 占位。\n"
+        "6. 如果不通过，rewrite_instruction 要能直接用于重写，明确指出要保留技术密度、统一标题风格、删除内部提示、修正证据类型错配；只能保留正文中已有的标准资产占位符 [[ASSET:FIGURE|TABLE|FORMULA:<asset_id>]]，不得新造标题式 [[ASSET:...]] 占位。\n"
         "</review_contract>\n"
         f"{_xml_block('section_markdown', content_md)}"
         "</quality_review_request>"

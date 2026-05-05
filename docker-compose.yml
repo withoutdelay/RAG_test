@@ -74,6 +74,11 @@ services:
       HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
       HF_HOME: ${HF_HOME:-/opt/huggingface}
       DOCLING_CACHE_DIR: ${DOCLING_CACHE_DIR:-/opt/docling/cache}
+      OMP_NUM_THREADS: ${PARSER_CPU_THREADS:-1}
+      MKL_NUM_THREADS: ${PARSER_CPU_THREADS:-1}
+      OPENBLAS_NUM_THREADS: ${PARSER_CPU_THREADS:-1}
+      NUMEXPR_NUM_THREADS: ${PARSER_CPU_THREADS:-1}
+      TORCH_NUM_THREADS: ${PARSER_CPU_THREADS:-1}
     depends_on:
       - postgres
       - redis

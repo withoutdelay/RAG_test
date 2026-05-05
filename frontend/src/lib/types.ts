@@ -415,6 +415,10 @@ export interface LibraryMaterial {
   raw_document_id?: string | null;
   doc_type?: string | null;
   parse_status: string;
+  material_status?: string | null;
+  material_status_label?: string | null;
+  material_status_reason?: string | null;
+  requires_cloud_parse?: boolean;
   parser_backend?: string | null;
   parse_gate_status?: string | null;
   parse_gate_reason?: string | null;

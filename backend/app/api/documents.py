@@ -42,7 +42,7 @@ from app.services.knowledge import (
     write_uploaded_document_library_cache,
 )
 from app.services.parsing.docling_parser import ParsedDocument
-from app.services.parsing.parser import ParserService
+from app.services.parsing.parser import CloudParseRequiredError, ParserService
 from app.services.parsing.section_catalog import flatten_section_catalog, normalize_section_heading
 from app.services.parsing.table_profile import build_table_profile
 from app.services.retrieval import AssetRetrievalService
@@ -123,6 +123,47 @@ def _resolve_document_parse_outcome(*, doc_type: str, parsed_metadata: dict[str,
     }
 
 
+def _build_parse_failure_metadata(exc: Exception) -> dict[str, object]:
+    metadata: dict[str, object] = {"parse_error": str(exc)}
+    if isinstance(exc, CloudParseRequiredError):
+        metadata.update(
+            {
+                "requires_cloud_parse": True,
+                "parse_gate_status": "insufficient",
+                "parse_gate_reason": "cloud_parse_required",
+            }
+        )
+    return metadata
+
+
+def _should_parse_document_with_cloud(*, document: Document, base_metadata: dict, settings: object) -> bool:
+    if getattr(settings, "parser_backend", "") in {"aliyun_docmind", "docmind"}:
+        return False
+    if not bool(getattr(settings, "parser_cloud_fallback_enabled", False)):
+        return False
+    metadata = {**(document.meta or {}), **base_metadata}
+    if bool(metadata.get("requires_cloud_parse")):
+        return True
+    parse_gate_reason = str(metadata.get("parse_gate_reason") or "").strip().lower()
+    if parse_gate_reason in {"cloud_parse_required", "fallback_binary_parser"}:
+        return True
+    min_bytes = int(getattr(settings, "parser_cloud_direct_min_bytes", 0) or 0)
+    return min_bytes > 0 and int(document.file_size_bytes or 0) >= min_bytes
+
+
+def _cloud_parse_reason_for_document(*, document: Document, base_metadata: dict, settings: object) -> str:
+    metadata = {**(document.meta or {}), **base_metadata}
+    parse_gate_reason = str(metadata.get("parse_gate_reason") or "").strip()
+    if bool(metadata.get("requires_cloud_parse")):
+        return parse_gate_reason or "previous_local_parse_failed"
+    if parse_gate_reason:
+        return parse_gate_reason
+    min_bytes = int(getattr(settings, "parser_cloud_direct_min_bytes", 0) or 0)
+    if min_bytes > 0 and int(document.file_size_bytes or 0) >= min_bytes:
+        return f"large_document:{document.file_size_bytes}_bytes"
+    return "cloud_parser_selected"
+
+
 def get_asset_retrieval_service() -> AssetRetrievalService:
     return AssetRetrievalService()
 
@@ -143,6 +184,10 @@ def _resolve_section_anchor_from_catalog(
     raw_leaf = raw_heading.split(">")[-1].strip()
     normalized_heading = normalize_section_heading(raw_heading)
     normalized_leaf = normalize_section_heading(raw_leaf)
+    normalized_heading_fold = normalized_heading.casefold()
+    normalized_leaf_fold = normalized_leaf.casefold()
+    normalized_heading_compact_fold = "".join(normalized_heading.split()).casefold()
+    normalized_leaf_compact_fold = "".join(normalized_leaf.split()).casefold()
     best_section: dict[str, object] | None = None
     best_key = (0, 0, 0)
 
@@ -156,6 +201,12 @@ def _resolve_section_anchor_from_catalog(
             for item in (section.get("heading_aliases") or [])
             if str(item).strip()
         }
+        normalized_section_heading_fold = normalized_section_heading.casefold()
+        normalized_section_path_fold = normalized_section_path.casefold()
+        aliases_fold = {item.casefold() for item in aliases}
+        normalized_section_heading_compact_fold = "".join(normalized_section_heading.split()).casefold()
+        normalized_section_path_compact_fold = "".join(normalized_section_path.split()).casefold()
+        aliases_compact_fold = {"".join(item.split()).casefold() for item in aliases}
         score = 0
         if raw_heading and raw_heading == section_path:
             score = max(score, 8)
@@ -167,12 +218,35 @@ def _resolve_section_anchor_from_catalog(
             score = max(score, 5)
         if normalized_leaf and normalized_leaf in {normalized_section_heading, *aliases}:
             score = max(score, 5)
+        if normalized_heading_fold and normalized_heading_fold in {
+            normalized_section_heading_fold,
+            normalized_section_path_fold,
+        }:
+            score = max(score, 5)
+        if normalized_leaf_fold and normalized_leaf_fold in {normalized_section_heading_fold, *aliases_fold}:
+            score = max(score, 5)
+        if normalized_heading_compact_fold and normalized_heading_compact_fold in {
+            normalized_section_heading_compact_fold,
+            normalized_section_path_compact_fold,
+        }:
+            score = max(score, 5)
+        if normalized_leaf_compact_fold and normalized_leaf_compact_fold in {
+            normalized_section_heading_compact_fold,
+            *aliases_compact_fold,
+        }:
+            score = max(score, 5)
         if section_path and raw_heading and section_path.endswith(raw_heading):
             score = max(score, 4)
         if section_path and raw_leaf and section_path.endswith(raw_leaf):
             score = max(score, 4)
         normalized_path_segments = [normalize_section_heading(part) for part in section_path.split(">") if part.strip()]
         if normalized_leaf and normalized_leaf in normalized_path_segments:
+            score = max(score, 4)
+        if normalized_leaf_fold and normalized_leaf_fold in {part.casefold() for part in normalized_path_segments}:
+            score = max(score, 4)
+        if normalized_leaf_compact_fold and normalized_leaf_compact_fold in {
+            "".join(part.split()).casefold() for part in normalized_path_segments
+        }:
             score = max(score, 4)
         if score <= 0:
             continue
@@ -304,7 +378,17 @@ async def _parse_and_index_document(
         parser = ParserService()
         materialized: MaterializedObject = storage.materialize(document.storage_path)
         try:
-            parsed_document = await parser.parse_document(str(materialized.path))
+            if _should_parse_document_with_cloud(document=document, base_metadata=base_metadata, settings=settings):
+                parsed_document = await parser.parse_document_with_cloud(
+                    str(materialized.path),
+                    reason=_cloud_parse_reason_for_document(
+                        document=document,
+                        base_metadata=base_metadata,
+                        settings=settings,
+                    ),
+                )
+            else:
+                parsed_document = await parser.parse_document(str(materialized.path))
         finally:
             materialized.cleanup()
 
@@ -515,6 +599,11 @@ async def _run_document_parse_job(job_id: UUID, document_id: UUID, base_metadata
             "progress": {"stage": "parsing", "document_id": str(document_id)},
         }
         document.parse_status = "parsing"
+        document.meta = {
+            key: value
+            for key, value in (document.meta or {}).items()
+            if key not in {"parse_error", "requires_cloud_parse"}
+        }
         await session.commit()
 
         try:
@@ -534,9 +623,9 @@ async def _run_document_parse_job(job_id: UUID, document_id: UUID, base_metadata
             await session.commit()
         except Exception as exc:  # noqa: BLE001
             document.parse_status = "failed"
-            document.meta = {**(document.meta or {}), "parse_error": str(exc)}
+            document.meta = {**(document.meta or {}), **_build_parse_failure_metadata(exc)}
             job.status = "failed"
-            job.error_code = exc.__class__.__name__[:50]
+            job.error_code = "CloudParseRequired" if isinstance(exc, CloudParseRequiredError) else exc.__class__.__name__[:50]
             job.output_ref = {
                 **(job.output_ref or {}),
                 "error": str(exc),
@@ -1298,31 +1387,92 @@ async def get_document(
     return APIResponse(code=200, message="success", data=DocumentRead.model_validate(document))
 
 
-@router.post("/documents/{document_id}/reparse", response_model=APIResponse[DocumentUploadAccepted])
+@router.post(
+    "/documents/{document_id}/reparse",
+    response_model=APIResponse[DocumentUploadAccepted],
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def reparse_document(
     document_id: UUID,
-    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[DocumentUploadAccepted]:
     document = await session.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    dedupe_key = f"document_parse:{document.id}"
+    queue = get_background_task_queue()
+    active_job_id = queue.active_job_id(dedupe_key)
+    if active_job_id is not None:
+        active_job = await session.get(Job, active_job_id)
+        if active_job is not None and active_job.status in {"queued", "running"}:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=DocumentUploadAccepted(
+                    id=document.id,
+                    filename=document.filename,
+                    parse_status=document.parse_status,
+                    message="文档已在解析队列中，请稍后刷新状态",
+                    job_id=active_job.id,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
+
+    active_job = await session.scalar(
+        select(Job)
+        .where(Job.job_type == "document_parse")
+        .where(Job.status.in_(["queued", "running"]))
+        .where(cast(Job.input_ref, String).contains(str(document.id)))
+        .order_by(Job.created_at.desc())
+    )
+    if active_job is not None:
+        return APIResponse(
+            code=202,
+            message="success",
+            data=DocumentUploadAccepted(
+                id=document.id,
+                filename=document.filename,
+                parse_status=document.parse_status,
+                message="文档已在解析队列中，请稍后刷新状态",
+                job_id=active_job.id,
+                next_poll=f"/api/v1/jobs/{active_job.id}",
+            ),
+        )
+
     document.parse_status = "parsing"
+    job = Job(
+        project_id=document.project_id,
+        job_type="document_parse",
+        status="queued",
+        input_ref={
+            "document_id": str(document.id),
+            "filename": document.filename,
+            "doc_type": document.doc_type,
+            "reparse": True,
+        },
+        output_ref={"progress": {"stage": "queued", "document_id": str(document.id), "reparse": True}},
+        trace_id=f"document-reparse-{uuid.uuid4()}",
+    )
+    session.add(job)
     await session.flush()
+    job_id = job.id
+    base_metadata = dict(document.meta or {})
+    await session.commit()
+    await session.refresh(job)
+    await session.refresh(document)
 
-    try:
-        await _parse_and_index_document(session=session, document=document, base_metadata=document.meta or {})
-        await session.commit()
-    except Exception as exc:
-        document.parse_status = "failed"
-        await session.commit()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Document reparse failed: {exc}") from exc
-
-    if _should_refresh_history_library(doc_type=document.doc_type):
-        background_tasks.add_task(request_case_library_refresh)
+    queue.submit(
+        job_id=job_id,
+        job_type="document_parse",
+        label=f"reparse:{document.filename}",
+        run=lambda: _run_document_parse_job(job_id, document_id, base_metadata),
+        dedupe_key=dedupe_key,
+        priority=20,
+    )
 
     return APIResponse(
-        code=200,
+        code=202,
         message="success",
         data=DocumentUploadAccepted(
             id=document.id,
@@ -1333,6 +1483,8 @@ async def reparse_document(
                 parse_status=document.parse_status,
                 reparsed=True,
             ),
+            job_id=job.id,
+            next_poll=f"/api/v1/jobs/{job.id}",
         ),
     )
 

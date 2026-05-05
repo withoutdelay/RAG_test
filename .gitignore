@@ -45,6 +45,7 @@ scripts/*.pid
 
 backend/data/knowledge_wiki/
 backend/data/visual_index/
+backend/data/*.zip
 install-assets/*
 !install-assets/.gitkeep
 output/project-replay-history/

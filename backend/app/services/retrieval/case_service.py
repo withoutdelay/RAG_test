@@ -20,6 +20,7 @@ from app.services.vectorstore.block_taxonomy import (
     heading_family_similarity,
     heading_looks_like_document_title,
     infer_target_taxonomy,
+    is_commercial_manual_section_text,
     related_section_types,
     support_content_forms,
 )
@@ -1421,7 +1422,15 @@ class CaseLibraryService:
             reverse=True,
         )
         results: list[dict[str, Any]] = []
-        for item in candidates[:top_k]:
+        seen_sections: set[tuple[str, str]] = set()
+        for item in candidates:
+            section_key = (
+                str(item.get("sample_id") or item.get("file_name") or "").strip(),
+                str(item.get("section_id") or item.get("section_path") or item.get("heading_path") or "").strip().casefold(),
+            )
+            if section_key in seen_sections:
+                continue
+            seen_sections.add(section_key)
             result = {
                 key: value
                 for key, value in item.items()
@@ -1598,7 +1607,18 @@ class CaseLibraryService:
         )
         results: list[dict[str, Any]] = []
         seen_support_tail_sections: set[tuple[str, str]] = set()
+        seen_blocks: set[tuple[str, str, str]] = set()
         for item in candidates:
+            block_key = (
+                str(item.get("file_name") or item.get("sample_id") or "").strip().casefold(),
+                str(item.get("source_section_id") or item.get("section_path") or item.get("heading_path") or "")
+                .strip()
+                .casefold(),
+                str(item.get("content") or "")[:500],
+            )
+            if block_key in seen_blocks:
+                continue
+            seen_blocks.add(block_key)
             if _is_nonrequested_support_tail_candidate(item):
                 dedupe_key = _candidate_support_dedupe_key(item)
                 if dedupe_key in seen_support_tail_sections:
@@ -1869,7 +1889,15 @@ class CaseLibraryService:
             reverse=True,
         )
         results: list[dict[str, Any]] = []
-        for item in candidates[:top_k]:
+        seen_sections: set[tuple[str, str]] = set()
+        for item in candidates:
+            section_key = (
+                str(item.get("file_name") or item.get("sample_id") or "").strip().casefold(),
+                str(item.get("section_id") or item.get("section_path") or item.get("heading_path") or "").strip().casefold(),
+            )
+            if section_key in seen_sections:
+                continue
+            seen_sections.add(section_key)
             result = {
                 key: value
                 for key, value in item.items()
@@ -1883,6 +1911,8 @@ class CaseLibraryService:
                 final_score=float(item.get("_score") or 0),
             )
             results.append(result)
+            if len(results) >= top_k:
+                break
         return results
 
     def expand_related_blocks(
@@ -2235,6 +2265,14 @@ class CaseLibraryService:
         candidate_text = self._build_block_retrieval_text(entry)
         semantic_query = "\n".join(part for part in (section_title, query) if part).strip()
         score += self._semantic_score_adjustment(query=semantic_query, candidate_text=candidate_text, reasons=reasons, weight=0.32)
+        if target_section_type == "commercial_manual_only" and not is_commercial_manual_section_text(
+            heading_path,
+            section_summary,
+            contextualized_block_text,
+            content[:1200],
+        ):
+            score -= 1.4
+            reasons.append("commercial_manual_cross_type_gate")
         return score, reasons
 
     def _score_block_section_anchor_alignment(
@@ -2491,6 +2529,15 @@ class CaseLibraryService:
                 weight=semantic_weight,
                 semantic_score_override=semantic_score_override,
             )
+        if target_taxonomy:
+            target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
+            if target_section_type == "commercial_manual_only" and not is_commercial_manual_section_text(
+                heading_path,
+                summary_text,
+                retrieval_text,
+            ):
+                score -= 1.2
+                reasons.append("commercial_manual_cross_type_gate")
         return score, reasons
 
     def _semantic_score_adjustment(

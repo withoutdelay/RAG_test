@@ -45,6 +45,7 @@ from app.services.vectorstore.block_taxonomy import (
     heading_focus_adjustment,
     heading_looks_like_document_title,
     infer_target_taxonomy,
+    is_commercial_manual_section_text,
     related_section_types,
     support_content_forms,
 )
@@ -1106,6 +1107,7 @@ def filter_recommended_assets_for_section(
         visual_role = str(asset.get("visual_role") or "").lower()
         asset_type = str(asset.get("asset_type") or "").lower()
         metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        source_section_recovered = _asset_has_source_section_recovery(asset)
         retrieval_quality = metadata.get("retrieval_quality") if isinstance(metadata.get("retrieval_quality"), dict) else {}
         if not _recommended_asset_score_passes(asset=asset, section=section, target_taxonomy=target_taxonomy):
             continue
@@ -1175,7 +1177,12 @@ def filter_recommended_assets_for_section(
                 continue
             if asset_type == "figure" and visual_role in {"asset_fragment", "text_fragment", "page_furniture"}:
                 continue
-            if asset_type == "figure" and visual_role in {"illustration", "layout_drawing", "product_photo"} and focus_hits < 2:
+            if (
+                asset_type == "figure"
+                and visual_role in {"illustration", "layout_drawing", "product_photo"}
+                and focus_hits < 2
+                and not source_section_recovered
+            ):
                 continue
             if asset_section_type in {
                 "communication_interface",
@@ -1397,6 +1404,18 @@ def _recommended_asset_score_value(asset: dict[str, Any]) -> float | None:
         return float(raw_score)
     except (TypeError, ValueError):
         return None
+
+
+def _asset_has_source_section_recovery(asset: dict[str, Any]) -> bool:
+    score_breakdown = asset.get("score_breakdown")
+    if not isinstance(score_breakdown, dict):
+        metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+        score_breakdown = metadata.get("retrieval_score_breakdown") if isinstance(metadata.get("retrieval_score_breakdown"), dict) else {}
+    return bool(
+        score_breakdown.get("source_section_asset_recovery")
+        or str(score_breakdown.get("source_section_relation") or "")
+        in {"exact", "descendant", "ancestor", "heading_family"}
+    )
 
 
 def _build_runtime_asset_gate_candidate(asset: dict[str, Any]) -> dict[str, Any]:
@@ -2050,6 +2069,11 @@ def _should_skip_reuse_scenario_noise(
     heading_text: str,
     content_text: str,
 ) -> bool:
+    if target_section_type == "commercial_manual_only" and not is_commercial_manual_section_text(
+        heading_text,
+        content_text[:1200],
+    ):
+        return True
     if _should_skip_substation_automation_scenario_noise(
         section=section,
         candidate_section_type=candidate_section_type,
@@ -4337,6 +4361,8 @@ def _remove_mismatched_asset_placeholders(
             asset = asset_lookup.get(asset_id)
             if not asset or not heading_text:
                 continue
+            if _asset_has_source_section_recovery(asset):
+                continue
             score = _score_asset_heading_match(
                 heading_text=heading_text,
                 anchor_texts=_collect_asset_anchor_texts(asset),
@@ -4850,6 +4876,8 @@ def _effective_section_evidence_types(section: dict[str, Any]) -> list[str]:
         if str(item).strip()
     }
     taxonomy_section = str(target_taxonomy.get("section_type") or "unknown").lower()
+    if taxonomy_section == "commercial_manual_only":
+        return []
     explicit_figure = bool({"figure", "diagram"} & set(raw_types))
     table_hint = any(token in text for token in TABLE_ASSET_HINTS)
     figure_hint = any(token in text for token in FIGURE_ASSET_HINTS)
@@ -5007,21 +5035,38 @@ def build_section_reuse_query_intents(
     global_params: dict[str, Any],
     extra_terms: list[str] | None = None,
 ) -> dict[str, Any]:
+    target_taxonomy = infer_target_taxonomy(section)
+    target_section_type = str(target_taxonomy.get("section_type") or "unknown").lower()
+    is_manual_delivery_section = target_section_type == "commercial_manual_only"
+    section_keywords = [str(item) for item in (section.get("keywords") or []) if item]
+    if is_manual_delivery_section:
+        section_keywords = [
+            item
+            for item in section_keywords
+            if str(item).strip().lower() not in {"table", "parameter", "configuration"}
+        ]
     title_parts = [
         str(section.get("title") or "").strip(),
-        " ".join(str(item) for item in (section.get("keywords") or []) if item),
+        " ".join(section_keywords),
     ]
-    detail_parts = [
-        str(section.get("purpose") or "").strip(),
-        " ".join(str(item) for item in (section.get("expected_evidence_types") or []) if item),
-        str(section.get("section_class") or "").strip(),
-        " ".join(str(item).strip() for item in (extra_terms or []) if str(item).strip()),
-    ]
-    context_parts = [
-        str(global_params.get("project_name") or "").strip(),
-        str(global_params.get("product_line") or "").strip(),
-        str(global_params.get("industry") or "").strip(),
-    ]
+    if is_manual_delivery_section:
+        detail_parts = [
+            str(section.get("purpose") or "").strip(),
+            "提交资料 交付资料 随机资料 技术资料 文档清单 交付文档 操作维护手册 测试报告 合格证 资料归档 提交节点",
+        ]
+        context_parts: list[str] = []
+    else:
+        detail_parts = [
+            str(section.get("purpose") or "").strip(),
+            " ".join(str(item) for item in (section.get("expected_evidence_types") or []) if item),
+            str(section.get("section_class") or "").strip(),
+            " ".join(str(item).strip() for item in (extra_terms or []) if str(item).strip()),
+        ]
+        context_parts = [
+            str(global_params.get("project_name") or "").strip(),
+            str(global_params.get("product_line") or "").strip(),
+            str(global_params.get("industry") or "").strip(),
+        ]
     title_text = " ".join(part for part in title_parts if part).strip()
     detail_text = " ".join(part for part in detail_parts if part).strip()
     context_text = " ".join(part for part in context_parts if part).strip()
@@ -5032,7 +5077,9 @@ def build_section_reuse_query_intents(
         "title_terms": _tokenize_reuse_text(title_text),
         "detail_terms": _tokenize_reuse_text(detail_text),
         "context_terms": _tokenize_reuse_text(context_text),
-        "knowledge_terms": _tokenize_reuse_text(" ".join(str(item).strip() for item in (extra_terms or []) if str(item).strip())),
+        "knowledge_terms": []
+        if is_manual_delivery_section
+        else _tokenize_reuse_text(" ".join(str(item).strip() for item in (extra_terms or []) if str(item).strip())),
     }
 
 
@@ -5057,6 +5104,8 @@ def build_section_reuse_query(
 
 def build_section_asset_types(section: dict[str, Any]) -> list[str] | None:
     target_taxonomy = infer_target_taxonomy(section)
+    if str(target_taxonomy.get("section_type") or "").lower() == "commercial_manual_only":
+        return None
     if _is_spare_parts_section(section=section, target_taxonomy=target_taxonomy):
         return ["table"]
     expected_types = set(_effective_section_evidence_types(section))
@@ -5141,6 +5190,8 @@ def _should_skip_optional_asset_search(
     target_taxonomy: dict[str, Any],
     asset_types: list[str] | None,
 ) -> bool:
+    if str(target_taxonomy.get("section_type") or "").lower() == "commercial_manual_only":
+        return True
     if bool(section.get("asset_required")):
         return False
     raw_expected_types = {
@@ -6916,6 +6967,12 @@ def _score_reuse_candidate(
         )
         score += heading_adjustment
         reasons.extend(heading_reasons)
+        if target_section_type == "commercial_manual_only" and not is_commercial_manual_section_text(
+            heading_text,
+            raw_content[:1200],
+        ):
+            score = min(score, 0.18)
+            reasons.append("commercial_manual_cross_type_score_cap")
 
     knowledge_prior_score, knowledge_prior_reasons, knowledge_prior_breakdown = _score_knowledge_wiki_retrieval_priors(
         knowledge_retrieval_bundle=knowledge_retrieval_bundle,
@@ -8678,6 +8735,14 @@ class SectionDraftService:
                         recommended_assets=recommended_assets,
                         allow_rewrite=True,
                     )
+                    content_md = _normalize_invalid_asset_placeholders(
+                        content_md=content_md,
+                        recommended_assets=recommended_assets,
+                    )
+                    content_md = _remove_mismatched_asset_placeholders(
+                        content_md=content_md,
+                        recommended_assets=recommended_assets,
+                    )
             _record_inter_section_context(
                 state=inter_section_state,
                 covered_topics=covered_topics,
@@ -9209,6 +9274,14 @@ class SectionDraftService:
                     content_md=content_md,
                     recommended_assets=recommended_assets,
                     allow_rewrite=True,
+                )
+                content_md = _normalize_invalid_asset_placeholders(
+                    content_md=content_md,
+                    recommended_assets=recommended_assets,
+                )
+                content_md = _remove_mismatched_asset_placeholders(
+                    content_md=content_md,
+                    recommended_assets=recommended_assets,
                 )
         draft.title = clean_customer_facing_section_title(str(section.get("title") or draft.title))
         draft.content_md = content_md
@@ -9892,6 +9965,14 @@ class SectionDraftService:
         section: dict[str, Any],
         global_params: dict[str, Any],
     ) -> dict[str, Any]:
+        target_taxonomy = infer_target_taxonomy(section)
+        if str(target_taxonomy.get("section_type") or "").lower() == "commercial_manual_only":
+            return {
+                "query_expansion_terms": [],
+                "glossary_entries": [],
+                "product_cards": [],
+                "module_cards": [],
+            }
         collect_bundle = getattr(self.knowledge_wiki, "collect_retrieval_prior_bundle", None)
         if callable(collect_bundle):
             try:

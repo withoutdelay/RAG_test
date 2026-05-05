@@ -2540,6 +2540,124 @@ class CaseRetrievalTests(unittest.TestCase):
         if wrong_leaf_results:
             self.assertLess(results.index(results[0]), results.index(wrong_leaf_results[0]))
 
+    def test_retrieve_blocks_gates_technical_load_data_for_document_delivery_query(self) -> None:
+        doc_delivery_entry = {
+            "sample_id": "case-b",
+            "file_name": "三鼓风LCI方案.docx",
+            "library_track": "pilot_main",
+            "heading_path": "7 提交资料",
+            "section_path": "7 提交资料",
+            "source_heading": "7 提交资料",
+            "section_summary": "卖方应提交设计图纸、操作维护手册、测试报告和合格证。",
+            "section_retrieval_text": "提交资料 交付资料 随机资料 技术资料 文档清单 操作维护手册 测试报告 合格证",
+            "contextualized_block_text": "提交资料包括设备配置、主要技术数据表、电气接线图、操作维护手册、出厂试验报告和合格证。",
+            "reuse_level": "high",
+            "content_risk_level": "low",
+            "front_matter": False,
+            "section_type": "commercial_manual_only",
+            "equipment_type": "generic",
+            "content_form": "bom_table",
+            "token_count": 130,
+            "content": "| 序号 | 说明 | 提供时间 |\n| 1 | 操作维护手册 | 随机资料 |\n| 2 | 出厂试验报告 | 随机资料 |",
+        }
+        load_data_entry = {
+            "sample_id": "case-b",
+            "file_name": "三鼓风LCI方案.docx",
+            "library_track": "pilot_main",
+            "heading_path": "3 系统方案 > 3.3 LCI 变频启动特性 > 3.3.1 负载数据 Load data",
+            "section_path": "3 系统方案 > 3.3 LCI 变频启动特性 > 3.3.1 负载数据 Load data",
+            "source_heading": "3.3.1 负载数据 Load data",
+            "section_summary": "风机启动特性基于转动惯量、起动阻力矩和静阻力矩。",
+            "section_retrieval_text": "LCI SFC 变频启动特性 负载数据 Load data 转动惯量 起动阻力矩",
+            "contextualized_block_text": "转动惯量 J=18695 kg.m2，起动阻力矩 57000 N.m。",
+            "reuse_level": "medium",
+            "content_risk_level": "low",
+            "front_matter": False,
+            "section_type": "starter_spec",
+            "equipment_type": "lci",
+            "content_form": "parameter_table",
+            "token_count": 120,
+            "content": "转动惯量：J=18695 kg.m2。起动阻力矩：空载 57000 N.m。静阻力矩：23500 N.m。",
+        }
+        outline_path, block_path, temp_dir = self._write_library(
+            outline_entries=[],
+            block_entries=[doc_delivery_entry, load_data_entry],
+        )
+        try:
+            service = CaseLibraryService(
+                outline_library_path=outline_path,
+                block_library_path=block_path,
+                section_scope_semantic_enabled=False,
+                section_scope_rerank_enabled=False,
+            )
+            results = service.retrieve_blocks(
+                query=(
+                    "项目交付资料与文档清单 交付文档 技术图纸 操作手册 测试报告 资料归档 "
+                    "table parameter LCI 变频软起方案族 宝山钢铁股份有限公司三鼓风LCI改造方案.docx 控制柜 PLC"
+                ),
+                top_k=4,
+                sample_ids={"case-b"},
+                section_title="项目交付资料与文档清单",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(results[0]["source_heading"], "7 提交资料")
+        self.assertFalse(any(item["source_heading"] == "3.3.1 负载数据 Load data" for item in results))
+
+    def test_retrieve_sections_prefers_delivery_section_for_polluted_document_query(self) -> None:
+        outline_entry = {
+            "sample_id": "case-b",
+            "file_name": "三鼓风LCI方案.docx",
+            "library_track": "pilot_main",
+            "section_catalog": [
+                {
+                    "section_id": "3.3",
+                    "title": "3.3 LCI 变频启动特性",
+                    "source_heading": "3.3 LCI 变频启动特性",
+                    "section_path": "3 系统方案 > 3.3 LCI 变频启动特性",
+                    "heading_path": "3 系统方案 > 3.3 LCI 变频启动特性",
+                    "section_summary": "风机启动特性、负载数据和启动曲线。",
+                    "section_retrieval_text": "LCI SFC 软起 变频启动 负载数据 启动曲线",
+                    "level": 2,
+                    "source_signals": ["toc", "parser_heading"],
+                },
+                {
+                    "section_id": "7",
+                    "title": "7 提交资料",
+                    "source_heading": "7 提交资料",
+                    "section_path": "7 提交资料",
+                    "heading_path": "7 提交资料",
+                    "section_summary": "提交设计图纸、操作维护手册、测试报告、合格证和随机资料。",
+                    "section_retrieval_text": "提交资料 交付资料 文档清单 技术资料 操作维护手册 测试报告 合格证 随机资料",
+                    "level": 1,
+                    "source_signals": ["toc", "parser_heading"],
+                },
+            ],
+        }
+        outline_path, block_path, temp_dir = self._write_library(outline_entries=[outline_entry], block_entries=[])
+        try:
+            service = CaseLibraryService(
+                outline_library_path=outline_path,
+                block_library_path=block_path,
+                section_scope_semantic_enabled=False,
+                section_scope_rerank_enabled=False,
+            )
+            results = service.retrieve_sections(
+                query=(
+                    "项目交付资料与文档清单 交付文档 技术图纸 操作手册 测试报告 资料归档 "
+                    "table parameter LCI 变频软起方案族 宝山钢铁股份有限公司三鼓风LCI改造方案.docx 控制柜 PLC"
+                ),
+                top_k=4,
+                sample_ids={"case-b"},
+                section_title="项目交付资料与文档清单",
+            )
+        finally:
+            temp_dir.cleanup()
+
+        self.assertEqual(results[0]["section_id"], "7")
+        self.assertFalse(any(item["section_id"] == "3.3" for item in results))
+
     def test_retrieve_blocks_multi_query_regression_matrix_for_lci_bundle(self) -> None:
         primary_entry = {
             "sample_id": "case-b",

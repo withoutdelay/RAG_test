@@ -382,6 +382,9 @@ function Ensure-EnvFile {
   Set-DotEnvValue -Key "QDRANT_COLLECTION" -Value "presale_knowledge_qwen3_vl_embedding"
   Set-DotEnvValue -Key "BACKEND_PORT" -Value ([string]$BackendPort)
   Set-DotEnvValue -Key "FRONTEND_PORT" -Value ([string]$FrontendPort)
+  Set-DotEnvValue -Key "BACKEND_CPUS" -Value "1.5"
+  Set-DotEnvValue -Key "BACKEND_MEMORY_LIMIT" -Value "6g"
+  Set-DotEnvValue -Key "BACKEND_MEMORY_SWAP_LIMIT" -Value "6g"
   Set-DotEnvValue -Key "NEXT_PUBLIC_API_BASE_URL" -Value "/api/v1"
   Set-DotEnvValue -Key "API_PROXY_TARGET" -Value "http://backend:8000"
   Set-DotEnvValue -Key "CORS_ALLOW_ORIGINS" -Value "http://localhost:$FrontendPort,http://127.0.0.1:$FrontendPort"
@@ -392,6 +395,19 @@ function Ensure-EnvFile {
   Set-DotEnvValue -Key "EMBEDDING_DIMENSION" -Value "1024"
   Set-DotEnvValue -Key "EMBEDDING_BATCH_SIZE" -Value "16"
   Set-DotEnvValue -Key "EMBEDDING_LOCAL_FILES_ONLY" -Value "false"
+  Set-DotEnvValue -Key "PARSER_BACKEND" -Value "docling"
+  Set-DotEnvValue -Key "PARSER_CPU_THREADS" -Value "1"
+  Set-DotEnvValue -Key "PARSER_PROCESS_ISOLATION_ENABLED" -Value "true"
+  Set-DotEnvValue -Key "PARSER_DOCUMENT_TIMEOUT_SECONDS" -Value "7200"
+  Set-DotEnvValue -Key "PARSER_CLOUD_FALLBACK_ENABLED" -Value "true"
+  Set-DotEnvValue -Key "PARSER_CLOUD_DIRECT_MIN_BYTES" -Value "31457280"
+  Set-DotEnvValue -Key "ALIYUN_DOCMIND_ENDPOINT" -Value "docmind-api.cn-hangzhou.aliyuncs.com"
+  Set-DotEnvValue -Key "ALIYUN_DOCMIND_POLL_INTERVAL_SECONDS" -Value "2"
+  Set-DotEnvValue -Key "ALIYUN_DOCMIND_TIMEOUT_SECONDS" -Value "900"
+  Set-DotEnvValue -Key "ALIYUN_DOCMIND_OUTPUT_HTML_TABLE" -Value "true"
+  Set-DotEnvValue -Key "ALIYUN_DOCMIND_FETCH_IMAGE_ASSETS" -Value "true"
+  Set-DotEnvValue -Key "ALIYUN_DOCMIND_MAX_IMAGE_ASSETS" -Value "80"
+  Set-DotEnvValue -Key "ALIYUN_DOCMIND_MAX_IMAGE_BYTES" -Value "5000000"
   Set-DotEnvValue -Key "VISUAL_EMBEDDING_BACKEND" -Value "dashscope-multimodal"
   Set-DotEnvValue -Key "VISUAL_EMBEDDING_MODEL" -Value "qwen3-vl-embedding"
   Set-DotEnvValue -Key "VISUAL_EMBEDDING_LOCAL_FILES_ONLY" -Value "false"
@@ -471,7 +487,23 @@ function Apply-CustomerEnvMigrations {
     @{ Key = "RUNTIME_ASSET_VISION_GATE_MAX_ASSETS"; Value = "8"; OldValues = @("", "4") },
     @{ Key = "RUNTIME_ASSET_VISION_GATE_MAX_IMAGE_BYTES"; Value = "2000000"; OldValues = @("", "800000") },
     @{ Key = "CASE_LIBRARY_SECTION_RERANK_ENABLED"; Value = "true"; OldValues = @("", "false") },
-    @{ Key = "CASE_LIBRARY_SECTION_SEMANTIC_ENABLED"; Value = "true"; OldValues = @("", "false") }
+    @{ Key = "CASE_LIBRARY_SECTION_SEMANTIC_ENABLED"; Value = "true"; OldValues = @("", "false") },
+    @{ Key = "BACKEND_CPUS"; Value = "1.5"; OldValues = @("") },
+    @{ Key = "BACKEND_MEMORY_LIMIT"; Value = "6g"; OldValues = @("", "5g") },
+    @{ Key = "BACKEND_MEMORY_SWAP_LIMIT"; Value = "6g"; OldValues = @("", "5g") },
+    @{ Key = "PARSER_BACKEND"; Value = "docling"; OldValues = @("", "auto") },
+    @{ Key = "PARSER_CPU_THREADS"; Value = "1"; OldValues = @("") },
+    @{ Key = "PARSER_PROCESS_ISOLATION_ENABLED"; Value = "true"; OldValues = @("") },
+    @{ Key = "PARSER_DOCUMENT_TIMEOUT_SECONDS"; Value = "7200"; OldValues = @("", "600", "120") },
+    @{ Key = "PARSER_CLOUD_FALLBACK_ENABLED"; Value = "true"; OldValues = @("") },
+    @{ Key = "PARSER_CLOUD_DIRECT_MIN_BYTES"; Value = "31457280"; OldValues = @("") },
+    @{ Key = "ALIYUN_DOCMIND_ENDPOINT"; Value = "docmind-api.cn-hangzhou.aliyuncs.com"; OldValues = @("") },
+    @{ Key = "ALIYUN_DOCMIND_POLL_INTERVAL_SECONDS"; Value = "2"; OldValues = @("") },
+    @{ Key = "ALIYUN_DOCMIND_TIMEOUT_SECONDS"; Value = "900"; OldValues = @("") },
+    @{ Key = "ALIYUN_DOCMIND_OUTPUT_HTML_TABLE"; Value = "true"; OldValues = @("") },
+    @{ Key = "ALIYUN_DOCMIND_FETCH_IMAGE_ASSETS"; Value = "true"; OldValues = @("") },
+    @{ Key = "ALIYUN_DOCMIND_MAX_IMAGE_ASSETS"; Value = "80"; OldValues = @("") },
+    @{ Key = "ALIYUN_DOCMIND_MAX_IMAGE_BYTES"; Value = "5000000"; OldValues = @("") }
   )
   foreach ($rule in $qualityMigrations) {
     $currentValue = ""
@@ -644,6 +676,24 @@ function Warn-EnvIssues {
 
   if ($EnvValues.ContainsKey("EMBEDDING_LOCAL_FILES_ONLY") -and $EnvValues["EMBEDDING_LOCAL_FILES_ONLY"] -eq "true") {
     Write-Warn "EMBEDDING_LOCAL_FILES_ONLY=true. On a fresh customer laptop this requires a preloaded embedding model cache inside the backend container."
+  }
+
+  $parserBackend = ""
+  if ($EnvValues.ContainsKey("PARSER_BACKEND")) {
+    $parserBackend = $EnvValues["PARSER_BACKEND"].ToLowerInvariant()
+  }
+  if ($parserBackend -in @("aliyun_docmind", "docmind")) {
+    $docMindAccessKey = ""
+    $docMindSecret = ""
+    if ($EnvValues.ContainsKey("ALIYUN_DOCMIND_ACCESS_KEY_ID")) {
+      $docMindAccessKey = $EnvValues["ALIYUN_DOCMIND_ACCESS_KEY_ID"]
+    }
+    if ($EnvValues.ContainsKey("ALIYUN_DOCMIND_ACCESS_KEY_SECRET")) {
+      $docMindSecret = $EnvValues["ALIYUN_DOCMIND_ACCESS_KEY_SECRET"]
+    }
+    if ([string]::IsNullOrWhiteSpace($docMindAccessKey) -or [string]::IsNullOrWhiteSpace($docMindSecret)) {
+      Write-Warn "PARSER_BACKEND=$parserBackend requires ALIYUN_DOCMIND_ACCESS_KEY_ID and ALIYUN_DOCMIND_ACCESS_KEY_SECRET."
+    }
   }
 }
 

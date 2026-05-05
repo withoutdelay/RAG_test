@@ -286,6 +286,7 @@ class AssetRetrievalService:
         source_section_asset_matches = _promote_source_section_asset_matches(
             scored_cards=scored_cards,
             anchor_document_names=anchor_document_names,
+            anchor_headings=anchor_headings,
             anchor_sample_ids=anchor_sample_ids,
             anchor_image_document_names=anchor_image_document_names,
             anchor_image_sample_ids=anchor_image_sample_ids,
@@ -883,12 +884,13 @@ def _promote_source_section_asset_matches(
     *,
     scored_cards: list[tuple[float, AssetCard, dict[str, float | str], list[str]]],
     anchor_document_names: set[str],
+    anchor_headings: list[str],
     anchor_sample_ids: set[str],
     anchor_image_document_names: set[str],
     anchor_image_sample_ids: set[str],
     anchor_image_source_section_ids: set[str],
 ) -> list[tuple[float, AssetCard, dict[str, float | str], list[str]]]:
-    if not anchor_image_source_section_ids:
+    if not anchor_image_source_section_ids and not anchor_headings:
         return []
     effective_document_names = anchor_image_document_names or anchor_document_names
     effective_sample_ids = anchor_image_sample_ids or anchor_sample_ids
@@ -910,16 +912,21 @@ def _promote_source_section_asset_matches(
             candidate_section_id=str((card.metadata or {}).get("source_section_id") or ""),
             anchor_source_section_ids=anchor_image_source_section_ids,
         )
-        if section_relation not in {"exact", "descendant", "ancestor"}:
+        heading_relation = _best_heading_path_relation(
+            candidate_heading=card.heading_path or card.title or card.display_title or "",
+            anchor_headings=anchor_headings,
+        )
+        effective_relation = section_relation or heading_relation
+        if effective_relation not in {"exact", "descendant", "ancestor", "heading_family"}:
             continue
-        bonus = {"exact": 0.22, "descendant": 0.2, "ancestor": 0.12}[section_relation]
+        bonus = {"exact": 0.22, "descendant": 0.2, "ancestor": 0.12, "heading_family": 0.1}[effective_relation]
         promoted_breakdown = dict(breakdown or {})
         promoted_breakdown["source_section_asset_recovery"] = round(bonus, 4)
-        promoted_breakdown["source_section_relation"] = section_relation
+        promoted_breakdown["source_section_relation"] = effective_relation
         promoted_breakdown["final"] = round(float(score or 0.0) + bonus, 4)
         promoted_trace = [
             *list(reason_trace or []),
-            f"source_section_asset_recovery={section_relation}:{bonus:.3f}",
+            f"source_section_asset_recovery={effective_relation}:{bonus:.3f}",
         ]
         promoted.append((float(score or 0.0) + bonus, card, promoted_breakdown, promoted_trace))
     promoted.sort(key=lambda item: item[0], reverse=True)
@@ -969,6 +976,42 @@ def _best_source_section_id_relation(
             best_rank = rank
             best_relation = relation
     return best_relation
+
+
+def _best_heading_path_relation(*, candidate_heading: str, anchor_headings: list[str]) -> str | None:
+    candidate_text = str(candidate_heading or "").strip()
+    if not candidate_text or not anchor_headings:
+        return None
+    candidate_section_id = _extract_heading_section_id(candidate_text)
+    best_rank = 0
+    best_relation: str | None = None
+    relation_ranks = {"ancestor": 1, "heading_family": 1, "descendant": 2, "exact": 3}
+    for anchor_heading in anchor_headings:
+        anchor_text = str(anchor_heading or "").strip()
+        if not anchor_text:
+            continue
+        anchor_section_id = _extract_heading_section_id(anchor_text)
+        relation: str | None = None
+        if candidate_section_id and anchor_section_id:
+            relation = _best_source_section_id_relation(
+                candidate_section_id=candidate_section_id,
+                anchor_source_section_ids={anchor_section_id},
+            )
+        if relation is None and heading_family_similarity(anchor_text, candidate_text) >= 0.2:
+            relation = "heading_family"
+        rank = relation_ranks.get(relation or "", 0)
+        if rank > best_rank:
+            best_rank = rank
+            best_relation = relation
+    return best_relation
+
+
+def _extract_heading_section_id(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).strip()
+    match = re.match(r"^([0-9]+(?:[.\-_/、][0-9]+)*)", normalized)
+    if not match:
+        return ""
+    return re.sub(r"[、_/]+", ".", match.group(1)).strip(".")
 
 
 def _normalize_source_section_id(value: str) -> str:

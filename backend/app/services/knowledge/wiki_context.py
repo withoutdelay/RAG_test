@@ -383,6 +383,13 @@ class KnowledgeWikiContextProvider:
         product_cards = list(selected_assets.get("product_cards") or [])
         module_cards = list(selected_assets.get("module_cards") or [])
         section_type = str(selected_assets.get("section_type") or "").strip().lower()
+        if section_type == "commercial_manual_only":
+            return {
+                "query_expansion_terms": [],
+                "glossary_entries": [],
+                "product_cards": [],
+                "module_cards": [],
+            }
         allow_card_term_expansion = section_type not in {"supply_scope", "bom_or_supply_list"}
 
         for entry in glossary_entries:

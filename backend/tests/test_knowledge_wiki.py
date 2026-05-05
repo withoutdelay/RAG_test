@@ -484,6 +484,51 @@ class KnowledgeWikiContextProviderTests(unittest.TestCase):
         self.assertEqual(bundle["product_cards"][0]["title"], "LCI 变频软起方案族")
         self.assertEqual(bundle["module_cards"][0]["title"], "控制柜")
 
+    def test_collect_retrieval_prior_bundle_disables_card_terms_for_document_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "manifest.json").write_text(json.dumps({"generated_at": "2026-04-20T00:00:00Z"}), encoding="utf-8")
+            (root / "glossary.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "primary_term": "lci",
+                            "display_primary_term": "LCI",
+                            "aliases": ["LCI 软起"],
+                            "display_aliases": ["LCI 软起"],
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (root / "product_cards.json").write_text(
+                json.dumps([{"title": "LCI 变频软起方案族", "aliases": ["LCI"]}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (root / "module_cards.json").write_text(
+                json.dumps([{"title": "控制柜", "aliases": ["PLC柜"]}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (root / "equipment_cards.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+            (root / "interface_cards.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+            (root / "section_templates.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+            (root / "forbidden_phrases.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+
+            provider = KnowledgeWikiContextProvider(root)
+            bundle = provider.collect_retrieval_prior_bundle(
+                section={
+                    "title": "项目交付资料与文档清单",
+                    "purpose": "列明设计图纸、操作维护手册、测试报告及合格证等交付文档。",
+                    "keywords": ["交付文档", "技术图纸", "LCI"],
+                },
+                global_params={"project_name": "某钢铁厂 LCI 变频软起项目"},
+            )
+
+        self.assertEqual(bundle["query_expansion_terms"], [])
+        self.assertEqual(bundle["product_cards"], [])
+        self.assertEqual(bundle["module_cards"], [])
+
     def test_collect_retrieval_prior_bundle_filters_unanchored_product_cards(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
