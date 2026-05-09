@@ -25,6 +25,7 @@ from app.schemas.artifacts import JobAcceptedData
 from app.schemas.common import APIResponse
 from app.services.knowledge import request_case_library_refresh
 from app.services.task_queue import get_background_task_queue
+from app.services.vectorstore.qdrant_client import QdrantService
 from app.utils.object_storage import get_object_storage
 
 
@@ -629,9 +630,10 @@ async def route_material(
     document = await _resolve_material_document(session=session, entry=entry)
     if document is not None:
         document.doc_type = DOC_TYPE_BY_ROUTE[payload.route]
+        route_metadata = _material_base_metadata(entry, payload.route)
         document.meta = {
             **(document.meta or {}),
-            **_material_base_metadata(entry, payload.route),
+            **route_metadata,
             "manual_route_reason": payload.reason,
             "manual_route_updated_at": materials[sample_id]["updated_at"],
         }
@@ -645,6 +647,12 @@ async def route_material(
                 raw_document.doc_type = document.doc_type
                 raw_document.corpus_scope = "global" if payload.route == "main_indexed" else "review"
                 raw_document.meta = {**(raw_document.meta or {}), **document.meta}
+        await _sync_document_route_to_chunks_and_vectors(
+            session=session,
+            document=document,
+            route=payload.route,
+            route_metadata=route_metadata,
+        )
         await session.commit()
 
     if payload.route == "main_indexed":
@@ -652,6 +660,41 @@ async def route_material(
 
     item = await _build_material_item(session=session, entry=entry, state=state)
     return APIResponse(code=200, message="success", data=item)
+
+
+async def _sync_document_route_to_chunks_and_vectors(
+    *,
+    session: AsyncSession,
+    document: Document,
+    route: str,
+    route_metadata: dict[str, Any],
+) -> None:
+    chunks = (
+        await session.scalars(select(Chunk).where(Chunk.document_id == document.id))
+    ).all()
+    point_ids: list[str] = []
+    for chunk in chunks:
+        if chunk.qdrant_point_id:
+            point_ids.append(str(chunk.qdrant_point_id))
+        chunk.meta = {
+            **(chunk.meta or {}),
+            "doc_type": document.doc_type,
+            "material_route": route,
+            "library_track": route_metadata.get("library_track"),
+        }
+    if not point_ids:
+        return
+    try:
+        QdrantService().set_payload(
+            point_ids=point_ids,
+            payload={
+                "doc_type": document.doc_type,
+                "material_route": route,
+                "library_track": route_metadata.get("library_track"),
+            },
+        )
+    except Exception:
+        logger.exception("Failed to sync Qdrant route payload for document %s", document.id)
 
 
 @router.post(

@@ -96,6 +96,16 @@ class QdrantService:
             points_selector=PointIdsList(points=point_ids),
         )
 
+    def set_payload(self, *, point_ids: list[str], payload: dict) -> None:
+        if not point_ids or not payload:
+            return
+        self.ensure_collection()
+        self.client.set_payload(
+            collection_name=self.collection_name,
+            payload=payload,
+            points=point_ids,
+        )
+
     def search(
         self,
         *,
