@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     aliyun_docmind_llm_enhancement: bool = Field(default=False, validation_alias="ALIYUN_DOCMIND_LLM_ENHANCEMENT")
     aliyun_docmind_enhancement_mode: str = Field(default="", validation_alias="ALIYUN_DOCMIND_ENHANCEMENT_MODE")
     aliyun_docmind_formula_enhancement: bool = Field(default=False, validation_alias="ALIYUN_DOCMIND_FORMULA_ENHANCEMENT")
-    aliyun_docmind_output_html_table: bool = Field(default=True, validation_alias="ALIYUN_DOCMIND_OUTPUT_HTML_TABLE")
+    aliyun_docmind_output_html_table: bool = Field(default=False, validation_alias="ALIYUN_DOCMIND_OUTPUT_HTML_TABLE")
     aliyun_docmind_fetch_image_assets: bool = Field(default=True, validation_alias="ALIYUN_DOCMIND_FETCH_IMAGE_ASSETS")
     aliyun_docmind_max_image_assets: int = Field(default=80, validation_alias="ALIYUN_DOCMIND_MAX_IMAGE_ASSETS")
     aliyun_docmind_max_image_bytes: int = Field(default=5000000, validation_alias="ALIYUN_DOCMIND_MAX_IMAGE_BYTES")
