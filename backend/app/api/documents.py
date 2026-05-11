@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -17,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
-from app.config import get_settings
+from app.config import BACKEND_ROOT, get_settings
 from app.db import get_db_session, get_session_factory
 from app.models.chunk import Chunk
 from app.models.document import Document
@@ -38,11 +40,16 @@ from app.schemas.retrieval import AssetSearchRequest, AssetSearchResponse
 from app.services.knowledge import (
     delete_uploaded_document_library_cache,
     read_case_library_refresh_status,
-    request_case_library_refresh,
+    submit_case_library_refresh_job,
     write_uploaded_document_library_cache,
 )
 from app.services.parsing.docling_parser import ParsedDocument
 from app.services.parsing.parser import CloudParseRequiredError, ParserService
+from app.services.parsing.rfp_light_parser import (
+    RfpLightParseError,
+    RfpLightParseInsufficient,
+    RfpLightParser,
+)
 from app.services.parsing.section_catalog import flatten_section_catalog, normalize_section_heading
 from app.services.parsing.table_profile import build_table_profile
 from app.services.retrieval import AssetRetrievalService
@@ -66,6 +73,10 @@ LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE = {
 LIBRARY_IMPORT_DOC_TYPES = frozenset(LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE.values())
 DEDUPABLE_LIBRARY_PARSE_STATUSES = {"pending", "queued", "parsing", "done", "parse_insufficient", "failed"}
 RECOVERABLE_DOCUMENT_PARSE_STATUSES = {"pending", "queued", "parsing"}
+
+# RFP light parse: full extracted text is persisted under data/rfp_text/<document_id>.txt
+# so requirement extraction can read it without going through Chunk/Qdrant.
+RFP_TEXT_STORAGE_DIR: Path = BACKEND_ROOT / "data" / "rfp_text"
 
 
 def _extract_document_id_from_parse_job(job: Job) -> UUID | None:
@@ -636,14 +647,228 @@ async def _run_document_parse_job(job_id: UUID, document_id: UUID, base_metadata
             raise
 
     if _should_refresh_history_library(doc_type=parsed_doc_type):
-        await request_case_library_refresh()
+        # Review R2 #2 fix: do NOT block this library_parse worker on the full
+        # history-library refresh.  Submit the refresh into the maintenance
+        # queue (bounded by ``MAINTENANCE_JOB_WORKER_COUNT`` and globally
+        # deduplicated) so the parse worker is freed for the next document.
+        submit_case_library_refresh_job()
+
+
+def _save_rfp_light_full_text(*, document_id: UUID, text: str) -> str:
+    """Write the full extracted RFP text to ``data/rfp_text/<document_id>.txt``.
+
+    Returns the absolute path as a string so it can be persisted on
+    ``Document.meta.rfp_text_storage_path`` for later requirement extraction.
+    """
+
+    RFP_TEXT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    target = RFP_TEXT_STORAGE_DIR / f"{document_id}.txt"
+    target.write_text(text, encoding="utf-8")
+    return str(target)
+
+
+async def _run_rfp_light_parse_job(job_id: UUID, document_id: UUID) -> None:
+    """Execute the lightweight RFP parse pipeline on the ``interactive`` queue.
+
+    This deliberately does NOT call ``_parse_and_index_document`` / Chunker /
+    Embedder / Qdrant / ``_upsert_raw_document`` / ``_replace_figure_assets`` /
+    ``request_case_library_refresh`` so that customer realtime flows are not
+    blocked by the historical-ingestion pipeline (see plan §2.5).
+    """
+
+    settings = get_settings()
+    parser = RfpLightParser(settings=settings)
+    storage = get_object_storage()
+
+    timings: dict[str, float] = {}
+    overall_started = time.perf_counter()
+
+    async with get_session_factory()() as session:
+        job = await session.get(Job, job_id)
+        document = await session.get(Document, document_id)
+        if job is None or document is None:
+            return
+
+        job.status = "running"
+        job.started_at = datetime.now(timezone.utc)
+        job.output_ref = {
+            **(job.output_ref or {}),
+            "progress": {
+                "stage": "materializing_file",
+                "document_id": str(document_id),
+                "rfp_parse_mode": "light",
+            },
+        }
+        document.parse_status = "parsing"
+        document.meta = {
+            key: value
+            for key, value in (document.meta or {}).items()
+            if key
+            not in {
+                "parse_error",
+                "rfp_parse_error_reason",
+                "rfp_parse_error_message",
+            }
+        }
+        await session.commit()
+
+        materialized: MaterializedObject | None = None
+        try:
+            stage_start = time.perf_counter()
+            materialized = storage.materialize(document.storage_path)
+            timings["materializing_file"] = time.perf_counter() - stage_start
+
+            stage_start = time.perf_counter()
+            job.output_ref = {
+                **(job.output_ref or {}),
+                "progress": {
+                    "stage": "extracting_text",
+                    "document_id": str(document_id),
+                    "timings": dict(timings),
+                    "rfp_parse_mode": "light",
+                },
+            }
+            await session.commit()
+
+            try:
+                result = await parser.parse(materialized.path)
+            except RfpLightParseInsufficient as exc:
+                timings["extracting_text"] = time.perf_counter() - stage_start
+                document.parse_status = "parse_insufficient"
+                document.meta = {
+                    **(document.meta or {}),
+                    "rfp_parse_mode": "light",
+                    "rfp_parse_error_reason": exc.reason,
+                    "rfp_parse_error_message": str(exc),
+                    **{f"rfp_parse_{key}": value for key, value in (exc.metadata or {}).items()},
+                }
+                job.status = "succeeded"
+                job.error_code = (exc.reason or "")[:50] or None
+                job.output_ref = {
+                    **(job.output_ref or {}),
+                    "document_id": str(document.id),
+                    "parse_status": document.parse_status,
+                    "rfp_parse_mode": "light",
+                    "rfp_parse_error_reason": exc.reason,
+                    "chunk_count": 0,
+                    "indexed_chunk_count": 0,
+                    "figure_asset_count": 0,
+                    "raw_document_id": None,
+                    "progress": {
+                        "stage": "completed",
+                        "document_id": str(document.id),
+                        "timings": dict(timings),
+                        "elapsed_seconds": time.perf_counter() - overall_started,
+                        "rfp_parse_mode": "light",
+                    },
+                }
+                job.completed_at = datetime.now(timezone.utc)
+                await session.commit()
+                logger.info(
+                    "RFP light parse insufficient: document_id=%s reason=%s",
+                    document_id,
+                    exc.reason,
+                )
+                return
+            timings["extracting_text"] = time.perf_counter() - stage_start
+
+            stage_start = time.perf_counter()
+            text_storage_path: str | None = None
+            if settings.rfp_light_parse_store_full_text:
+                text_storage_path = await asyncio.to_thread(
+                    _save_rfp_light_full_text,
+                    document_id=document_id,
+                    text=result.text,
+                )
+            timings["saving_requirement_text"] = time.perf_counter() - stage_start
+
+            document.parse_status = "done"
+            document.meta = {
+                **(document.meta or {}),
+                "rfp_parse_mode": "light",
+                "rfp_text_excerpt": result.excerpt,
+                "rfp_text_storage_path": text_storage_path,
+                "rfp_text_char_count": result.char_count,
+                "rfp_light_parse_pages": result.page_count,
+                "rfp_light_parse_elapsed_seconds": result.elapsed_seconds,
+                "rfp_light_parse_source_format": result.source_format,
+                "rfp_light_parse_truncated_chars": result.truncated_chars,
+                "rfp_light_parse_truncated_pages": result.truncated_pages,
+            }
+
+            job.status = "succeeded"
+            job.error_code = None
+            job.output_ref = {
+                **(job.output_ref or {}),
+                "document_id": str(document.id),
+                "parse_status": document.parse_status,
+                "rfp_parse_mode": "light",
+                "rfp_text_excerpt": result.excerpt,
+                "rfp_text_storage_path": text_storage_path,
+                "rfp_text_char_count": result.char_count,
+                "rfp_light_parse_pages": result.page_count,
+                "rfp_light_parse_elapsed_seconds": result.elapsed_seconds,
+                "chunk_count": 0,
+                "indexed_chunk_count": 0,
+                "figure_asset_count": 0,
+                "raw_document_id": None,
+                "progress": {
+                    "stage": "completed",
+                    "document_id": str(document.id),
+                    "timings": dict(timings),
+                    "elapsed_seconds": time.perf_counter() - overall_started,
+                    "rfp_parse_mode": "light",
+                },
+            }
+            job.completed_at = datetime.now(timezone.utc)
+            await session.commit()
+            logger.info(
+                "RFP light parse done: document_id=%s pages=%s chars=%s elapsed=%.2fs",
+                document_id,
+                result.page_count,
+                result.char_count,
+                time.perf_counter() - overall_started,
+            )
+        except Exception as exc:  # noqa: BLE001 - status persisted; re-raised for queue logging
+            document.parse_status = "failed"
+            document.meta = {
+                **(document.meta or {}),
+                **_build_parse_failure_metadata(exc),
+                "rfp_parse_mode": "light",
+            }
+            job.status = "failed"
+            job.error_code = exc.__class__.__name__[:50]
+            job.output_ref = {
+                **(job.output_ref or {}),
+                "error": str(exc),
+                "rfp_parse_mode": "light",
+                "progress": {
+                    "stage": "failed",
+                    "document_id": str(document.id),
+                    "timings": dict(timings),
+                    "rfp_parse_mode": "light",
+                },
+            }
+            job.completed_at = datetime.now(timezone.utc)
+            await session.commit()
+            raise
+        finally:
+            if materialized is not None:
+                materialized.cleanup()
 
 
 async def recover_document_parse_jobs_on_startup() -> dict[str, int]:
-    """Requeue document parse jobs left queued/running by a previous backend process."""
+    """Requeue document parse jobs left queued/running by a previous backend process.
 
-    queue = get_background_task_queue()
-    task_specs: list[tuple[UUID, UUID, dict, str]] = []
+    Handles both heavyweight ``document_parse`` (historical proposals -> ``library_parse``
+    queue) and the lightweight ``rfp_light_parse`` job type (project RFP uploads ->
+    ``interactive`` queue) so a backend restart never strands customer-facing
+    requirement parsing alongside long-running historical ingestion.
+    """
+
+    library_queue = get_background_task_queue("library_parse")
+    interactive_queue = get_background_task_queue("interactive")
+    task_specs: list[tuple[str, UUID, UUID, dict, str]] = []
     recovered = 0
     skipped_terminal = 0
     failed_invalid = 0
@@ -651,7 +876,7 @@ async def recover_document_parse_jobs_on_startup() -> dict[str, int]:
     async with get_session_factory()() as session:
         result = await session.scalars(
             select(Job)
-            .where(Job.job_type == "document_parse")
+            .where(Job.job_type.in_(["document_parse", "rfp_light_parse"]))
             .where(Job.status.in_(["queued", "running"]))
             .order_by(Job.created_at.asc())
         )
@@ -681,6 +906,85 @@ async def recover_document_parse_jobs_on_startup() -> dict[str, int]:
                 }
                 job.completed_at = datetime.now(timezone.utc)
                 failed_invalid += 1
+                continue
+
+            # Review R2 #4 fix: a legacy ``document_parse`` job whose document
+            # is actually an RFP would, on recovery, route through the heavy
+            # ingestion pipeline (chunking + embedding + Qdrant + figure_assets
+            # + case_library_refresh).  Auto-migrate it to the lightweight
+            # parser instead of forcing the user to re-upload: close the old
+            # heavy job with ``MigratedToRfpLightParse`` and enqueue a fresh
+            # ``rfp_light_parse`` job onto the interactive queue so the user
+            # sees parsing resume automatically after the restart.
+            if job.job_type == "document_parse" and str(document.doc_type or "").lower() == "rfp":
+                new_job_id = uuid.uuid4()
+                # Review R3 #2 fix: ``trace_id`` is declared NOT NULL on
+                # ``Job`` (see ``app/models/job.py``).  The previous patch
+                # forgot to set it and the previous ``new_job_id`` was never
+                # bound to ``Job(id=...)``, so ``session.flush()`` would raise
+                # an IntegrityError and the migration silently failed for
+                # every legacy RFP job on startup.  We now bind both.
+                new_job = Job(
+                    id=new_job_id,
+                    project_id=document.project_id,
+                    job_type="rfp_light_parse",
+                    status="queued",
+                    trace_id=uuid.uuid4().hex,
+                    input_ref={
+                        "document_id": str(document.id),
+                        "filename": document.filename,
+                        "migrated_from_job_id": str(job.id),
+                        "trigger": "startup_recovery_migration",
+                    },
+                    output_ref={
+                        "progress": {
+                            "stage": "queued",
+                            "document_id": str(document.id),
+                            "reason": "migrated_from_legacy_document_parse",
+                        }
+                    },
+                )
+                session.add(new_job)
+
+                job.status = "failed"
+                job.error_code = "MigratedToRfpLightParse"
+                job.output_ref = {
+                    **(job.output_ref or {}),
+                    "error": (
+                        "Legacy document_parse job targeting an RFP document was migrated "
+                        "to the lightweight RFP parser on recovery to avoid the heavy "
+                        "ingestion pipeline."
+                    ),
+                    "progress": {
+                        "stage": "failed",
+                        "document_id": str(document.id),
+                        "doc_type": "rfp",
+                        "reason": "migrated_to_rfp_light_parse",
+                        "migrated_to_job_id": str(new_job_id),
+                    },
+                }
+                job.completed_at = datetime.now(timezone.utc)
+                failed_invalid += 1
+
+                document.parse_status = "parsing"
+                document.meta = {
+                    key: value
+                    for key, value in (document.meta or {}).items()
+                    if key not in {"parse_error", "requires_cloud_parse"}
+                }
+
+                # Flush so ``new_job`` has its server-assigned id available for
+                # the dedupe_key path below.
+                await session.flush()
+                task_specs.append(
+                    (
+                        "rfp_light_parse",
+                        new_job.id,
+                        document.id,
+                        dict(document.meta or {}),
+                        document.filename,
+                    )
+                )
                 continue
 
             if document.parse_status in {"done", "parse_insufficient"}:
@@ -722,37 +1026,95 @@ async def recover_document_parse_jobs_on_startup() -> dict[str, int]:
                 **(job.output_ref or {}),
                 "progress": {"stage": "recovered_queued", "document_id": str(document.id)},
             }
-            task_specs.append((job.id, document.id, dict(document.meta or {}), document.filename))
+            task_specs.append(
+                (job.job_type, job.id, document.id, dict(document.meta or {}), document.filename)
+            )
 
         await session.commit()
 
-    for job_id, document_id, base_metadata, filename in task_specs:
-        queue.submit(
-            job_id=job_id,
-            job_type="document_parse",
-            label=f"recovered-document-parse:{filename}",
-            run=lambda job_id=job_id, document_id=document_id, base_metadata=base_metadata: _run_document_parse_job(
-                job_id,
-                document_id,
-                base_metadata,
-            ),
-            dedupe_key=f"document_parse:{document_id}",
-            priority=20,
-        )
-        recovered += 1
+    # Review R4 #2: ``BackgroundTaskQueueManager.submit`` returns the existing
+    # job id when ``dedupe_key`` matches an already-active job, and silently
+    # drops the duplicate submission.  Without checking the return value, any
+    # second/third recovered job on the same document would stay
+    # ``status="queued"`` in the DB forever — a worker never picks it up
+    # because it is not in the in-memory queue.  We compare the returned id
+    # against our own ``job_id`` and, if they differ, mark the duplicate
+    # ``failed`` with a stable error code so the frontend stops polling and
+    # operators can see the dedupe in audit logs.
+    duplicates_deduplicated = 0
+    duplicates_to_finalise: list[tuple[UUID, UUID]] = []
+    for job_type, job_id, document_id, base_metadata, filename in task_specs:
+        if job_type == "rfp_light_parse":
+            submitted_job_id = interactive_queue.submit(
+                job_id=job_id,
+                job_type="rfp_light_parse",
+                label=f"recovered-rfp-light-parse:{filename}",
+                run=lambda job_id=job_id, document_id=document_id: _run_rfp_light_parse_job(
+                    job_id,
+                    document_id,
+                ),
+                dedupe_key=f"rfp_light_parse:{document_id}",
+                priority=20,
+            )
+        else:
+            submitted_job_id = library_queue.submit(
+                job_id=job_id,
+                job_type="document_parse",
+                label=f"recovered-document-parse:{filename}",
+                run=lambda job_id=job_id, document_id=document_id, base_metadata=base_metadata: _run_document_parse_job(
+                    job_id,
+                    document_id,
+                    base_metadata,
+                ),
+                dedupe_key=f"document_parse:{document_id}",
+                priority=20,
+            )
+        if submitted_job_id != job_id:
+            duplicates_to_finalise.append((job_id, submitted_job_id))
+        else:
+            recovered += 1
 
-    if recovered or skipped_terminal or failed_invalid:
+    if duplicates_to_finalise:
+        async with get_session_factory()() as session:
+            now = datetime.now(timezone.utc)
+            for dup_job_id, active_job_id in duplicates_to_finalise:
+                dup_job = await session.get(Job, dup_job_id)
+                if dup_job is None:
+                    continue
+                # Only finalise rows we actually re-queued in this run.  If a
+                # concurrent process already moved it, leave it alone.
+                if dup_job.status not in ("queued", "running"):
+                    continue
+                dup_job.status = "failed"
+                dup_job.error_code = "DuplicateRecoveredJob"
+                dup_job.completed_at = now
+                dup_job.output_ref = {
+                    **(dup_job.output_ref or {}),
+                    "deduplicated_to_job_id": str(active_job_id),
+                    "reason": "duplicate_recovered_job_deduplicated_to_active",
+                    "progress": {
+                        "stage": "deduplicated",
+                        "deduplicated_to_job_id": str(active_job_id),
+                    },
+                }
+                duplicates_deduplicated += 1
+            await session.commit()
+
+    if recovered or skipped_terminal or failed_invalid or duplicates_deduplicated:
         logger.info(
-            "Recovered document_parse jobs on startup: recovered=%s skipped_terminal=%s failed_invalid=%s",
+            "Recovered document parse jobs on startup: recovered=%s skipped_terminal=%s "
+            "failed_invalid=%s duplicates_deduplicated=%s",
             recovered,
             skipped_terminal,
             failed_invalid,
+            duplicates_deduplicated,
         )
 
     return {
         "recovered": recovered,
         "skipped_terminal": skipped_terminal,
         "failed_invalid": failed_invalid,
+        "duplicates_deduplicated": duplicates_deduplicated,
     }
 
 
@@ -1260,7 +1622,7 @@ async def _accept_document_upload(
     await session.refresh(document)
     await session.refresh(job)
 
-    queue = get_background_task_queue()
+    queue = get_background_task_queue("library_parse")
     queue.submit(
         job_id=job_id,
         job_type="document_parse",
@@ -1287,6 +1649,104 @@ async def _accept_document_upload(
     )
 
 
+async def _accept_rfp_light_upload(
+    *,
+    session: AsyncSession,
+    file: UploadFile,
+    project_id: UUID,
+    metadata: dict[str, object],
+    storage_prefix: str,
+    job_label_prefix: str,
+    trace_prefix: str,
+    priority: int,
+) -> APIResponse[DocumentUploadAccepted]:
+    """Lightweight project-RFP upload helper.
+
+    Mirrors :func:`_accept_document_upload` for the storage + Document/Job persistence
+    contract but routes the parse work to ``rfp_light_parse`` on the ``interactive``
+    queue.  The full historical-ingestion pipeline (Chunker / Embedder / Qdrant /
+    raw_document / figure assets / case library refresh) is intentionally bypassed.
+    """
+
+    suffix = Path(file.filename or "").suffix or ".bin"
+    storage = get_object_storage()
+
+    with NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+        temp_file.write(await file.read())
+        temp_path = Path(temp_file.name)
+
+    storage_path: str | None = None
+    try:
+        storage_path = storage.save(temp_path, prefix=storage_prefix)
+        file_size_bytes = temp_path.stat().st_size
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    document = Document(
+        project_id=project_id,
+        filename=file.filename or temp_path.name,
+        file_type=suffix.lstrip(".").lower(),
+        file_size_bytes=file_size_bytes,
+        content_sha256=None,
+        storage_path=storage_path,
+        doc_type="rfp",
+        parse_status="parsing",
+        meta={**metadata, "rfp_parse_mode": "light"},
+    )
+    session.add(document)
+    await session.flush()
+
+    job = Job(
+        project_id=project_id,
+        job_type="rfp_light_parse",
+        status="queued",
+        input_ref={
+            "document_id": str(document.id),
+            "filename": document.filename,
+            "doc_type": "rfp",
+            "rfp_parse_mode": "light",
+        },
+        output_ref={
+            "progress": {
+                "stage": "queued",
+                "document_id": str(document.id),
+                "rfp_parse_mode": "light",
+            }
+        },
+        trace_id=f"{trace_prefix}-{uuid.uuid4()}",
+    )
+    session.add(job)
+    await session.flush()
+    job_id = job.id
+    document_id = document.id
+    await session.commit()
+    await session.refresh(document)
+    await session.refresh(job)
+
+    queue = get_background_task_queue("interactive")
+    queue.submit(
+        job_id=job_id,
+        job_type="rfp_light_parse",
+        label=f"{job_label_prefix}:{document.filename}",
+        run=lambda: _run_rfp_light_parse_job(job_id, document_id),
+        dedupe_key=f"rfp_light_parse:{document_id}",
+        priority=priority,
+    )
+
+    return APIResponse(
+        code=202,
+        message="success",
+        data=DocumentUploadAccepted(
+            id=document.id,
+            filename=document.filename,
+            parse_status=document.parse_status,
+            message="项目需求文档已接收，正在轻量解析（不进入历史方案库）",
+            job_id=job.id,
+            next_poll=f"/api/v1/jobs/{job.id}",
+        ),
+    )
+
+
 @router.post(
     "/projects/{project_id}/documents/upload",
     response_model=APIResponse[DocumentUploadAccepted],
@@ -1303,12 +1763,25 @@ async def upload_document(
     project = await session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    settings = get_settings()
+    parsed_metadata = _parse_upload_metadata(metadata)
+    if str(doc_type or "").lower() == "rfp" and settings.rfp_light_parse_enabled:
+        return await _accept_rfp_light_upload(
+            session=session,
+            file=file,
+            project_id=project_id,
+            metadata=parsed_metadata,
+            storage_prefix=f"{project_id}_rfp_",
+            job_label_prefix="rfp-light-parse",
+            trace_prefix="rfp-light-parse",
+            priority=20,
+        )
     return await _accept_document_upload(
         session=session,
         file=file,
         project_id=project_id,
         doc_type=doc_type,
-        metadata=_parse_upload_metadata(metadata),
+        metadata=parsed_metadata,
         storage_prefix=f"{project_id}_",
         job_label_prefix="parse",
         trace_prefix="document-parse",
@@ -1400,8 +1873,12 @@ async def reparse_document(
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
+    settings = get_settings()
+    if str(document.doc_type or "").lower() == "rfp" and settings.rfp_light_parse_enabled:
+        return await _reparse_rfp_light_document(session=session, document=document)
+
     dedupe_key = f"document_parse:{document.id}"
-    queue = get_background_task_queue()
+    queue = get_background_task_queue("library_parse")
     active_job_id = queue.active_job_id(dedupe_key)
     if active_job_id is not None:
         active_job = await session.get(Job, active_job_id)
@@ -1489,6 +1966,117 @@ async def reparse_document(
     )
 
 
+async def _reparse_rfp_light_document(
+    *,
+    session: AsyncSession,
+    document: Document,
+) -> APIResponse[DocumentUploadAccepted]:
+    """Reparse path for project RFP documents.
+
+    Reuses the existing storage object and creates a fresh ``rfp_light_parse`` job
+    on the ``interactive`` queue.  De-dupes both prior ``rfp_light_parse`` runs
+    AND legacy ``document_parse`` runs that may still be in flight from before
+    the migration.
+    """
+
+    document_id = document.id
+    light_dedupe_key = f"rfp_light_parse:{document_id}"
+    legacy_dedupe_key = f"document_parse:{document_id}"
+
+    interactive_queue = get_background_task_queue("interactive")
+    library_queue = get_background_task_queue("library_parse")
+    active_job_id = interactive_queue.active_job_id(light_dedupe_key) or library_queue.active_job_id(
+        legacy_dedupe_key
+    )
+    if active_job_id is not None:
+        active_job = await session.get(Job, active_job_id)
+        if active_job is not None and active_job.status in {"queued", "running"}:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=DocumentUploadAccepted(
+                    id=document.id,
+                    filename=document.filename,
+                    parse_status=document.parse_status,
+                    message="文档已在需求解析队列中，请稍后刷新状态",
+                    job_id=active_job.id,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
+
+    active_job = await session.scalar(
+        select(Job)
+        .where(Job.job_type.in_(["rfp_light_parse", "document_parse"]))
+        .where(Job.status.in_(["queued", "running"]))
+        .where(cast(Job.input_ref, String).contains(str(document_id)))
+        .order_by(Job.created_at.desc())
+    )
+    if active_job is not None:
+        return APIResponse(
+            code=202,
+            message="success",
+            data=DocumentUploadAccepted(
+                id=document.id,
+                filename=document.filename,
+                parse_status=document.parse_status,
+                message="文档已在需求解析队列中，请稍后刷新状态",
+                job_id=active_job.id,
+                next_poll=f"/api/v1/jobs/{active_job.id}",
+            ),
+        )
+
+    document.parse_status = "parsing"
+    job = Job(
+        project_id=document.project_id,
+        job_type="rfp_light_parse",
+        status="queued",
+        input_ref={
+            "document_id": str(document_id),
+            "filename": document.filename,
+            "doc_type": "rfp",
+            "rfp_parse_mode": "light",
+            "reparse": True,
+        },
+        output_ref={
+            "progress": {
+                "stage": "queued",
+                "document_id": str(document_id),
+                "rfp_parse_mode": "light",
+                "reparse": True,
+            }
+        },
+        trace_id=f"rfp-light-reparse-{uuid.uuid4()}",
+    )
+    session.add(job)
+    await session.flush()
+    job_id = job.id
+    await session.commit()
+    await session.refresh(job)
+    await session.refresh(document)
+
+    interactive_queue.submit(
+        job_id=job_id,
+        job_type="rfp_light_parse",
+        label=f"rfp-light-reparse:{document.filename}",
+        run=lambda: _run_rfp_light_parse_job(job_id, document_id),
+        dedupe_key=light_dedupe_key,
+        priority=20,
+    )
+
+    return APIResponse(
+        code=202,
+        message="success",
+        data=DocumentUploadAccepted(
+            id=document.id,
+            filename=document.filename,
+            parse_status=document.parse_status,
+            message="项目需求文档已重新进入轻量解析",
+            job_id=job.id,
+            next_poll=f"/api/v1/jobs/{job.id}",
+        ),
+    )
+
+
 @router.delete("/documents/{document_id}", response_model=APIResponse[dict[str, str]])
 async def delete_document(
     document_id: UUID,
@@ -1522,7 +2110,10 @@ async def delete_document(
     await session.delete(document)
     await session.commit()
     if _should_refresh_history_library(doc_type=document.doc_type):
-        background_tasks.add_task(request_case_library_refresh)
+        # Phase 1 / #4 review fix: route case library refresh through the
+        # maintenance queue so concurrent deletes / uploads collapse into a
+        # single bounded refresh visible on GET /api/v1/jobs/queue.
+        submit_case_library_refresh_job()
     return APIResponse(code=200, message="success", data={"status": "deleted"})
 
 

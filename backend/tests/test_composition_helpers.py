@@ -300,6 +300,55 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(context, "")
         self.assertEqual(citations, [])
 
+    def test_build_outline_inputs_pulls_back_half_requirements_from_source_context(self) -> None:
+        """R5 #1 regression: outline prompt must read the full filtered RFP
+        context, not the 600-char preview.  Otherwise the planner never sees
+        back-half technical parameters (IP55 / ≥2.5MW / 评分条款)."""
+
+        requirement_card = SimpleNamespace(
+            content={
+                "project_name": "后半段项目",
+                "business_objective": "完成高压电机软起",
+                "industry": "冶金",
+                "product_line": "lci",
+                # Short preview only carries the head — selector's back-half
+                # picks live on ``source_context``.
+                "source_excerpt": "项目背景说明。",
+                "source_context": (
+                    "项目背景说明。\n\n"
+                    "技术参数：电机防护等级 IP55，额定功率 ≥2.5MW，必须支持双冗余控制。\n\n"
+                    "评分标准：技术分占 60%。"
+                ),
+                "key_parameters": {"voltage_level": "10kV"},
+            }
+        )
+        evidence_bundle = SimpleNamespace(content={})
+
+        _, _, rfp_context, _ = build_outline_inputs(
+            requirement_card=requirement_card,
+            evidence_bundle=evidence_bundle,
+        )
+
+        self.assertIn("IP55", rfp_context)
+        self.assertIn("≥2.5MW", rfp_context)
+        self.assertIn("评分标准", rfp_context)
+
+    def test_build_outline_inputs_falls_back_to_legacy_excerpt(self) -> None:
+        """Cards without ``source_context`` (legacy) must still flow through."""
+
+        requirement_card = SimpleNamespace(
+            content={
+                "project_name": "旧需求卡",
+                "business_objective": "完成项目",
+                "source_excerpt": "legacy 短摘要内容。",
+            }
+        )
+        _, _, rfp_context, _ = build_outline_inputs(
+            requirement_card=requirement_card,
+            evidence_bundle=SimpleNamespace(content={}),
+        )
+        self.assertIn("legacy 短摘要内容", rfp_context)
+
     def test_build_outline_inputs_includes_case_examples_and_raw_content(self) -> None:
         requirement_card = SimpleNamespace(
             content={
@@ -434,6 +483,35 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(params["product_line"], "hv_vfd")
         self.assertEqual(params["business_objective"], "提升站内自动化运行可靠性")
         self.assertEqual(params["voltage_level"], "110kV")
+        self.assertEqual(params["_source_excerpt"], "需求原文参数摘录")
+
+    def test_build_section_global_params_prefers_full_source_context_over_preview(self) -> None:
+        """R5 #1 regression: when both fields are present, the full filtered
+        context wins so section parameter-evidence collection can see the
+        back-half requirements that the 600-char preview drops."""
+
+        params = build_section_global_params(
+            {
+                "project_name": "后半段项目",
+                "source_excerpt": "短摘要不含后半段。",
+                "source_context": (
+                    "项目背景说明。\n\n"
+                    "技术参数：电机防护等级 IP55，额定功率 ≥2.5MW，必须支持双冗余控制。"
+                ),
+            }
+        )
+        self.assertIn("IP55", params["_source_excerpt"])
+        self.assertIn("≥2.5MW", params["_source_excerpt"])
+        self.assertNotEqual(params["_source_excerpt"], "短摘要不含后半段。")
+
+    def test_build_section_global_params_falls_back_to_legacy_excerpt_only_card(self) -> None:
+        """Legacy cards persisted before R5 only have ``source_excerpt``;
+        the helper must still feed something to ``_source_excerpt`` so the
+        section pipeline does not lose context entirely."""
+
+        params = build_section_global_params(
+            {"project_name": "旧需求卡", "source_excerpt": "需求原文参数摘录"}
+        )
         self.assertEqual(params["_source_excerpt"], "需求原文参数摘录")
 
     def test_build_section_prompts_avoids_internal_process_language(self) -> None:

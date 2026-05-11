@@ -35,6 +35,7 @@ from app.services.evidence_binding import resolve_outline_evidence_bundle
 from app.services.knowledge import KnowledgeWikiContextProvider
 from app.services.llm.client import LLMInputImage, LLMRequest, TaskType
 from app.services.composition.semantic_rules import get_semantic_rules
+from app.services.requirement.service import resolve_requirement_source_context
 from app.services.retrieval import AssetRetrievalService
 from app.services.retrieval.case_service import CaseLibraryService
 from app.services.validation.service import flatten_outline_sections
@@ -5007,7 +5008,14 @@ def build_section_global_params(requirement_content: dict[str, Any] | None) -> d
         value = requirement_content.get(field_name)
         if value not in (None, "", [], {}):
             merged.setdefault(field_name, value)
-    source_excerpt = str(requirement_content.get("source_excerpt") or "").strip()
+    # R5: section parameter-evidence collection needs the full filtered RFP
+    # context (after select_requirement_excerpt), not the 600-char UI preview.
+    # ``resolve_requirement_source_context`` prefers ``source_context`` and
+    # falls back to ``source_excerpt`` for legacy requirement cards written
+    # before R5.  Key still spelled ``_source_excerpt`` to keep downstream
+    # readers (``_collect_parameter_evidence_candidates``,
+    # ``build_section_prompts``) unchanged.
+    source_excerpt = resolve_requirement_source_context(requirement_content)
     if source_excerpt:
         merged["_source_excerpt"] = source_excerpt
     return merged

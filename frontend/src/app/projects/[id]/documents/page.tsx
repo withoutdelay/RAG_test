@@ -3,21 +3,31 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { UploadCloud, File, CheckCircle2, AlertCircle, XCircle, RefreshCw, Loader2 } from 'lucide-react';
+import { UploadCloud, File, CheckCircle2, AlertCircle, XCircle, RefreshCw, Loader2, Clock } from 'lucide-react';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { toast } from 'sonner';
 import api, { getApiErrorMessage } from '@/lib/api';
-import { Document, HistoryLibraryRefreshStatus } from '@/lib/types';
+import { Document } from '@/lib/types';
 import { format } from 'date-fns';
+
+// Project RFP upload page — uses the lightweight parser and does NOT feed the
+// historical proposal library / AI wiki / visual index.  Historical ingestion has
+// a separate entry point under /library/materials.
+const PARSE_STATUS_LABEL: Record<string, string> = {
+  parsing: '需求解析中',
+  pending: '已加入队列',
+  queued: '已加入队列',
+  done: '需求解析完成',
+  parse_insufficient: '需求解析不充分',
+  failed: '需求解析失败',
+};
 
 export default function DocumentsPage() {
   const params = useParams();
   const projectId = params.id as string;
   const [documents, setDocuments] = useState<Document[]>([]);
-  const [historyLibraryStatus, setHistoryLibraryStatus] = useState<HistoryLibraryRefreshStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const docType = 'rfp';
@@ -30,48 +40,30 @@ export default function DocumentsPage() {
       setDocuments(list);
     } catch (error) {
       console.error(error);
-      toast.error(getApiErrorMessage(error, 'Failed to load documents'));
+      toast.error(getApiErrorMessage(error, '加载需求文档失败'));
     } finally {
       setLoading(false);
     }
   }, [projectId]);
 
-  const fetchHistoryLibraryStatus = useCallback(async () => {
-    try {
-      const res = await api.get('/documents/history-library/status');
-      setHistoryLibraryStatus(res.data);
-    } catch (error) {
-      console.error(error);
-    }
-  }, []);
-
   useEffect(() => {
     if (projectId) {
       void fetchDocuments();
-      void fetchHistoryLibraryStatus();
     }
-  }, [fetchDocuments, fetchHistoryLibraryStatus, projectId]);
+  }, [fetchDocuments, projectId]);
 
   useEffect(() => {
-    if (!historyLibraryStatus || !['queued', 'running'].includes(historyLibraryStatus.status)) {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      void fetchHistoryLibraryStatus();
-    }, 3000);
-    return () => window.clearTimeout(timer);
-  }, [fetchHistoryLibraryStatus, historyLibraryStatus]);
-
-  useEffect(() => {
+    // Poll the project documents list while any RFP is still parsing.  We no
+    // longer poll /documents/history-library/status — the project documents page
+    // is intentionally decoupled from the historical library refresh lifecycle.
     if (!documents.some((document) => document.parse_status === 'parsing' || document.parse_status === 'pending')) {
       return;
     }
     const timer = window.setTimeout(() => {
       void fetchDocuments();
-      void fetchHistoryLibraryStatus();
     }, 3000);
     return () => window.clearTimeout(timer);
-  }, [documents, fetchDocuments, fetchHistoryLibraryStatus]);
+  }, [documents, fetchDocuments]);
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
@@ -109,14 +101,11 @@ export default function DocumentsPage() {
           toast.success(lastAccepted.message);
         }
       } else {
-        toast.info(`Queued ${successCount}/${files.length} documents for parsing`);
+        toast.info(`已接收 ${successCount}/${files.length} 份需求文档，正在后台轻量解析`);
         if (parseInsufficientCount > 0) {
-          toast.warning(
-            `${parseInsufficientCount} document(s) were saved but excluded from the historical library because the parse quality was insufficient.`
-          );
+          toast.warning(`${parseInsufficientCount} 份文档文本抽取不充分，已保存原文，需人工复核。`);
         }
       }
-      await fetchHistoryLibraryStatus();
       await fetchDocuments();
     } catch (error) {
       console.error(error);
@@ -124,8 +113,8 @@ export default function DocumentsPage() {
         getApiErrorMessage(
           error,
           files.length > 1
-            ? `Imported ${successCount}/${files.length} documents before the error`
-            : 'Error uploading document'
+            ? `在第 ${successCount + 1} 份文档处出错，已成功上传 ${successCount}/${files.length} 份`
+            : '需求文档上传失败'
         )
       );
     } finally {
@@ -139,240 +128,112 @@ export default function DocumentsPage() {
       const res = await api.post(`/documents/${docId}/reparse`);
       const accepted = res.data || {};
       if (accepted.parse_status === 'parse_insufficient') {
-        toast.warning(accepted.message || 'Reparse completed, but the parse quality was insufficient.');
+        toast.warning(accepted.message || '重新解析完成，但解析结果不充分。');
       } else {
-        toast.success(accepted.message || 'Document reparsed successfully');
+        toast.success(accepted.message || '已触发重新解析');
       }
-      await fetchHistoryLibraryStatus();
       await fetchDocuments();
     } catch (error) {
-      toast.error(getApiErrorMessage(error, 'Error triggering reparse'));
+      toast.error(getApiErrorMessage(error, '触发重新解析失败'));
     }
   };
 
   const handleDelete = async (docId: string) => {
-    if (!confirm('Are you sure you want to delete this document?')) return;
+    if (!confirm('确定删除该需求文档？此操作不可恢复。')) return;
     try {
       await api.delete(`/documents/${docId}`);
-      toast.success('Document deleted');
-      await fetchHistoryLibraryStatus();
+      toast.success('需求文档已删除');
       await fetchDocuments();
     } catch (error) {
-      toast.error(getApiErrorMessage(error, 'Error deleting document'));
+      toast.error(getApiErrorMessage(error, '删除需求文档失败'));
     }
   };
 
   const renderStatus = (status: string) => {
+    const label = PARSE_STATUS_LABEL[status] ?? status;
     switch (status) {
       case 'done':
-        return <Badge className="bg-green-500 hover:bg-green-600"><CheckCircle2 className="mr-1 w-3 h-3" /> Done</Badge>;
+        return (
+          <Badge className="bg-green-500 hover:bg-green-600">
+            <CheckCircle2 className="mr-1 w-3 h-3" /> {label}
+          </Badge>
+        );
       case 'parsing':
-        return <Badge variant="secondary" className="bg-blue-100 text-blue-800"><RefreshCw className="mr-1 w-3 h-3 animate-spin" /> Parsing</Badge>;
+        return (
+          <Badge variant="secondary" className="bg-blue-100 text-blue-800">
+            <RefreshCw className="mr-1 w-3 h-3 animate-spin" /> {label}
+          </Badge>
+        );
+      case 'pending':
+      case 'queued':
+        return (
+          <Badge variant="secondary" className="bg-slate-100 text-slate-700">
+            <Clock className="mr-1 w-3 h-3" /> {label}
+          </Badge>
+        );
       case 'parse_insufficient':
-        return <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800"><AlertCircle className="mr-1 w-3 h-3" /> Parse Insufficient</Badge>;
+        return (
+          <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
+            <AlertCircle className="mr-1 w-3 h-3" /> {label}
+          </Badge>
+        );
       case 'failed':
-        return <Badge variant="destructive"><XCircle className="mr-1 w-3 h-3" /> Failed</Badge>;
+        return (
+          <Badge variant="destructive">
+            <XCircle className="mr-1 w-3 h-3" /> {label}
+          </Badge>
+        );
       default:
-        return <Badge variant="outline"><AlertCircle className="mr-1 w-3 h-3" /> {status}</Badge>;
+        return (
+          <Badge variant="outline">
+            <AlertCircle className="mr-1 w-3 h-3" /> {label}
+          </Badge>
+        );
     }
-  };
-
-  const formatStatusTime = (value?: string | null) => {
-    if (!value) return '';
-    return format(new Date(value), 'MMM d, yyyy HH:mm:ss');
-  };
-
-  const formatPipelineLabel = (name: string) => {
-    switch (name) {
-      case 'case_library':
-        return 'Reuse Library + AI Wiki';
-      case 'visual_cache':
-        return 'Visual Index';
-      default:
-        return name;
-    }
-  };
-
-  const readNumberStat = (key: string) => {
-    const value = historyLibraryStatus?.stats?.[key];
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
-  };
-
-  const formatDurationSeconds = (value?: number | null) => {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-      return null;
-    }
-    if (value >= 60) {
-      const minutes = Math.floor(value / 60);
-      const seconds = value - minutes * 60;
-      return `${minutes}m ${seconds.toFixed(seconds >= 10 ? 0 : 1)}s`;
-    }
-    if (value >= 10) {
-      return `${value.toFixed(1)}s`;
-    }
-    if (value >= 1) {
-      return `${value.toFixed(2)}s`;
-    }
-    return `${Math.round(value * 1000)}ms`;
-  };
-
-  const renderPipelineSummary = () => {
-    if (!historyLibraryStatus?.pipelines) return null;
-    const entries = Object.entries(historyLibraryStatus.pipelines);
-    if (!entries.length) return null;
-    return (
-      <div className="mt-2 flex flex-wrap gap-2">
-        {entries.map(([name, pipeline]) => {
-          const durationLabel = formatDurationSeconds(pipeline.duration_seconds);
-          return (
-            <Badge key={name} variant="outline" className="text-xs font-normal">
-              {formatPipelineLabel(name)}: {pipeline.status}
-              {durationLabel ? ` · ${durationLabel}` : ''}
-            </Badge>
-          );
-        })}
-      </div>
-    );
-  };
-
-  const renderHistoryLibraryAlert = () => {
-    if (!historyLibraryStatus) return null;
-    const cacheHitCount = readNumberStat('cache_hit_uploaded_documents');
-    const cacheMissCount = readNumberStat('cache_miss_uploaded_documents');
-    const uploadedOutlineCount = readNumberStat('uploaded_outline_documents');
-    const visualCacheEntryCount = readNumberStat('visual_cache_entry_count');
-    const visualQdrantIndexedPoints = readNumberStat('visual_qdrant_indexed_points');
-    const visualQdrantSyncStatus =
-      typeof historyLibraryStatus.stats?.visual_qdrant_sync_status === 'string'
-        ? String(historyLibraryStatus.stats?.visual_qdrant_sync_status)
-        : null;
-
-    if (historyLibraryStatus.status === 'idle' && !historyLibraryStatus.last_success_at) {
-      return null;
-    }
-
-    if (historyLibraryStatus.status === 'failed') {
-      return (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Historical library refresh failed</AlertTitle>
-          <AlertDescription>
-            {historyLibraryStatus.error || 'The latest AI Wiki refresh did not complete successfully.'}
-            {renderPipelineSummary()}
-          </AlertDescription>
-        </Alert>
-      );
-    }
-
-    if (historyLibraryStatus.status === 'partial_failed') {
-      return (
-        <Alert>
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Historical refresh completed with partial failures</AlertTitle>
-          <AlertDescription>
-            {historyLibraryStatus.error || 'One background refresh pipeline failed while another completed successfully.'}
-            {uploadedOutlineCount !== null
-              ? ` Rebuilt ${uploadedOutlineCount} uploaded historical proposals before the failing pipeline stopped.`
-              : ''}
-            {cacheHitCount !== null || cacheMissCount !== null
-              ? ` Projection cache hits ${cacheHitCount ?? 0}, misses ${cacheMissCount ?? 0}.`
-              : ''}
-            {visualQdrantIndexedPoints !== null
-              ? ` Visual ANN index wrote ${visualQdrantIndexedPoints} points${visualQdrantSyncStatus ? ` (${visualQdrantSyncStatus})` : ''}.`
-              : ''}
-            {renderPipelineSummary()}
-          </AlertDescription>
-        </Alert>
-      );
-    }
-
-    if (['queued', 'running'].includes(historyLibraryStatus.status)) {
-      return (
-        <Alert>
-          <RefreshCw className="h-4 w-4 animate-spin" />
-          <AlertTitle>Historical library refresh in progress</AlertTitle>
-          <AlertDescription>
-            {historyLibraryStatus.status === 'queued'
-              ? 'Imported historical proposals are waiting to refresh the reuse library, AI Wiki, and visual index.'
-              : 'Imported historical proposals are refreshing the reuse library, AI Wiki, and visual index.'}
-            {historyLibraryStatus.started_at || historyLibraryStatus.requested_at
-              ? ` Last update: ${formatStatusTime(historyLibraryStatus.started_at || historyLibraryStatus.requested_at)}.`
-              : ''}
-            {historyLibraryStatus.pending ? ' A newer refresh request is already queued.' : ''}
-            {renderPipelineSummary()}
-          </AlertDescription>
-        </Alert>
-      );
-    }
-
-    return (
-      <Alert>
-        <CheckCircle2 className="h-4 w-4" />
-        <AlertTitle>Historical library, AI Wiki, and visual index are up to date</AlertTitle>
-        <AlertDescription>
-          Last completed at {formatStatusTime(historyLibraryStatus.last_success_at || historyLibraryStatus.finished_at)}.
-          {uploadedOutlineCount !== null
-            ? ` Compiled ${uploadedOutlineCount} uploaded historical proposals into the current library snapshot.`
-            : ''}
-          {cacheHitCount !== null || cacheMissCount !== null
-            ? ` Projection cache hits ${cacheHitCount ?? 0}, misses ${cacheMissCount ?? 0}.`
-            : ''}
-          {visualCacheEntryCount !== null
-            ? ` Visual index now contains ${visualCacheEntryCount} cached assets.`
-            : ''}
-          {visualQdrantIndexedPoints !== null
-            ? ` ANN visual collection now contains ${visualQdrantIndexedPoints} indexed points${visualQdrantSyncStatus ? ` (${visualQdrantSyncStatus})` : ''}.`
-            : ''}
-          {renderPipelineSummary()}
-        </AlertDescription>
-      </Alert>
-    );
   };
 
   return (
     <div className="p-6 space-y-6">
       <div className="flex justify-between items-center">
         <div>
-          <h2 className="text-2xl font-bold">Documents</h2>
+          <h2 className="text-2xl font-bold">项目需求文档</h2>
           <p className="text-muted-foreground mt-1">
-            Upload current project RFP documents. Historical proposals are managed from the library audit page.
+            上传 RFP 用于提取项目需求和约束；仅做轻量文本抽取，不进入历史方案库。
           </p>
         </div>
         <div className="flex items-center gap-3">
           <Link href="/library/materials" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
-            Historical Library
+            历史方案库
           </Link>
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            onChange={handleFileChange} 
-            className="hidden" 
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileChange}
+            className="hidden"
             multiple
             accept=".pdf,.docx,.doc,.txt,.md"
           />
           <Button onClick={handleUploadClick} disabled={uploading}>
             {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
-            {uploading ? 'Uploading...' : 'Upload RFP'}
+            {uploading ? '上传中...' : '上传需求文档'}
           </Button>
         </div>
       </div>
 
-      {renderHistoryLibraryAlert()}
-
       <Card>
         <CardHeader>
-          <CardTitle>Project Repository</CardTitle>
+          <CardTitle>项目需求文档列表</CardTitle>
           <CardDescription>
-            Documents are automatically parsed into intelligent chunks. Historical proposals also refresh the reuse library, AI Wiki, and visual index in the background.
+            仅做需求文本抽取，不做切片/向量化/图表入库，也不参与历史方案复用。旧版 .doc 如无法解析请上传 .docx / .pdf。
           </CardDescription>
         </CardHeader>
         <CardContent>
           {loading ? (
-            <div className="py-8 text-center text-muted-foreground">Loading documents...</div>
+            <div className="py-8 text-center text-muted-foreground">需求文档加载中…</div>
           ) : documents.length === 0 ? (
             <div className="py-12 text-center flex flex-col items-center">
               <File className="h-12 w-12 text-muted-foreground mb-4 opacity-50" />
-              <p className="text-muted-foreground">No documents uploaded yet.</p>
+              <p className="text-muted-foreground">尚未上传项目需求文档。</p>
             </div>
           ) : (
             <div className="divide-y border rounded-md">
@@ -384,10 +245,10 @@ export default function DocumentsPage() {
                       <p className="font-medium">{doc.filename}</p>
                       <div className="flex items-center gap-3 mt-1 text-sm text-muted-foreground">
                         <Badge variant="outline" className="text-xs font-normal">
-                          {doc.doc_type === 'rfp' ? 'RFP' : 'Historical Data'}
+                          {doc.doc_type === 'rfp' ? '项目需求' : '历史方案'}
                         </Badge>
                         <span>{(doc.file_size_bytes ? doc.file_size_bytes / 1024 / 1024 : 0).toFixed(2)} MB</span>
-                        <span>{doc.created_at ? format(new Date(doc.created_at), 'MMM d, yyyy HH:mm') : ''}</span>
+                        <span>{doc.created_at ? format(new Date(doc.created_at), 'yyyy-MM-dd HH:mm') : ''}</span>
                       </div>
                     </div>
                   </div>
@@ -395,10 +256,15 @@ export default function DocumentsPage() {
                     {renderStatus(doc.parse_status)}
                     <div className="flex space-x-2">
                       <Button variant="outline" size="sm" onClick={() => handleReparse(doc.id)}>
-                        Reparse
+                        重新解析
                       </Button>
-                      <Button variant="outline" size="sm" className="text-red-500 hover:text-red-700" onClick={() => handleDelete(doc.id)}>
-                        Delete
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-red-500 hover:text-red-700"
+                        onClick={() => handleDelete(doc.id)}
+                      >
+                        删除
                       </Button>
                     </div>
                   </div>

@@ -161,6 +161,39 @@ async def request_case_library_refresh() -> None:
     )
 
 
+def submit_case_library_refresh_job() -> "UUID":
+    """Submit a ``case_library_refresh`` job onto the maintenance queue.
+
+    Replaces the legacy ``background_tasks.add_task(request_case_library_refresh)``
+    pattern so that:
+
+    * the refresh request shows up under ``GET /api/v1/jobs/queue`` as a
+      ``maintenance`` queue entry,
+    * its concurrency is bounded by ``MAINTENANCE_JOB_WORKER_COUNT``,
+    * concurrent callers (HTTP handlers, worker post-completion hooks) collapse
+      into a single refresh via the global dedupe key ``case_library_refresh:global``.
+
+    No row is written to the ``jobs`` table; the refresh state continues to be
+    surfaced by ``GET /api/v1/documents/history-library/status`` for backwards
+    compatibility.
+    """
+    # Local imports defer the dependency cycle on ``app.services.task_queue``,
+    # which itself only depends on ``app.config``.
+    import uuid
+
+    from app.services.task_queue import get_background_task_queue
+
+    queue = get_background_task_queue("maintenance")
+    return queue.submit(
+        job_id=uuid.uuid4(),
+        job_type="case_library_refresh",
+        label="case-library-refresh:global",
+        dedupe_key="case_library_refresh:global",
+        priority=50,
+        run=request_case_library_refresh,
+    )
+
+
 async def rebuild_case_library_and_knowledge_wiki() -> dict[str, Any]:
     settings = get_settings()
     outline_path = Path(settings.case_library_outline_path)

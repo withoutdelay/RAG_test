@@ -16,6 +16,7 @@ from app.models.project import Project
 from app.models.proposal_outline import ProposalOutline
 from app.models.requirement_card import RequirementCard
 from app.services.agents.planner import PlannerAgent
+from app.services.requirement.service import resolve_requirement_source_context
 from app.services.retrieval.case_service import build_outline_examples
 from app.services.vectorstore.block_taxonomy import is_commercial_manual_section_text
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
@@ -369,7 +370,11 @@ def build_outline_inputs(
     rfp_context = "\n\n".join(
         part
         for part in [
-            str(content.get("source_excerpt") or "").strip(),
+            # R5: pull the full filtered RFP context (source_context) instead
+            # of the 600-char source_excerpt preview so back-half requirements
+            # (评分条款 / 工期 / 验收 / 后半段技术参数) actually reach the
+            # planner.  Falls back to source_excerpt for legacy cards.
+            resolve_requirement_source_context(content),
             f"证据摘要：\n{evidence_summary}" if evidence_summary else "",
         ]
         if part

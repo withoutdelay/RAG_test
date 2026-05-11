@@ -1,21 +1,35 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.job import Job
 from app.models.project import Project
 from app.models.requirement_card import RequirementCard
+from app.services.parsing.rfp_excerpt_selector import select_requirement_excerpt
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
+
+logger = logging.getLogger(__name__)
+
+RFP_PARSE_PENDING_ITEM_ID = "rfp_parse_pending"
+
+# Short, user-facing preview kept in ``RequirementCard.content.source_excerpt``.
+# UI / list cards render this; downstream LLM context now reads
+# ``source_context`` instead (see :func:`resolve_requirement_source_context`).
+SOURCE_EXCERPT_PREVIEW_CHARS = 600
 
 INTERNAL_OBJECTIVE_TERMS = (
     "review",
@@ -41,17 +55,68 @@ def build_requirement_content(
     project: Project,
     source_excerpt: str,
 ) -> dict[str, Any]:
+    """Build the JSON body stored on :class:`RequirementCard.content`.
+
+    **Review R5 update.**  R4 #3 made ``_load_rfp_light_context`` return the
+    full filtered RFP context (~20K chars after :func:`select_requirement_excerpt`),
+    but :func:`build_requirement_content` then sliced it back down to 600
+    characters for ``source_excerpt`` and every downstream consumer
+    (outline prompt / retrieval query hints / section parameter evidence)
+    only saw that head slice.  The smart selector's back-half picks were
+    therefore silently dropped before they ever reached the LLM.
+
+    The fix keeps backward compatibility with the UI by writing the same
+    short preview at ``source_excerpt`` while persisting the full filtered
+    context at ``source_context``.  Downstream code reads
+    ``source_context`` via :func:`resolve_requirement_source_context`,
+    falling back to ``source_excerpt`` for legacy cards.
+    """
+
     business_objective = derive_business_objective(project=project, source_excerpt=source_excerpt)
+    full_context = (source_excerpt or "").strip()
 
     return {
         "project_name": project.name,
         "product_line": project.product_line,
         "industry": project.industry,
         "business_objective": business_objective,
-        "source_excerpt": source_excerpt[:600],
+        # UI / list-card preview only.  Do not feed to LLM context.
+        "source_excerpt": full_context[:SOURCE_EXCERPT_PREVIEW_CHARS],
+        # Full filtered RFP context (set by selector upstream).  This is what
+        # outline / retrieval / section consumers read.  Empty string is kept
+        # explicit so callers can distinguish "no source" from a legacy card
+        # without the field.
+        "source_context": full_context,
         "constraints": [],
         "key_parameters": {},
     }
+
+
+def resolve_requirement_source_context(content: dict[str, Any] | None) -> str:
+    """Return the full RFP context for downstream LLM/query consumers.
+
+    Preference order:
+
+    1. ``content["source_context"]`` — new R5 field carrying the full
+       :func:`select_requirement_excerpt` output (up to
+       ``RFP_LIGHT_PARSE_EXCERPT_CHARS``).
+    2. ``content["source_excerpt"]`` — legacy short preview, used only as a
+       compatibility fallback for requirement cards written before R5.
+    3. ``""`` when neither field carries useful text.
+
+    The returned string is stripped; callers can rely on it being either
+    empty or non-whitespace.
+    """
+
+    if not isinstance(content, dict):
+        return ""
+    full = content.get("source_context")
+    if isinstance(full, str) and full.strip():
+        return full.strip()
+    legacy = content.get("source_excerpt")
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy.strip()
+    return ""
 
 
 def derive_business_objective(*, project: Project, source_excerpt: str) -> str:
@@ -171,6 +236,21 @@ class RequirementService:
             project_id=project_id,
             rfp_document_id=rfp_document_id,
         )
+
+        # Phase 3 / Task 3.2: when the RFP is still being parsed by the lightweight
+        # path, fall back to project.description so the user can keep moving.  If
+        # there is no description either, refuse with a 409-style validation error
+        # so the UI prompts the user to wait.
+        rfp_parse_pending = bool(
+            source_document is not None
+            and str(source_document.doc_type or "").lower() == "rfp"
+            and source_document.parse_status == "parsing"
+        )
+        if rfp_parse_pending and not (project.description or "").strip():
+            raise ArtifactValidationError(
+                "需求文档仍在解析，请稍后再试。",
+            )
+
         source_excerpt, source_refs = await self._load_source_context(
             session=session,
             document=source_document,
@@ -181,7 +261,11 @@ class RequirementService:
             job_type="extract",
             status="running",
             trace_id=uuid.uuid4().hex,
-            input_ref={"project_id": str(project_id), "rfp_document_id": str(rfp_document_id) if rfp_document_id else None},
+            input_ref={
+                "project_id": str(project_id),
+                "rfp_document_id": str(rfp_document_id) if rfp_document_id else None,
+                "rfp_parse_pending": rfp_parse_pending,
+            },
             started_at=datetime.now(timezone.utc),
         )
         session.add(job)
@@ -190,6 +274,29 @@ class RequirementService:
         version = await self._next_version(session=session, project_id=project_id)
         content = build_requirement_content(project=project, source_excerpt=source_excerpt)
         missing_items, blocking_items = build_clarification_items(content)
+        if rfp_parse_pending:
+            pending_item = {
+                "item_id": RFP_PARSE_PENDING_ITEM_ID,
+                "field_name": "rfp_document",
+                "priority": "P0",
+                "reason": "RFP 解析尚未完成，需求字段基于项目描述生成，需复核。",
+                "question": "请等待 RFP 解析完成或检查 RFP 文件是否上传成功。",
+                "blocking": False,
+                "status": "open",
+            }
+            if not any(item.get("item_id") == RFP_PARSE_PENDING_ITEM_ID for item in missing_items):
+                missing_items.append(pending_item)
+
+        if rfp_parse_pending:
+            confidence = Decimal("0.5500")
+            confidence_source_refs: list[dict[str, str]] = []
+        elif source_excerpt:
+            confidence = Decimal("0.8200")
+            confidence_source_refs = source_refs
+        else:
+            confidence = Decimal("0.6500")
+            confidence_source_refs = source_refs
+
         card = RequirementCard(
             project_id=project_id,
             version=version,
@@ -197,8 +304,8 @@ class RequirementService:
             content=content,
             missing_items=missing_items,
             blocking_items=blocking_items,
-            confidence=Decimal("0.8200") if source_excerpt else Decimal("0.6500"),
-            source_refs=source_refs,
+            confidence=confidence,
+            source_refs=confidence_source_refs,
             confirmed_by_user=False,
         )
         session.add(card)
@@ -353,7 +460,25 @@ class RequirementService:
     ) -> tuple[str, list[dict[str, str]]]:
         if document is None:
             return "", []
+        if str(document.doc_type or "").lower() == "rfp":
+            return await self._load_rfp_light_context(
+                session=session,
+                document=document,
+                max_chunks=max_chunks,
+            )
+        return await self._load_chunk_context(
+            session=session,
+            document=document,
+            max_chunks=max_chunks,
+        )
 
+    async def _load_chunk_context(
+        self,
+        *,
+        session: AsyncSession,
+        document: Document,
+        max_chunks: int = 5,
+    ) -> tuple[str, list[dict[str, str]]]:
         chunks = (
             await session.scalars(
                 select(Chunk)
@@ -373,6 +498,91 @@ class RequirementService:
             for chunk in chunks
         ]
         return excerpt, source_refs
+
+    async def _load_rfp_light_context(
+        self,
+        *,
+        session: AsyncSession,
+        document: Document,
+        max_chunks: int = 5,
+    ) -> tuple[str, list[dict[str, str]]]:
+        """Resolve RFP requirement context for the lightweight parser.
+
+        **Review R4 #3 update.**  R4 #1 already fixed storage to keep the
+        full extracted RFP text on disk at ``rfp_text_storage_path``.  But
+        the consumer side here used to short-circuit on
+        ``meta.rfp_text_excerpt`` (a mechanical ``text[:excerpt_chars]``
+        head slice) and only ever reached the storage path with the same
+        head-slice fallback, so any requirement past the first
+        ``RFP_LIGHT_PARSE_EXCERPT_CHARS`` characters never made it into the
+        LLM prompt that produces the requirement card.
+
+        New priority order:
+
+        1. ``Document.meta.rfp_text_storage_path`` — full text on disk; run
+           :func:`select_requirement_excerpt` to keep the highest-scoring
+           paragraphs (section headings + requirement markers + numeric
+           specs) up to ``RFP_LIGHT_PARSE_EXCERPT_CHARS``.
+        2. ``Document.meta.rfp_text_excerpt`` — legacy fallback for documents
+           parsed before R4 #1 (storage path may not exist for them).
+        3. legacy ``Chunk`` rows (read-only fallback for RFPs that were
+           originally parsed by the heavy historical-ingestion pipeline).
+        4. empty
+        """
+
+        meta = dict(document.meta or {})
+        document_ref = self._build_document_ref(document)
+        excerpt_cap = int(get_settings().rfp_light_parse_excerpt_chars)
+
+        # Preferred path: full text on disk → requirement-aware selection.
+        storage_path = meta.get("rfp_text_storage_path")
+        if isinstance(storage_path, str) and storage_path.strip():
+            text_path = Path(storage_path)
+            if text_path.exists():
+                try:
+                    content = await asyncio.to_thread(
+                        text_path.read_text,
+                        encoding="utf-8",
+                    )
+                except OSError as exc:  # pragma: no cover - filesystem hiccup
+                    logger.warning(
+                        "Failed to read RFP text storage path %s: %s",
+                        storage_path,
+                        exc,
+                    )
+                else:
+                    snippet = select_requirement_excerpt(
+                        (content or "").strip(),
+                        max_chars=excerpt_cap,
+                    )
+                    if snippet:
+                        return snippet, [document_ref]
+
+        # Legacy fallback: documents written before R4 #1 only have the head
+        # slice on ``rfp_text_excerpt``.  We still surface them rather than
+        # nothing, but new RFPs always take the storage-path branch above.
+        excerpt = meta.get("rfp_text_excerpt")
+        if isinstance(excerpt, str) and excerpt.strip():
+            return excerpt, [document_ref]
+
+        # Legacy fallback (read-only): older RFPs may still have Chunk rows.
+        chunk_excerpt, chunk_refs = await self._load_chunk_context(
+            session=session,
+            document=document,
+            max_chunks=max_chunks,
+        )
+        if chunk_excerpt:
+            return chunk_excerpt, chunk_refs
+        return "", []
+
+    @staticmethod
+    def _build_document_ref(document: Document) -> dict[str, str]:
+        return {
+            "document_id": str(document.id),
+            "document_name": document.filename or "",
+            "chunk_id": "",
+            "heading_path": "rfp_text_excerpt",
+        }
 
     async def _next_version(self, *, session: AsyncSession, project_id: UUID) -> int:
         latest = await session.scalar(

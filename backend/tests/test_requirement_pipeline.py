@@ -4,11 +4,13 @@ import unittest
 from types import SimpleNamespace
 
 from app.services.requirement.service import (
+    SOURCE_EXCERPT_PREVIEW_CHARS,
     build_clarification_items,
     build_requirement_content,
     derive_business_objective,
     looks_like_internal_objective,
     resolve_clarification_state,
+    resolve_requirement_source_context,
 )
 from app.services.retrieval.service import build_evidence_items, build_requirement_query
 
@@ -79,6 +81,36 @@ class RequirementPipelineHelperTests(unittest.TestCase):
         self.assertNotIn("LCI", query)
         self.assertNotIn("软起动", query)
 
+    def test_build_requirement_query_picks_patterns_from_full_source_context(self) -> None:
+        """R5 #1 regression: retrieval query hints must read ``source_context``
+        so back-half technical patterns (≥2.5MW, 同步电机) become query terms.
+        The short preview should never be the only source the regex scans."""
+
+        query = build_requirement_query(
+            {
+                "project_name": "后半段项目",
+                "product_line": "hv_vfd",
+                "industry": "电气",
+                "business_objective": "完成项目",
+                # Short preview contains zero technical signals.
+                "source_excerpt": "项目背景说明。",
+                # Back-half spec sits on the new field.
+                "source_context": (
+                    "项目背景说明。\n\n"
+                    "技术参数：额定功率 ≥2.5MW，配套同步电机，防护等级 IP55，"
+                    "F级绝缘，冷却方式 IC611，必须保留 DCS 联锁接口。"
+                ),
+            }
+        )
+
+        self.assertIn("2.5MW", query)
+        self.assertIn("同步电机", query)
+        self.assertIn("IP55", query)
+        self.assertIn("F级绝缘", query)
+        self.assertIn("IC611", query)
+        self.assertIn("DCS", query)
+        self.assertIn("联锁", query)
+
     def test_build_evidence_items_translates_retrieval_results(self) -> None:
         items = build_evidence_items(
             [
@@ -121,6 +153,67 @@ class RequirementPipelineHelperTests(unittest.TestCase):
             source_excerpt="本项目面向110kV变电站场景，提供综合自动化与高压变频器配套方案。",
         )
         self.assertEqual(content["business_objective"], "本项目面向110kV变电站场景，提供综合自动化与高压变频器配套方案")
+
+    def test_build_requirement_content_keeps_full_context_alongside_short_preview(self) -> None:
+        """R5 #1 regression: ``source_excerpt`` is only the UI preview while
+        ``source_context`` carries the full filtered RFP context so downstream
+        consumers (outline / retrieval / section) can read back-half
+        requirements.  Before R5 ``source_excerpt`` was the only field and was
+        hard-truncated to 600 chars, dropping anything past the head slice.
+        """
+
+        project = SimpleNamespace(
+            name="后半段需求项目",
+            description="用于smoke和导出联调。",  # forces excerpt-driven business objective
+            product_line="hv_vfd",
+            industry="电气",
+        )
+        # Construct a payload where the back half carries the binding
+        # requirement.  The first ~700 chars are filler so the preview-sized
+        # head slice cannot accidentally include the back-half marker.
+        head_filler = "项目背景说明。" * 120  # ~720 chars
+        back_half = "技术参数：电机防护等级 IP55，额定功率 ≥2.5MW，必须支持双冗余控制。"
+        full = head_filler + "\n\n" + back_half
+        self.assertGreater(len(full), SOURCE_EXCERPT_PREVIEW_CHARS * 1.1)
+
+        content = build_requirement_content(project=project, source_excerpt=full)
+
+        # Short preview must respect the explicit UI limit and stay near the
+        # head of the text (legacy renderers still consume this field).
+        self.assertLessEqual(len(content["source_excerpt"]), SOURCE_EXCERPT_PREVIEW_CHARS)
+        self.assertNotIn("IP55", content["source_excerpt"])
+        self.assertNotIn("≥2.5MW", content["source_excerpt"])
+
+        # Full context must keep the back-half requirement intact so it can
+        # flow into outline / retrieval / section consumers via
+        # ``resolve_requirement_source_context``.
+        self.assertEqual(content["source_context"].strip(), full.strip())
+        self.assertIn("IP55", content["source_context"])
+        self.assertIn("≥2.5MW", content["source_context"])
+
+    def test_resolve_requirement_source_context_prefers_full_context(self) -> None:
+        full = "技术参数：电机防护等级 IP55，额定功率 ≥2.5MW。"
+        resolved = resolve_requirement_source_context(
+            {"source_context": full, "source_excerpt": "无关短摘要"}
+        )
+        self.assertEqual(resolved, full)
+
+    def test_resolve_requirement_source_context_falls_back_for_legacy_cards(self) -> None:
+        """Cards persisted before R5 only have ``source_excerpt``; the helper
+        must still return something so downstream prompts don't go blank."""
+
+        resolved = resolve_requirement_source_context(
+            {"source_excerpt": "  legacy 短摘要 content  "}
+        )
+        self.assertEqual(resolved, "legacy 短摘要 content")
+
+    def test_resolve_requirement_source_context_returns_empty_for_missing_fields(self) -> None:
+        self.assertEqual(resolve_requirement_source_context(None), "")
+        self.assertEqual(resolve_requirement_source_context({}), "")
+        self.assertEqual(
+            resolve_requirement_source_context({"source_context": "   ", "source_excerpt": ""}),
+            "",
+        )
 
 
 if __name__ == "__main__":

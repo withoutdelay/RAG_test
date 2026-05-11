@@ -15,6 +15,7 @@ from app.models.job import Job
 from app.models.project import Project
 from app.models.requirement_card import RequirementCard
 from app.schemas.retrieval import RetrievalFilters, RetrievalSearchRequest
+from app.services.requirement.service import resolve_requirement_source_context
 from app.services.retrieval.case_service import CaseLibraryService
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 from app.services.vectorstore.chunk_quality import flatten_heading_text, is_noise_chunk
@@ -41,12 +42,18 @@ TECHNICAL_QUERY_TERMS = (
     "联锁",
     "接口",
     "供货范围",
+    "防护等级",
+    "绝缘等级",
+    "冷却方式",
     "输入变压器",
     "输出变压器",
     "控制盘",
 )
 TECHNICAL_PATTERN = re.compile(
     r"\b\d+(?:\.\d+)?\s*(?:kV|KV|V|MW|kW|KW|MVA|kVA|Hz|A)\b|"
+    r"(?<![A-Z0-9])IP\s*\d{2,3}[A-Z]?(?![A-Z0-9])|"
+    r"(?:[BFH]级绝缘|绝缘等级\s*[:：]?\s*[BFH]级?)|"
+    r"(?<![A-Z0-9])IC\s*\d{2,4}[A-Z]?(?![A-Z0-9])|"
     r"(?:同步电机|异步电机|永磁电机|高炉鼓风机|鼓风机|压缩机|LCI|DCS|PLC|联锁|供货范围|接口|变频器|软起动)",
     re.IGNORECASE,
 )
@@ -93,7 +100,10 @@ def _extract_requirement_query_hints(content: dict[str, Any]) -> list[str]:
         part
         for part in (
             str(content.get("business_objective") or "").strip(),
-            str(content.get("source_excerpt") or "").strip(),
+            # R5: prefer the full filtered RFP context so retrieval query
+            # hints can pick up technical patterns (≥220V, IP55, …) that
+            # live past the 600-char preview.
+            resolve_requirement_source_context(content),
         )
         if part
     )

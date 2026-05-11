@@ -123,6 +123,18 @@ class Settings(BaseSettings):
     embedding_timeout_seconds: float = Field(default=45.0, validation_alias="EMBEDDING_TIMEOUT_SECONDS")
     embedding_batch_size: int = Field(default=16, validation_alias="EMBEDDING_BATCH_SIZE")
     background_job_worker_count: int = Field(default=1, validation_alias="BACKGROUND_JOB_WORKER_COUNT")
+    interactive_job_worker_count: int = Field(default=3, validation_alias="INTERACTIVE_JOB_WORKER_COUNT")
+    library_parse_job_worker_count: int = Field(default=1, validation_alias="LIBRARY_PARSE_JOB_WORKER_COUNT")
+    maintenance_job_worker_count: int = Field(default=1, validation_alias="MAINTENANCE_JOB_WORKER_COUNT")
+    rfp_light_parse_enabled: bool = Field(default=True, validation_alias="RFP_LIGHT_PARSE_ENABLED")
+    rfp_light_parse_max_seconds: float = Field(default=60.0, validation_alias="RFP_LIGHT_PARSE_MAX_SECONDS")
+    rfp_light_parse_max_pages: int = Field(default=30, validation_alias="RFP_LIGHT_PARSE_MAX_PAGES")
+    rfp_light_parse_max_chars: int = Field(default=80000, validation_alias="RFP_LIGHT_PARSE_MAX_CHARS")
+    rfp_light_parse_excerpt_chars: int = Field(default=20000, validation_alias="RFP_LIGHT_PARSE_EXCERPT_CHARS")
+    rfp_light_parse_store_full_text: bool = Field(default=True, validation_alias="RFP_LIGHT_PARSE_STORE_FULL_TEXT")
+    rfp_light_parse_embedding_enabled: bool = Field(default=False, validation_alias="RFP_LIGHT_PARSE_EMBEDDING_ENABLED")
+    rfp_light_parse_max_workers: int = Field(default=2, validation_alias="RFP_LIGHT_PARSE_MAX_WORKERS")
+    rfp_knowledge_extract_enabled: bool = Field(default=False, validation_alias="RFP_KNOWLEDGE_EXTRACT_ENABLED")
     visual_embedding_backend: Literal[
         "proxy",
         "auto",
@@ -291,6 +303,43 @@ def get_settings() -> Settings:
         settings.background_job_worker_count = 1
     if settings.background_job_worker_count > 4:
         settings.background_job_worker_count = 4
+    # Layered queue worker counts (interactive / library_parse / maintenance) introduced
+    # so realtime customer flows are insulated from long-running historical ingestion.
+    if settings.interactive_job_worker_count < 1:
+        settings.interactive_job_worker_count = 1
+    if settings.interactive_job_worker_count > 8:
+        settings.interactive_job_worker_count = 8
+    if settings.library_parse_job_worker_count < 1:
+        settings.library_parse_job_worker_count = 1
+    if settings.library_parse_job_worker_count > 4:
+        settings.library_parse_job_worker_count = 4
+    if settings.maintenance_job_worker_count < 1:
+        settings.maintenance_job_worker_count = 1
+    if settings.maintenance_job_worker_count > 2:
+        settings.maintenance_job_worker_count = 2
+    # RFP light parse safety rails
+    if settings.rfp_light_parse_max_seconds <= 0 or not math.isfinite(settings.rfp_light_parse_max_seconds):
+        settings.rfp_light_parse_max_seconds = 60.0
+    if settings.rfp_light_parse_max_seconds < 5.0:
+        settings.rfp_light_parse_max_seconds = 5.0
+    if settings.rfp_light_parse_max_seconds > 300.0:
+        settings.rfp_light_parse_max_seconds = 300.0
+    if settings.rfp_light_parse_max_pages < 1:
+        settings.rfp_light_parse_max_pages = 1
+    if settings.rfp_light_parse_max_pages > 200:
+        settings.rfp_light_parse_max_pages = 200
+    if settings.rfp_light_parse_max_chars < 1000:
+        settings.rfp_light_parse_max_chars = 1000
+    if settings.rfp_light_parse_max_chars > 500000:
+        settings.rfp_light_parse_max_chars = 500000
+    if settings.rfp_light_parse_excerpt_chars < 500:
+        settings.rfp_light_parse_excerpt_chars = 500
+    if settings.rfp_light_parse_excerpt_chars > settings.rfp_light_parse_max_chars:
+        settings.rfp_light_parse_excerpt_chars = settings.rfp_light_parse_max_chars
+    if settings.rfp_light_parse_max_workers < 1:
+        settings.rfp_light_parse_max_workers = 1
+    if settings.rfp_light_parse_max_workers > 8:
+        settings.rfp_light_parse_max_workers = 8
     if settings.embedding_timeout_seconds <= 0 or not math.isfinite(settings.embedding_timeout_seconds):
         settings.embedding_timeout_seconds = 45.0
     if settings.embedding_batch_size < 1:

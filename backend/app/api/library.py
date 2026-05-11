@@ -23,7 +23,7 @@ from app.models.job import Job
 from app.models.raw_document import RawDocument
 from app.schemas.artifacts import JobAcceptedData
 from app.schemas.common import APIResponse
-from app.services.knowledge import request_case_library_refresh
+from app.services.knowledge import submit_case_library_refresh_job
 from app.services.task_queue import get_background_task_queue
 from app.utils.object_storage import get_object_storage
 
@@ -648,7 +648,10 @@ async def route_material(
         await session.commit()
 
     if payload.route == "main_indexed":
-        background_tasks.add_task(request_case_library_refresh)
+        # Phase 1 / #4 review fix: route case library refresh through the
+        # maintenance queue so it is bounded by MAINTENANCE_JOB_WORKER_COUNT and
+        # visible in GET /api/v1/jobs/queue.
+        submit_case_library_refresh_job()
 
     item = await _build_material_item(session=session, entry=entry, state=state)
     return APIResponse(code=200, message="success", data=item)
@@ -688,7 +691,7 @@ async def rebuild_materials(
     ]
     if sample_filter and len(selected_entries) != len(sample_filter):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="One or more materials were not found")
-    queue = get_background_task_queue()
+    queue = get_background_task_queue("library_parse")
     if len(selected_entries) == 1:
         sample_id = str(selected_entries[0].get("sample_id") or "")
         active_job_id = queue.active_job_id(_material_dedupe_key(sample_id))
@@ -921,7 +924,7 @@ async def _run_rebuild_material_item_job(job_id: UUID, parent_job_id: UUID, entr
 async def recover_library_material_rebuild_jobs_on_startup() -> dict[str, int]:
     """Requeue library material rebuild jobs left queued/running by a previous backend process."""
 
-    queue = get_background_task_queue()
+    queue = get_background_task_queue("library_parse")
     recovered = 0
     skipped_terminal_parent = 0
     failed_invalid = 0
@@ -1080,7 +1083,10 @@ async def _update_library_parent_job(parent_job_id: UUID) -> None:
             parent.status = "failed" if failed else "succeeded"
             parent.error_code = "MaterialRebuildPartialFailure" if failed else None
             parent.completed_at = datetime.now(timezone.utc)
-            await request_case_library_refresh()
+            # Review R2 #2 fix: route the post-rebuild refresh through the
+            # maintenance queue rather than awaiting it inside the library_parse
+            # worker that is finalising the parent rebuild job.
+            submit_case_library_refresh_job()
         await session.commit()
 
 

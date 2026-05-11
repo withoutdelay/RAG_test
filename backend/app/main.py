@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app.api.artifacts import recover_interactive_jobs_on_startup
 from app.api.documents import recover_document_parse_jobs_on_startup
 from app.api.library import recover_library_material_rebuild_jobs_on_startup
 from app.api.router import api_router
@@ -33,6 +34,12 @@ async def lifespan(_: FastAPI):
     library_recovery = await recover_library_material_rebuild_jobs_on_startup()
     if library_recovery.get("recovered"):
         logger.info("Queued %s recovered library material rebuild job(s)", library_recovery["recovered"])
+    interactive_recovery = await recover_interactive_jobs_on_startup()
+    if interactive_recovery.get("failed_stale"):
+        logger.info(
+            "Failed %s stale interactive job(s) after restart",
+            interactive_recovery["failed_stale"],
+        )
     yield
 
 

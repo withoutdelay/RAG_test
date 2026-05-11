@@ -307,7 +307,14 @@ class CompositionApiTests(unittest.TestCase):
             self.assertEqual(regenerate_response.status_code, 202)
             self.assertEqual(regenerate_response.json()["data"]["status"], "queued")
             self.assertIsNone(regenerate_response.json()["data"]["resource_id"])
-            self.assertEqual(len(self.queue.submitted), 1)
+            # Phase 1 / #1 review fix: generate-outline + generate-sections now
+            # also route through the interactive queue, alongside the existing
+            # per-section regenerate submission.
+            submitted_job_types = [s["job_type"] for s in self.queue.submitted]
+            self.assertEqual(submitted_job_types.count("outline"), 1)
+            self.assertEqual(submitted_job_types.count("generate_draft"), 1)
+            self.assertEqual(submitted_job_types.count("generate_section"), 1)
+            self.assertEqual(len(self.queue.submitted), 3)
 
             update_section_response = client.patch(
                 f"/api/v1/projects/{self.outline_service.project_id}/sections/1",

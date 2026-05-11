@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db_session, get_session_factory
@@ -44,7 +45,7 @@ from app.services.export import ExportService
 from app.services.jobs import JobService
 from app.services.requirement import RequirementService
 from app.services.retrieval import EvidenceBundleService
-from app.services.task_queue import get_background_task_queue
+from app.services.task_queue import get_background_task_queue, get_background_task_queue_manager
 from app.services.validation import ValidationService
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 from app.utils.object_storage import get_object_storage
@@ -340,7 +341,7 @@ async def retrieve_evidence(
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    queue = get_background_task_queue()
+    queue = get_background_task_queue("interactive")
     dedupe_key = (
         f"retrieve:{project_id}:"
         f"{payload.requirement_card_id or 'latest'}:"
@@ -455,6 +456,24 @@ async def generate_outline(
     project = await session.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    queue = get_background_task_queue("interactive")
+    dedupe_key = f"generate-outline:{project_id}"
+    active_job_id = queue.active_job_id(dedupe_key)
+    if active_job_id is not None:
+        active_job = await session.get(Job, active_job_id)
+        if active_job is not None and active_job.status in {"queued", "running"}:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=JobAcceptedData(
+                    job_id=active_job.id,
+                    status=active_job.status,
+                    resource_id=None,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
+
     job = Job(
         project_id=project_id,
         job_type="outline",
@@ -470,15 +489,44 @@ async def generate_outline(
     session.add(job)
     await session.commit()
     await session.refresh(job)
-    background_tasks.add_task(
-        _run_generate_outline_job,
-        service,
-        job.id,
-        project_id,
-        payload.requirement_card_id,
-        payload.evidence_bundle_id,
-        payload.instructions,
+    submitted_job_id = queue.submit(
+        job_id=job.id,
+        job_type="outline",
+        label=f"generate-outline:{project_id}",
+        dedupe_key=dedupe_key,
+        priority=20,
+        run=lambda: _run_generate_outline_job(
+            service,
+            job.id,
+            project_id,
+            payload.requirement_card_id,
+            payload.evidence_bundle_id,
+            payload.instructions,
+        ),
     )
+    if submitted_job_id != job.id:
+        job.status = "failed"
+        job.error_code = "DuplicateQueuedJob"
+        job.output_ref = {
+            **(job.output_ref or {}),
+            "error": f"Duplicate outline job already active: {submitted_job_id}",
+            "progress": {"stage": "deduplicated"},
+        }
+        job.completed_at = datetime.now(timezone.utc)
+        await session.commit()
+        active_job = await session.get(Job, submitted_job_id)
+        if active_job is not None:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=JobAcceptedData(
+                    job_id=active_job.id,
+                    status=active_job.status,
+                    resource_id=None,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
+
     return APIResponse(
         code=202,
         message="success",
@@ -562,6 +610,23 @@ async def generate_sections(
     session: AsyncSession = Depends(get_db_session),
     service: SectionDraftService = Depends(get_section_draft_service),
 ) -> APIResponse[JobAcceptedData]:
+    queue = get_background_task_queue("interactive")
+    dedupe_key = f"generate-sections:{project_id}:{payload.outline_id or 'latest'}"
+    active_job_id = queue.active_job_id(dedupe_key)
+    if active_job_id is not None:
+        active_job = await session.get(Job, active_job_id)
+        if active_job is not None and active_job.status in {"queued", "running"}:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=JobAcceptedData(
+                    job_id=active_job.id,
+                    status=active_job.status,
+                    resource_id=None,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
+
     try:
         job = await service.create_generate_sections_job(
             session=session,
@@ -572,7 +637,37 @@ async def generate_sections(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ArtifactValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    background_tasks.add_task(_run_generate_sections_job, service, job.id, project_id, payload.outline_id)
+    submitted_job_id = queue.submit(
+        job_id=job.id,
+        job_type="generate_draft",
+        label=f"generate-sections:{project_id}",
+        dedupe_key=dedupe_key,
+        priority=20,
+        run=lambda: _run_generate_sections_job(service, job.id, project_id, payload.outline_id),
+    )
+    if submitted_job_id != job.id:
+        job.status = "failed"
+        job.error_code = "DuplicateQueuedJob"
+        job.output_ref = {
+            **(job.output_ref or {}),
+            "error": f"Duplicate generate-sections job already active: {submitted_job_id}",
+            "progress": {"stage": "deduplicated"},
+        }
+        job.completed_at = datetime.now(timezone.utc)
+        await session.commit()
+        active_job = await session.get(Job, submitted_job_id)
+        if active_job is not None:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=JobAcceptedData(
+                    job_id=active_job.id,
+                    status=active_job.status,
+                    resource_id=None,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
+
     return APIResponse(
         code=202,
         message="success",
@@ -617,7 +712,7 @@ async def regenerate_section(
     session: AsyncSession = Depends(get_db_session),
     service: SectionDraftService = Depends(get_section_draft_service),
 ) -> APIResponse[JobAcceptedData]:
-    queue = get_background_task_queue()
+    queue = get_background_task_queue("interactive")
     dedupe_key = f"generate-section:{project_id}:{section_id}"
     active_job_id = queue.active_job_id(dedupe_key)
     if active_job_id is not None:
@@ -879,7 +974,87 @@ async def download_latest_export(
 
 @router.get("/jobs/queue", response_model=APIResponse[dict[str, Any]])
 async def get_job_queue_status() -> APIResponse[dict[str, Any]]:
-    return APIResponse(code=200, message="success", data=get_background_task_queue().status())
+    return APIResponse(code=200, message="success", data=get_background_task_queue_manager().status())
+
+
+# Job types whose runtime state lives only in the in-memory ``interactive``
+# queue and the running asyncio event loop.  After a backend restart we cannot
+# safely re-execute them (the orchestrator state, evidence bundles and section
+# drafts may have moved on, and customers may have already retried) so we fail
+# them with a stable ``error_code`` and a human-readable Chinese message that
+# the frontend ``/api/v1/jobs/{job_id}`` poller surfaces verbatim.
+#
+# Review R3 #3 fix: the full-draft path enqueues a queue task with
+# ``job_type="generate_draft"`` (see ``generate_sections`` in this file) but
+# ``SectionDraftService.start_section_generation_job`` writes the DB row with
+# ``job_type="generate"``.  The DB-level recovery scan must therefore cover
+# *both* names — ``"generate_draft"`` for any future code path that aligns on
+# the queue name, and ``"generate"`` for the actual rows produced today.
+INTERACTIVE_RECOVERABLE_JOB_TYPES: tuple[str, ...] = (
+    "retrieve",
+    "outline",
+    "generate_draft",
+    "generate",
+    "generate_section",
+)
+
+
+async def recover_interactive_jobs_on_startup() -> dict[str, int]:
+    """Mark stale interactive-queue jobs as failed when the backend restarts.
+
+    Review R2 #3 fix: ``recover_document_parse_jobs_on_startup`` already covers
+    ``document_parse`` and ``rfp_light_parse``, but ``retrieve``, ``outline``,
+    ``generate_draft`` and ``generate_section`` jobs would otherwise stay in
+    ``queued`` / ``running`` state forever (the in-memory queue is gone, the
+    asyncio coroutine is gone, and the frontend polls until it gives up).
+
+    We deliberately do NOT requeue these jobs because:
+
+    1. Inputs may reference orchestrator-resident state (e.g. ``Project``
+       fields and section drafts the user already edited after the crash).
+    2. The user has very likely re-triggered the action via the UI; a silent
+       requeue would race with the new run and produce inconsistent output.
+    3. Failing fast lets the frontend show a clear error and a retry CTA.
+
+    The returned summary mirrors :func:`recover_document_parse_jobs_on_startup`
+    so callers (``app.main.lifespan``) can log a single line per recovery
+    function with consistent shape.
+    """
+
+    failed_stale = 0
+    skipped_terminal = 0
+
+    async with get_session_factory()() as session:
+        result = await session.scalars(
+            select(Job)
+            .where(Job.job_type.in_(INTERACTIVE_RECOVERABLE_JOB_TYPES))
+            .where(Job.status.in_(["queued", "running"]))
+            .order_by(Job.created_at.asc())
+        )
+        jobs = result.all()
+        for job in jobs:
+            previous_status = job.status
+            job.status = "failed"
+            job.error_code = "StaleAfterRestart"
+            job.output_ref = {
+                **(job.output_ref or {}),
+                "error": (
+                    "后端重启后，未完成的生成任务已自动失败。请在前端重新触发生成。"
+                ),
+                "progress": {
+                    "stage": "failed",
+                    "reason": "stale_after_restart",
+                    "previous_status": previous_status,
+                },
+            }
+            job.completed_at = datetime.now(timezone.utc)
+            failed_stale += 1
+        await session.commit()
+
+    return {
+        "failed_stale": failed_stale,
+        "skipped_terminal": skipped_terminal,
+    }
 
 
 @router.get("/jobs/{job_id}", response_model=APIResponse[JobRead])
