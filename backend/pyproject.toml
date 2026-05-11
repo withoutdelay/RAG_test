@@ -19,6 +19,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+aliyun-docmind = [
+  "alibabacloud-credentials>=1.0.2",
+  "alibabacloud-docmind-api20220711>=1.4.14",
+  "alibabacloud-tea-openapi>=0.3.7",
+  "alibabacloud-tea-util>=0.3.13",
+]
 parsing = [
   "docling>=2.0.0",
   "alibabacloud-credentials>=1.0.2",
