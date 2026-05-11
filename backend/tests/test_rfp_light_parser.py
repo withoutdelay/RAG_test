@@ -281,6 +281,10 @@ class RfpLightParserConfigClampTests(TestCase):
         self.assertGreaterEqual(settings.rfp_light_parse_max_chars, 1000)
         self.assertLessEqual(settings.rfp_light_parse_max_chars, 500_000)
         self.assertLessEqual(settings.rfp_light_parse_excerpt_chars, settings.rfp_light_parse_max_chars)
+        self.assertGreaterEqual(settings.rfp_light_parse_cloud_fallback_min_chars, 0)
+        self.assertLessEqual(settings.rfp_light_parse_cloud_fallback_min_chars, 20_000)
+        self.assertGreaterEqual(settings.rfp_light_parse_cloud_fallback_min_chars_per_page, 0)
+        self.assertLessEqual(settings.rfp_light_parse_cloud_fallback_min_chars_per_page, 1000)
 
 
 class RfpLightParserModuleSurfaceTests(TestCase):

@@ -9,12 +9,16 @@ from app.api.documents import (
     _build_document_upload_message,
     _clean_successful_parse_metadata,
     _extract_document_id_from_parse_job,
+    _rfp_light_cloud_fallback_reason,
+    _rfp_light_parse_metadata_for_response,
+    _sanitize_rfp_cloud_metadata,
     _resolve_document_parse_outcome,
     _resolve_section_anchor_from_catalog,
     _should_refresh_history_library,
 )
 from app.services.knowledge.library_refresh import dedupe_case_library_entries, filter_baseline_case_library_entries
 from app.services.parsing.document_sources import is_library_ready_entry
+from app.services.parsing.rfp_light_parser import RfpLightParseResult
 
 
 class DocumentApiHelperTests(unittest.TestCase):
@@ -281,6 +285,76 @@ class DocumentApiHelperTests(unittest.TestCase):
         self.assertFalse(cleaned["requires_cloud_parse"])
         self.assertEqual(cleaned["parse_gate_status"], "ready")
         self.assertIsNone(cleaned["parse_gate_reason"])
+
+    def test_rfp_light_cloud_fallback_reason_detects_scanned_pdf_density(self) -> None:
+        settings = SimpleNamespace(
+            rfp_light_parse_cloud_fallback_enabled=True,
+            rfp_light_parse_cloud_fallback_min_chars=500,
+            rfp_light_parse_cloud_fallback_min_chars_per_page=30,
+        )
+        result = RfpLightParseResult(
+            text="少量文字",
+            excerpt="少量文字",
+            page_count=8,
+            char_count=4,
+            source_format="pdf",
+        )
+
+        reason = _rfp_light_cloud_fallback_reason(result=result, settings=settings)
+
+        self.assertIsNotNone(reason)
+        self.assertIn("low_pdf_text_chars", reason or "")
+
+    def test_rfp_light_cloud_fallback_reason_skips_normal_text_pdf(self) -> None:
+        settings = SimpleNamespace(
+            rfp_light_parse_cloud_fallback_enabled=True,
+            rfp_light_parse_cloud_fallback_min_chars=500,
+            rfp_light_parse_cloud_fallback_min_chars_per_page=30,
+        )
+        result = RfpLightParseResult(
+            text="需求" * 1000,
+            excerpt="需求" * 20,
+            page_count=5,
+            char_count=2000,
+            source_format="pdf",
+        )
+
+        self.assertIsNone(_rfp_light_cloud_fallback_reason(result=result, settings=settings))
+
+    def test_sanitize_rfp_cloud_metadata_drops_large_docmind_payloads(self) -> None:
+        sanitized = _sanitize_rfp_cloud_metadata(
+            {
+                "parser": "aliyun-docmind",
+                "docmind_job_id": "job-1",
+                "docmind_status": {"large": True},
+                "docmind_result": {"large": True},
+                "docmind_endpoint": "docmind-api.cn-hangzhou.aliyuncs.com",
+            }
+        )
+
+        self.assertEqual(sanitized["parser"], "aliyun-docmind")
+        self.assertEqual(sanitized["docmind_job_id"], "job-1")
+        self.assertNotIn("docmind_status", sanitized)
+        self.assertNotIn("docmind_result", sanitized)
+
+    def test_rfp_light_parse_metadata_for_response_keeps_cloud_diagnostics_only(self) -> None:
+        result = RfpLightParseResult(
+            text="需求",
+            excerpt="需求",
+            char_count=2,
+            source_format="aliyun_docmind",
+            metadata={
+                "cloud_fallback_used": True,
+                "cloud_docmind_job_id": "job-1",
+                "subprocess_extras": {"ignored": True},
+            },
+        )
+
+        response_metadata = _rfp_light_parse_metadata_for_response(result)
+
+        self.assertTrue(response_metadata["rfp_light_parse_cloud_fallback_used"])
+        self.assertEqual(response_metadata["rfp_light_parse_cloud_docmind_job_id"], "job-1")
+        self.assertNotIn("rfp_light_parse_subprocess_extras", response_metadata)
 
     def test_build_document_upload_message_explains_parse_insufficient_history_document(self) -> None:
         message = _build_document_upload_message(

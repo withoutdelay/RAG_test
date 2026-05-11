@@ -139,6 +139,18 @@ class Settings(BaseSettings):
     rfp_light_parse_store_full_text: bool = Field(default=True, validation_alias="RFP_LIGHT_PARSE_STORE_FULL_TEXT")
     rfp_light_parse_embedding_enabled: bool = Field(default=False, validation_alias="RFP_LIGHT_PARSE_EMBEDDING_ENABLED")
     rfp_light_parse_max_workers: int = Field(default=2, validation_alias="RFP_LIGHT_PARSE_MAX_WORKERS")
+    rfp_light_parse_cloud_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias="RFP_LIGHT_PARSE_CLOUD_FALLBACK_ENABLED",
+    )
+    rfp_light_parse_cloud_fallback_min_chars: int = Field(
+        default=500,
+        validation_alias="RFP_LIGHT_PARSE_CLOUD_FALLBACK_MIN_CHARS",
+    )
+    rfp_light_parse_cloud_fallback_min_chars_per_page: int = Field(
+        default=30,
+        validation_alias="RFP_LIGHT_PARSE_CLOUD_FALLBACK_MIN_CHARS_PER_PAGE",
+    )
     rfp_knowledge_extract_enabled: bool = Field(default=False, validation_alias="RFP_KNOWLEDGE_EXTRACT_ENABLED")
     visual_embedding_backend: Literal[
         "proxy",
@@ -386,6 +398,14 @@ def get_settings() -> Settings:
         settings.rfp_light_parse_max_workers = 1
     if settings.rfp_light_parse_max_workers > 8:
         settings.rfp_light_parse_max_workers = 8
+    if settings.rfp_light_parse_cloud_fallback_min_chars < 0:
+        settings.rfp_light_parse_cloud_fallback_min_chars = 0
+    if settings.rfp_light_parse_cloud_fallback_min_chars > 20000:
+        settings.rfp_light_parse_cloud_fallback_min_chars = 20000
+    if settings.rfp_light_parse_cloud_fallback_min_chars_per_page < 0:
+        settings.rfp_light_parse_cloud_fallback_min_chars_per_page = 0
+    if settings.rfp_light_parse_cloud_fallback_min_chars_per_page > 1000:
+        settings.rfp_light_parse_cloud_fallback_min_chars_per_page = 1000
     if settings.embedding_timeout_seconds <= 0 or not math.isfinite(settings.embedding_timeout_seconds):
         settings.embedding_timeout_seconds = 45.0
     if settings.embedding_batch_size < 1:

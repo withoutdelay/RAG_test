@@ -51,6 +51,7 @@ from app.services.parsing.parser import CloudParseRequiredError, ParserService
 from app.services.parsing.rfp_light_parser import (
     RfpLightParseError,
     RfpLightParseInsufficient,
+    RfpLightParseResult,
     RfpLightParser,
 )
 from app.services.parsing.section_catalog import flatten_section_catalog, normalize_section_heading
@@ -734,6 +735,158 @@ def _save_rfp_light_full_text(*, document_id: UUID, text: str) -> str:
     return str(target)
 
 
+def _rfp_light_cloud_fallback_reason(*, result: RfpLightParseResult, settings: object) -> str | None:
+    if not bool(getattr(settings, "rfp_light_parse_cloud_fallback_enabled", True)):
+        return None
+    if str(result.source_format or "").strip().lower() != "pdf":
+        return None
+
+    page_count = int(result.page_count or 0)
+    char_count = int(result.char_count or 0)
+    if page_count <= 0:
+        return None
+
+    min_chars = int(getattr(settings, "rfp_light_parse_cloud_fallback_min_chars", 500) or 0)
+    min_chars_per_page = int(getattr(settings, "rfp_light_parse_cloud_fallback_min_chars_per_page", 30) or 0)
+    if char_count <= 0:
+        return f"empty_pdf_text:pages={page_count}"
+    if min_chars > 0 and page_count >= 2 and char_count < min_chars:
+        return f"low_pdf_text_chars:chars={char_count}:pages={page_count}:min={min_chars}"
+    if min_chars_per_page > 0 and (char_count / max(page_count, 1)) < min_chars_per_page:
+        return (
+            f"low_pdf_text_density:chars={char_count}:pages={page_count}:"
+            f"min_per_page={min_chars_per_page}"
+        )
+    return None
+
+
+def _rfp_light_exception_cloud_fallback_reason(
+    *,
+    exc: RfpLightParseInsufficient,
+    file_path: Path,
+    settings: object,
+) -> str | None:
+    if not bool(getattr(settings, "rfp_light_parse_cloud_fallback_enabled", True)):
+        return None
+    suffix = file_path.suffix.lower()
+    supported_reasons = {
+        "empty_text",
+        "legacy_doc_format",
+        "unsupported_format",
+        "extraction_failed",
+        "timeout",
+    }
+    if exc.reason in supported_reasons or suffix in {".pdf", ".doc"}:
+        return f"local_{exc.reason or 'insufficient'}"
+    return None
+
+
+def _sanitize_rfp_cloud_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {
+        "parser",
+        "parser_backend_requested",
+        "parser_backend_used",
+        "docmind_endpoint",
+        "docmind_job_id",
+        "format",
+        "original_format",
+        "docmind_input_converted_to_pdf",
+        "docmind_input_original_format",
+        "docmind_input_original_size_bytes",
+        "docmind_input_pdf_size_bytes",
+        "docmind_input_conversion_skipped",
+        "docmind_llm_enhancement",
+        "docmind_output_html_table",
+        "asset_extraction_enabled",
+        "image_count",
+        "figure_asset_count",
+        "parse_gate_status",
+        "parse_gate_reason",
+    }
+    sanitized: dict[str, Any] = {}
+    for key in allowed_keys:
+        if key in metadata:
+            value = metadata[key]
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                sanitized[key] = value
+    return sanitized
+
+
+async def _parse_rfp_with_cloud_fallback(
+    *,
+    file_path: Path,
+    settings: object,
+    fallback_reason: str,
+) -> RfpLightParseResult:
+    from app.services.parsing.aliyun_docmind_parser import AliyunDocMindParser
+
+    started_at = time.perf_counter()
+    parsed = await AliyunDocMindParser(settings=settings).parse(str(file_path), include_assets=False)  # type: ignore[arg-type]
+    normalized_text = (parsed.markdown or "").replace("\u0000", "").strip()
+    if not normalized_text:
+        raise RfpLightParseInsufficient(
+            reason="cloud_empty_text",
+            message="云解析未能从 RFP 文件中提取到可用文本。",
+            metadata={
+                "cloud_fallback_reason": fallback_reason,
+                **{
+                    f"cloud_{key}": value
+                    for key, value in _sanitize_rfp_cloud_metadata(parsed.metadata or {}).items()
+                },
+            },
+        )
+
+    excerpt_chars = int(getattr(settings, "rfp_light_parse_excerpt_chars", 20000) or 20000)
+    metadata = {
+        "cloud_fallback_used": True,
+        "cloud_fallback_reason": fallback_reason,
+        **{f"cloud_{key}": value for key, value in _sanitize_rfp_cloud_metadata(parsed.metadata or {}).items()},
+    }
+    return RfpLightParseResult(
+        text=normalized_text,
+        excerpt=normalized_text[:excerpt_chars],
+        page_count=0,
+        char_count=len(normalized_text),
+        elapsed_seconds=time.perf_counter() - started_at,
+        source_format="aliyun_docmind",
+        truncated_chars=False,
+        truncated_pages=False,
+        metadata=metadata,
+    )
+
+
+def _rfp_light_parse_metadata_for_response(result: RfpLightParseResult) -> dict[str, Any]:
+    metadata = dict(result.metadata or {})
+    allowed_keys = {
+        "cloud_fallback_used",
+        "cloud_fallback_reason",
+        "cloud_fallback_failed",
+        "cloud_fallback_error",
+        "cloud_parser",
+        "cloud_parser_backend_used",
+        "cloud_docmind_endpoint",
+        "cloud_docmind_job_id",
+        "cloud_format",
+        "cloud_original_format",
+        "cloud_docmind_input_converted_to_pdf",
+        "cloud_docmind_input_original_format",
+        "cloud_docmind_input_original_size_bytes",
+        "cloud_docmind_input_pdf_size_bytes",
+        "cloud_docmind_input_conversion_skipped",
+        "cloud_docmind_llm_enhancement",
+        "cloud_docmind_output_html_table",
+        "cloud_asset_extraction_enabled",
+        "cloud_image_count",
+        "cloud_figure_asset_count",
+        "local_fallback_used_after_cloud_failure",
+    }
+    return {
+        f"rfp_light_parse_{key}": value
+        for key, value in metadata.items()
+        if key in allowed_keys and (isinstance(value, (str, int, float, bool)) or value is None)
+    }
+
+
 async def _run_rfp_light_parse_job(job_id: UUID, document_id: UUID) -> None:
     """Execute the lightweight RFP parse pipeline on the ``interactive`` queue.
 
@@ -800,44 +953,151 @@ async def _run_rfp_light_parse_job(job_id: UUID, document_id: UUID) -> None:
             try:
                 result = await parser.parse(materialized.path)
             except RfpLightParseInsufficient as exc:
-                timings["extracting_text"] = time.perf_counter() - stage_start
-                document.parse_status = "parse_insufficient"
-                document.meta = {
-                    **(document.meta or {}),
-                    "rfp_parse_mode": "light",
-                    "rfp_parse_error_reason": exc.reason,
-                    "rfp_parse_error_message": str(exc),
-                    **{f"rfp_parse_{key}": value for key, value in (exc.metadata or {}).items()},
-                }
-                job.status = "succeeded"
-                job.error_code = (exc.reason or "")[:50] or None
+                cloud_reason = _rfp_light_exception_cloud_fallback_reason(
+                    exc=exc,
+                    file_path=materialized.path,
+                    settings=settings,
+                )
+                if cloud_reason:
+                    timings["extracting_text"] = time.perf_counter() - stage_start
+                    stage_start = time.perf_counter()
+                    job.output_ref = {
+                        **(job.output_ref or {}),
+                        "progress": {
+                            "stage": "cloud_extracting_text",
+                            "document_id": str(document_id),
+                            "timings": dict(timings),
+                            "rfp_parse_mode": "light",
+                            "cloud_fallback_reason": cloud_reason,
+                        },
+                    }
+                    await session.commit()
+                    try:
+                        result = await _parse_rfp_with_cloud_fallback(
+                            file_path=materialized.path,
+                            settings=settings,
+                            fallback_reason=cloud_reason,
+                        )
+                    except RfpLightParseInsufficient as cloud_exc:
+                        timings["cloud_extracting_text"] = time.perf_counter() - stage_start
+                        document.parse_status = "parse_insufficient"
+                        document.meta = {
+                            **(document.meta or {}),
+                            "rfp_parse_mode": "light",
+                            "rfp_parse_error_reason": cloud_exc.reason,
+                            "rfp_parse_error_message": str(cloud_exc),
+                            "rfp_light_parse_cloud_fallback_attempted": True,
+                            "rfp_light_parse_cloud_fallback_reason": cloud_reason,
+                            **{f"rfp_parse_{key}": value for key, value in (cloud_exc.metadata or {}).items()},
+                        }
+                        job.status = "succeeded"
+                        job.error_code = (cloud_exc.reason or "")[:50] or None
+                        job.output_ref = {
+                            **(job.output_ref or {}),
+                            "document_id": str(document.id),
+                            "parse_status": document.parse_status,
+                            "rfp_parse_mode": "light",
+                            "rfp_parse_error_reason": cloud_exc.reason,
+                            "rfp_light_parse_cloud_fallback_attempted": True,
+                            "rfp_light_parse_cloud_fallback_reason": cloud_reason,
+                            "chunk_count": 0,
+                            "indexed_chunk_count": 0,
+                            "figure_asset_count": 0,
+                            "raw_document_id": None,
+                            "progress": {
+                                "stage": "completed",
+                                "document_id": str(document.id),
+                                "timings": dict(timings),
+                                "elapsed_seconds": time.perf_counter() - overall_started,
+                                "rfp_parse_mode": "light",
+                            },
+                        }
+                        job.completed_at = datetime.now(timezone.utc)
+                        await session.commit()
+                        logger.info(
+                            "RFP cloud fallback insufficient: document_id=%s local_reason=%s cloud_reason=%s",
+                            document_id,
+                            exc.reason,
+                            cloud_exc.reason,
+                        )
+                        return
+                    timings["cloud_extracting_text"] = time.perf_counter() - stage_start
+                else:
+                    timings["extracting_text"] = time.perf_counter() - stage_start
+                    document.parse_status = "parse_insufficient"
+                    document.meta = {
+                        **(document.meta or {}),
+                        "rfp_parse_mode": "light",
+                        "rfp_parse_error_reason": exc.reason,
+                        "rfp_parse_error_message": str(exc),
+                        **{f"rfp_parse_{key}": value for key, value in (exc.metadata or {}).items()},
+                    }
+                    job.status = "succeeded"
+                    job.error_code = (exc.reason or "")[:50] or None
+                    job.output_ref = {
+                        **(job.output_ref or {}),
+                        "document_id": str(document.id),
+                        "parse_status": document.parse_status,
+                        "rfp_parse_mode": "light",
+                        "rfp_parse_error_reason": exc.reason,
+                        "chunk_count": 0,
+                        "indexed_chunk_count": 0,
+                        "figure_asset_count": 0,
+                        "raw_document_id": None,
+                        "progress": {
+                            "stage": "completed",
+                            "document_id": str(document.id),
+                            "timings": dict(timings),
+                            "elapsed_seconds": time.perf_counter() - overall_started,
+                            "rfp_parse_mode": "light",
+                        },
+                    }
+                    job.completed_at = datetime.now(timezone.utc)
+                    await session.commit()
+                    logger.info(
+                        "RFP light parse insufficient: document_id=%s reason=%s",
+                        document_id,
+                        exc.reason,
+                    )
+                    return
+            timings.setdefault("extracting_text", time.perf_counter() - stage_start)
+            cloud_reason = _rfp_light_cloud_fallback_reason(result=result, settings=settings)
+            if cloud_reason:
+                stage_start = time.perf_counter()
                 job.output_ref = {
                     **(job.output_ref or {}),
-                    "document_id": str(document.id),
-                    "parse_status": document.parse_status,
-                    "rfp_parse_mode": "light",
-                    "rfp_parse_error_reason": exc.reason,
-                    "chunk_count": 0,
-                    "indexed_chunk_count": 0,
-                    "figure_asset_count": 0,
-                    "raw_document_id": None,
                     "progress": {
-                        "stage": "completed",
-                        "document_id": str(document.id),
+                        "stage": "cloud_extracting_text",
+                        "document_id": str(document_id),
                         "timings": dict(timings),
-                        "elapsed_seconds": time.perf_counter() - overall_started,
                         "rfp_parse_mode": "light",
+                        "cloud_fallback_reason": cloud_reason,
                     },
                 }
-                job.completed_at = datetime.now(timezone.utc)
                 await session.commit()
-                logger.info(
-                    "RFP light parse insufficient: document_id=%s reason=%s",
-                    document_id,
-                    exc.reason,
-                )
-                return
-            timings["extracting_text"] = time.perf_counter() - stage_start
+                try:
+                    result = await _parse_rfp_with_cloud_fallback(
+                        file_path=materialized.path,
+                        settings=settings,
+                        fallback_reason=cloud_reason,
+                    )
+                except Exception as cloud_exc:  # noqa: BLE001 - keep usable local text if cloud fallback fails
+                    timings["cloud_extracting_text"] = time.perf_counter() - stage_start
+                    result.metadata = {
+                        **(result.metadata or {}),
+                        "cloud_fallback_failed": True,
+                        "cloud_fallback_reason": cloud_reason,
+                        "cloud_fallback_error": str(cloud_exc)[:500],
+                        "local_fallback_used_after_cloud_failure": True,
+                    }
+                    logger.warning(
+                        "RFP cloud fallback failed; using local light text: document_id=%s reason=%s error=%s",
+                        document_id,
+                        cloud_reason,
+                        cloud_exc,
+                    )
+                else:
+                    timings["cloud_extracting_text"] = time.perf_counter() - stage_start
 
             stage_start = time.perf_counter()
             text_storage_path: str | None = None
@@ -861,6 +1121,7 @@ async def _run_rfp_light_parse_job(job_id: UUID, document_id: UUID) -> None:
                 "rfp_light_parse_source_format": result.source_format,
                 "rfp_light_parse_truncated_chars": result.truncated_chars,
                 "rfp_light_parse_truncated_pages": result.truncated_pages,
+                **_rfp_light_parse_metadata_for_response(result),
             }
 
             job.status = "succeeded"
@@ -875,6 +1136,8 @@ async def _run_rfp_light_parse_job(job_id: UUID, document_id: UUID) -> None:
                 "rfp_text_char_count": result.char_count,
                 "rfp_light_parse_pages": result.page_count,
                 "rfp_light_parse_elapsed_seconds": result.elapsed_seconds,
+                "rfp_light_parse_source_format": result.source_format,
+                **_rfp_light_parse_metadata_for_response(result),
                 "chunk_count": 0,
                 "indexed_chunk_count": 0,
                 "figure_asset_count": 0,
