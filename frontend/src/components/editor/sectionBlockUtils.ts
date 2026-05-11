@@ -52,9 +52,9 @@ export function getStatusVariant(status: SectionDraft['status']): 'default' | 's
 }
 
 export function formatIntentLabel(key: string): string {
-  if (key === 'title_text') return 'Title Intent';
-  if (key === 'detail_text') return 'Detail Intent';
-  if (key === 'context_text') return 'Context Intent';
+  if (key === 'title_text') return '标题意图';
+  if (key === 'detail_text') return '细节意图';
+  if (key === 'context_text') return '上下文意图';
   return key;
 }
 
@@ -75,7 +75,7 @@ export function formatSelectionReason(reason: string): string {
   const value = rawValue?.trim();
   switch (rawKey) {
     case 'generation_mode_not_reuse_first':
-      return '当前章节不在 reuse_first 模式';
+      return '当前章节不在“优先复用”模式';
     case 'no_reusable_blocks':
       return '当前没有可复用块';
     case 'top_section_score':
@@ -89,27 +89,27 @@ export function formatSelectionReason(reason: string): string {
     case 'full_section_block_count':
       return `Top1 对齐块数 ${value || '0'}`;
     case 'full_section_within_budget':
-      return value === 'True' || value === 'true' ? '整章材料在 token 预算内' : '整章材料超出 token 预算';
+      return value === 'True' || value === 'true' ? '整章材料在 Token 预算内' : '整章材料超出 Token 预算';
     case 'selected_baseline_fallback':
-      return '本次走 baseline fallback';
+      return '本次走基线回退';
     case 'selected_full_section':
-      return '本次走 full_section';
+      return '本次走整章复用';
     case 'section_pack_due_to_missing_top_section':
-      return '降级到 section_pack：没有稳定的 Top1 章节';
+      return '降级到章节包：没有稳定的第一候选章节';
     case 'section_pack_due_to_low_top_section_score':
-      return '降级到 section_pack：Top1 章节分数不够高';
+      return '降级到章节包：第一候选章节分数不够高';
     case 'section_pack_due_to_low_section_lead':
-      return '降级到 section_pack：Top1 与 Top2 分差不足';
+      return '降级到章节包：第一候选与第二候选分差不足';
     case 'section_pack_due_to_missing_aligned_blocks':
-      return '降级到 section_pack：Top1 章节下没有对齐块';
+      return '降级到章节包：第一候选章节下没有对齐块';
     case 'section_pack_due_to_token_budget':
-      return '降级到 section_pack：整章材料超出 token 预算';
+      return '降级到章节包：整章材料超出 Token 预算';
     case 'selected_section_pack':
-      return '本次走 section_pack';
+      return '本次走章节包';
     case 'single_section_candidate':
       return '只有一个章节候选';
     case 'no_top_section_block_alignment':
-      return 'Top1 章节没有找到对齐块';
+      return '第一候选章节没有找到对齐块';
     case 'no_section_candidate':
       return '当前没有章节候选';
     default:

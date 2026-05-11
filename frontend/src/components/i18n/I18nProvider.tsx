@@ -32,8 +32,24 @@ const SKIP_SELECTOR = [
   '.prose',
 ].join(',');
 
+const ATTRIBUTE_SKIP_SELECTOR = [
+  '[data-i18n-skip]',
+  'pre',
+  'code',
+  'kbd',
+  'samp',
+  'script',
+  'style',
+  '[contenteditable="true"]',
+  '.prose',
+].join(',');
+
 function shouldSkipElement(element: Element | null): boolean {
   return Boolean(element?.closest(SKIP_SELECTOR));
+}
+
+function shouldSkipAttributeElement(element: Element | null): boolean {
+  return Boolean(element?.closest(ATTRIBUTE_SKIP_SELECTOR));
 }
 
 function walkTextNodes(root: ParentNode, callback: (node: Text) => void) {
@@ -99,7 +115,7 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
       elements.push(...Array.from((root as Element | Document['body']).querySelectorAll?.('*') ?? []));
 
       for (const element of elements) {
-        if (shouldSkipElement(element)) {
+        if (shouldSkipAttributeElement(element)) {
           continue;
         }
         for (const attr of TRANSLATABLE_ATTRIBUTES) {
