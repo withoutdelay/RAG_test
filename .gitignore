@@ -1,4 +1,6 @@
 .env
+.env.runtime
+.env.bak-*
 .venv/
 
 __pycache__/
@@ -10,6 +12,12 @@ __pycache__/
 .ruff_cache/
 
 .DS_Store
+._*
+**/._*
+**/*.bak-*
+
+backups/
+runtime-data/
 
 backend/data/uploads/
 backend/data/pdf_audits/
