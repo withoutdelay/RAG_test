@@ -53,9 +53,9 @@ services:
       context: ./backend
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim}
-        BACKEND_EXTRAS: ${BACKEND_EXTRAS:-parsing}
-        INSTALL_CPU_TORCH: ${INSTALL_CPU_TORCH:-true}
-        INSTALL_LIBREOFFICE: ${INSTALL_LIBREOFFICE:-true}
+        BACKEND_EXTRAS: ${BACKEND_EXTRAS:-aliyun-docmind}
+        INSTALL_CPU_TORCH: ${INSTALL_CPU_TORCH:-false}
+        INSTALL_LIBREOFFICE: ${INSTALL_LIBREOFFICE:-false}
         APT_MIRROR: ${APT_MIRROR:-}
         TORCH_CPU_INDEX_URL: ${TORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
