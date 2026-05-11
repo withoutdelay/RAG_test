@@ -54,9 +54,13 @@ RUN if [ -n "$BACKEND_EXTRAS" ]; then pip install --no-cache-dir ".[$BACKEND_EXT
 
 RUN MODELS_DIR="${DOCLING_ARTIFACTS_PATH:-/opt/docling/models}" && \
     mkdir -p "${HF_HOME}" "${TRANSFORMERS_CACHE}" "${DOCLING_CACHE_DIR}" "${MODELS_DIR}" && \
-    if [ "${PREWARM_DOCLING_MODELS}" = "true" ]; then \
-      python -m docling.cli.models download --output-dir "${MODELS_DIR}" --quiet; \
-    fi
+    case ",${BACKEND_EXTRAS}," in \
+      *",parsing,"*|*",full,"*) \
+        if [ "${PREWARM_DOCLING_MODELS}" = "true" ]; then \
+          python -m docling.cli.models download --output-dir "${MODELS_DIR}" --quiet; \
+        fi \
+        ;; \
+    esac
 
 COPY app ./app
 RUN mkdir -p \
