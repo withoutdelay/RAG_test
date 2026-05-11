@@ -21,12 +21,12 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from 'sonner';
 
 const ROUTE_LABELS: Record<MaterialRoute, string> = {
-  main_indexed: 'Main Indexed',
-  review_pending: 'Review Pending',
-  holdout_eval: 'Holdout Eval',
-  conversion_required: 'Conversion Required',
-  conversion_failed: 'Conversion Failed',
-  excluded: 'Excluded',
+  main_indexed: '主库',
+  review_pending: '待审阅',
+  holdout_eval: '验证集',
+  conversion_required: '待转换',
+  conversion_failed: '转换失败',
+  excluded: '已排除',
 };
 
 const ROUTE_OPTIONS: MaterialRoute[] = [
@@ -55,6 +55,17 @@ const ASSET_FILTER_LABELS: Record<AssetFilter, string> = {
   review_required: 'Needs Review',
   repaired: 'Repaired',
   rejected: 'Rejected',
+};
+
+const QUALITY_FLAG_LABELS: Record<string, string> = {
+  requires_aliyun_docmind: '需阿里云解析',
+  parse_failed: '解析失败',
+  parse_insufficient: '解析不充分',
+  processing: '解析中',
+  not_ingested: '未入库',
+  expected_images_but_no_figure_assets: '应有图片但未解析出图资产',
+  all_assets_are_storage_fallback: '图片仅有源文件回退',
+  conversion_required: '待转换',
 };
 
 interface JobQueueStatus {
@@ -151,25 +162,54 @@ function countAssetsByFilter(assets: LibraryMaterialAsset[], filter: AssetFilter
   return assets.filter((asset) => matchesAssetFilter(asset, filter)).length;
 }
 
-function routeBadgeClass(route: MaterialRoute): string {
-  switch (route) {
+function materialStatusLabel(item: LibraryMaterial): string {
+  if (item.material_status_label) return item.material_status_label;
+  if (item.parse_status === 'done') {
+    return item.route === 'main_indexed' ? '主库已入库' : ROUTE_LABELS[item.route];
+  }
+  if (PROCESSING_PARSE_STATUSES.has(item.parse_status)) return '解析中';
+  if (item.parse_status === 'failed') return '解析失败';
+  if (item.parse_status === 'parse_insufficient') return '解析不充分';
+  return item.parse_status || '未知状态';
+}
+
+function materialStatusClass(item: LibraryMaterial): string {
+  const status = item.material_status || item.parse_status;
+  switch (status) {
     case 'main_indexed':
       return 'bg-green-500 hover:bg-green-600';
     case 'review_pending':
       return 'border-amber-300 bg-amber-50 text-amber-800';
     case 'holdout_eval':
       return 'border-blue-300 bg-blue-50 text-blue-800';
-    case 'conversion_required':
-    case 'conversion_failed':
-      return 'border-slate-300 bg-slate-50 text-slate-800';
-    case 'excluded':
+    case 'processing':
+      return 'border-blue-300 bg-blue-50 text-blue-800';
+    case 'cloud_parse_required':
       return 'border-red-300 bg-red-50 text-red-800';
+    case 'parse_failed':
+    case 'conversion_failed':
+      return 'border-red-300 bg-red-50 text-red-800';
+    case 'parse_insufficient':
+    case 'conversion_required':
+      return 'border-amber-300 bg-amber-50 text-amber-800';
+    case 'excluded':
+      return 'border-slate-300 bg-slate-50 text-slate-800';
     default:
       return '';
   }
 }
 
+function formatQualityFlag(flag: string): string {
+  return QUALITY_FLAG_LABELS[flag] || flag.replace(/^parse_status:/, '解析状态：');
+}
+
 function parseStatusIcon(item: LibraryMaterial) {
+  if (item.material_status === 'processing' || PROCESSING_PARSE_STATUSES.has(item.parse_status)) {
+    return <Loader2 className="h-4 w-4 animate-spin text-blue-600" />;
+  }
+  if (item.material_status === 'cloud_parse_required' || item.requires_cloud_parse) {
+    return <ShieldAlert className="h-4 w-4 text-red-600" />;
+  }
   if (item.quality_flags.length > 0) {
     return <ShieldAlert className="h-4 w-4 text-amber-600" />;
   }
@@ -569,16 +609,19 @@ export default function LibraryMaterialsPage() {
                       </div>
                       <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                         <Badge variant="outline">{item.file_format}</Badge>
-                        {item.source_kind === 'uploaded_document' ? <Badge variant="outline">uploaded</Badge> : null}
+                        {item.source_kind === 'uploaded_document' ? <Badge variant="outline">已上传</Badge> : null}
                         <span>{formatBytes(item.file_size_bytes)}</span>
+                        <span>路线：{ROUTE_LABELS[item.route]}</span>
                         <span>profile: {item.detected_profile || 'unknown'}</span>
-                        <span>parse: {item.parse_status}</span>
                         {item.parser_backend ? <span>parser: {item.parser_backend}</span> : null}
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant={item.route === 'main_indexed' ? 'default' : 'outline'} className={routeBadgeClass(item.route)}>
-                        {ROUTE_LABELS[item.route]}
+                      <Badge
+                        variant={item.material_status === 'main_indexed' ? 'default' : 'outline'}
+                        className={materialStatusClass(item)}
+                      >
+                        {materialStatusLabel(item)}
                       </Badge>
                       <Button
                         variant="outline"
@@ -608,11 +651,17 @@ export default function LibraryMaterialsPage() {
                     <div>tables: {metricValue(item, 'table_count', item.table_count)}</div>
                   </div>
 
+                  {item.requires_cloud_parse ? (
+                    <p className="text-sm text-red-700">
+                      本地解析链路无法稳定处理该文档，需要启用阿里云文档解析后重新解析。
+                    </p>
+                  ) : null}
+
                   {item.quality_flags.length > 0 && (
                     <div className="flex flex-wrap gap-2">
                       {item.quality_flags.map((flag) => (
                         <Badge key={flag} variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
-                          {flag}
+                          {formatQualityFlag(flag)}
                         </Badge>
                       ))}
                     </div>
@@ -656,9 +705,13 @@ export default function LibraryMaterialsPage() {
               </div>
             ) : selectedMaterial ? (
               <div className="space-y-5 p-5">
-                <div className="grid gap-3 md:grid-cols-5">
+                <div className="grid gap-3 md:grid-cols-6">
                   <div className="rounded-md border p-3">
-                    <p className="text-xs text-muted-foreground">Route</p>
+                    <p className="text-xs text-muted-foreground">状态</p>
+                    <p className="mt-1 font-medium">{materialStatusLabel(selectedMaterial)}</p>
+                  </div>
+                  <div className="rounded-md border p-3">
+                    <p className="text-xs text-muted-foreground">路线</p>
                     <p className="mt-1 font-medium">{ROUTE_LABELS[selectedMaterial.route]}</p>
                   </div>
                   <div className="rounded-md border p-3">
@@ -683,11 +736,21 @@ export default function LibraryMaterialsPage() {
                   <div className="flex flex-wrap gap-2">
                     {selectedMaterial.quality_flags.map((flag) => (
                       <Badge key={flag} variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
-                        {flag}
+                        {formatQualityFlag(flag)}
                       </Badge>
                     ))}
                   </div>
                 )}
+
+                {selectedMaterial.requires_cloud_parse ? (
+                  <Alert>
+                    <ShieldAlert className="h-4 w-4" />
+                    <AlertTitle>需要阿里云文档解析</AlertTitle>
+                    <AlertDescription>
+                      本地解析结果不足或失败。配置阿里云文档解析 AccessKey 后，重新解析该材料即可进入云解析链路。
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
 
                 <div>
                   <div className="mb-3 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">

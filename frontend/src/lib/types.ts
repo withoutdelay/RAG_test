@@ -200,6 +200,55 @@ export interface RecommendedAsset {
   metadata?: Record<string, unknown>;
 }
 
+export interface AssetSourceBinding {
+  sample_id?: string | null;
+  raw_document_id?: string | null;
+  source_section_id?: string | null;
+  heading_path?: string | null;
+  page_no?: number | string | null;
+  high_confidence_eligible?: boolean;
+  tier?: 'high' | 'medium' | 'low' | string;
+  missing_fields?: string[];
+}
+
+export interface AssetStabilityGate {
+  status?: 'candidate' | 'blocked' | string;
+  blocking_flags?: string[];
+  warning_flags?: string[];
+  source_binding?: AssetSourceBinding;
+}
+
+export interface AssetStabilityDiagnostics {
+  status?: string;
+  needs_figure?: boolean;
+  selected_primary?: RecommendedAsset | null;
+  alternatives?: RecommendedAsset[];
+  filtered_assets?: RecommendedAsset[];
+  filtered_count?: number;
+  filter_reason_counts?: Record<string, number>;
+  missing_asset_diagnostics?: Array<Record<string, unknown>>;
+  missing_asset_explainable?: boolean;
+}
+
+export interface AssetRetrievalTrace {
+  query?: string;
+  asset_types?: string[];
+  skipped_optional_search?: boolean;
+  selected_count?: number;
+  candidate_count?: number;
+  selected_assets?: RecommendedAsset[];
+  asset_candidates?: RecommendedAsset[];
+  diagnostics?: {
+    asset_stability?: AssetStabilityDiagnostics;
+    filtered_assets?: RecommendedAsset[];
+    missing_asset_diagnostics?: Array<Record<string, unknown>>;
+    missing_figure_asset?: boolean;
+    missing_figure_reason?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
 export interface RetrievalSectionTrace {
   sample_id?: string;
   file_name?: string;
@@ -314,11 +363,13 @@ export interface SectionGenerationDetails {
   refinement_error?: string | null;
   assembled_block_count?: number;
   selected_citation_ids?: string[];
+  retrieval_trace?: Record<string, unknown>;
 }
 
 export interface SectionValidatorResult {
   recommended_assets?: RecommendedAsset[];
   asset_candidates?: RecommendedAsset[];
+  asset_trace?: AssetRetrievalTrace;
   generation_mode?: string;
   reuse_pack?: ReusePack;
   generation_details?: SectionGenerationDetails;
@@ -415,6 +466,10 @@ export interface LibraryMaterial {
   raw_document_id?: string | null;
   doc_type?: string | null;
   parse_status: string;
+  material_status?: string | null;
+  material_status_label?: string | null;
+  material_status_reason?: string | null;
+  requires_cloud_parse?: boolean;
   parser_backend?: string | null;
   parse_gate_status?: string | null;
   parse_gate_reason?: string | null;
@@ -487,6 +542,126 @@ export interface LibraryMaterialsResponse {
     figure_asset_count: number;
     indexed_chunk_count: number;
   };
+}
+
+export type WikiAuditLayer = 'draft' | 'published' | 'rejected';
+
+export type WikiAuditStatus =
+  | 'review_required'
+  | 'auto_approved'
+  | 'published'
+  | 'rejected'
+  | 'quarantined'
+  | string;
+
+export type WikiAuditItemType =
+  | 'product_family'
+  | 'section_template'
+  | 'term_alias'
+  | 'asset_type_rule'
+  | string;
+
+export interface WikiAuditEvidence {
+  sample_id?: string;
+  raw_document_id?: string;
+  source_section_id?: string;
+  heading_path?: string;
+  source_document?: string;
+  evidence_quote?: string;
+  asset_id?: string;
+}
+
+export interface WikiAuditItem {
+  item_id: string;
+  item_type: WikiAuditItemType;
+  canonical_name: string;
+  aliases: string[];
+  summary: string;
+  source_documents: string[];
+  evidence: WikiAuditEvidence[];
+  quality_score: number;
+  quality_flags: string[];
+  status: WikiAuditStatus;
+  layer: WikiAuditLayer;
+  hit_count: number;
+  source_document_count: number;
+  blocking_flag_count: number;
+  generation_eligible?: boolean;
+  evidence_preview?: string;
+  source_document?: string | null;
+  source_section_id?: string | null;
+  heading_path?: string | null;
+  created_by?: string;
+  updated_at?: string;
+  approved_by?: string;
+  approved_at?: string;
+  rejected_by?: string;
+  rejected_at?: string;
+  rejected_reason?: string;
+  merged_into?: string;
+  merged_from?: string[];
+  [key: string]: unknown;
+}
+
+export interface WikiAuditLayerSummary {
+  layer: WikiAuditLayer;
+  path: string;
+  available: boolean;
+  item_count: number;
+  status_counts: Record<string, number>;
+  type_counts: Record<string, number>;
+  generated_at?: string | null;
+  manifest?: Record<string, unknown>;
+}
+
+export interface WikiAuditSummary {
+  root: string;
+  layers: Record<WikiAuditLayer, WikiAuditLayerSummary>;
+  draft_total: number;
+  published_total: number;
+  rejected_total: number;
+  review_required_total: number;
+  quarantined_total: number;
+  status_counts: Record<string, number>;
+  type_counts: Record<string, number>;
+  diff_counts: Record<'added' | 'changed' | 'removed' | 'status_changed', number>;
+  recent_events: Array<Record<string, unknown>>;
+}
+
+export interface WikiAuditItemsResponse {
+  items: WikiAuditItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  filters: Record<string, unknown>;
+}
+
+export interface WikiAuditItemDetail {
+  item: WikiAuditItem;
+  layers: Partial<Record<WikiAuditLayer, WikiAuditItem>>;
+  structured_assets: Partial<Record<WikiAuditLayer, Record<string, unknown> | null>>;
+  audit_events: Array<Record<string, unknown>>;
+  merged_sources?: WikiAuditItem[];
+}
+
+export interface WikiAuditDiffRecord {
+  item_id: string;
+  item_type?: WikiAuditItemType;
+  canonical_name?: string;
+  draft_status?: string | null;
+  published_status?: string | null;
+  draft_updated_at?: string | null;
+  published_updated_at?: string | null;
+  changed_fields: string[];
+  draft_item?: WikiAuditItem | null;
+  published_item?: WikiAuditItem | null;
+}
+
+export interface WikiAuditDiff {
+  added: WikiAuditDiffRecord[];
+  changed: WikiAuditDiffRecord[];
+  removed: WikiAuditDiffRecord[];
+  status_changed: WikiAuditDiffRecord[];
 }
 
 export interface ReviewTask {

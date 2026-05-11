@@ -10,11 +10,55 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+THREAD_LIMIT_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "TORCH_NUM_THREADS",
+)
+
+
+def _coerce_thread_limit(value: Any | None) -> str:
+    try:
+        limit = int(str(value or "1").strip())
+    except (TypeError, ValueError):
+        limit = 1
+    return str(max(1, min(limit, 2)))
+
+
+def apply_parser_thread_limits(settings: Any | None = None, *, configure_torch: bool = True) -> str:
+    """Keep local parser/OCR math libraries from saturating shared machines."""
+
+    configured = getattr(settings, "parser_cpu_threads", None) if settings is not None else None
+    limit = _coerce_thread_limit(configured or os.getenv("PARSER_CPU_THREADS") or "1")
+    os.environ["PARSER_CPU_THREADS"] = limit
+    for key in THREAD_LIMIT_ENV_VARS:
+        os.environ[key] = limit
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+    if not configure_torch:
+        return limit
+
+    try:
+        import torch
+    except Exception:  # pragma: no cover - torch is optional in lightweight envs
+        return limit
+
+    try:
+        torch.set_num_threads(int(limit))
+        torch.set_num_interop_threads(1)
+    except Exception as exc:  # pragma: no cover - depends on torch runtime state
+        logger.debug("Could not apply torch parser thread limits: %s", exc)
+    return limit
+
 
 def configure_docling_runtime(settings: Any | None = None) -> None:
     """Apply runtime cache and mirror settings before Docling loads models."""
 
     settings = settings or get_settings()
+    thread_limit = apply_parser_thread_limits(settings)
+    logger.info("Local parser CPU thread limit: %s", thread_limit)
     hf_endpoint = str(getattr(settings, "hf_endpoint", "") or "").strip()
     hf_home = str(getattr(settings, "hf_home", "") or "").strip()
     cache_dir = str(getattr(settings, "docling_cache_dir", "") or "").strip()
@@ -39,6 +83,9 @@ def configure_docling_runtime(settings: Any | None = None) -> None:
         docling_settings.cache_dir = Path(cache_dir).expanduser()
     if artifacts_path:
         docling_settings.artifacts_path = Path(artifacts_path).expanduser()
+
+
+apply_parser_thread_limits(configure_torch=False)
 
 
 def prewarm_docling_models(settings: Any | None = None, *, force: bool = False) -> Path:

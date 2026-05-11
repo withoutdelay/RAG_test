@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.documents import _parse_and_index_document
+from app.api.documents import _build_parse_failure_metadata, _parse_and_index_document
 from app.config import BACKEND_ROOT, REPO_ROOT
 from app.db import get_db_session, get_session_factory
 from app.models.chunk import Chunk
@@ -25,6 +25,7 @@ from app.schemas.artifacts import JobAcceptedData
 from app.schemas.common import APIResponse
 from app.services.knowledge import request_case_library_refresh
 from app.services.task_queue import get_background_task_queue
+from app.services.vectorstore.qdrant_client import QdrantService
 from app.utils.object_storage import get_object_storage
 
 
@@ -64,6 +65,19 @@ DOC_TYPE_TO_ROUTE = {
     "excluded": "excluded",
 }
 LIBRARY_DOC_TYPES = set(DOC_TYPE_TO_ROUTE)
+MATERIAL_STATUS_LABELS = {
+    "not_ingested": "未入库",
+    "processing": "解析中",
+    "cloud_parse_required": "需阿里云解析",
+    "parse_failed": "解析失败",
+    "parse_insufficient": "解析不充分",
+    "main_indexed": "主库已入库",
+    "review_pending": "待审阅",
+    "holdout_eval": "验证集",
+    "conversion_required": "待转换",
+    "conversion_failed": "转换失败",
+    "excluded": "已排除",
+}
 
 
 class MaterialRouteRequest(BaseModel):
@@ -298,6 +312,7 @@ async def _build_material_item(
         storage_fallback_asset_count = sum(1 for asset in assets if bool((asset.meta or {}).get("storage_fallback")))
 
     parse_metadata = dict(document.meta or {}) if document is not None else {}
+    material_status = _resolve_material_status(route=route, document=document, parse_metadata=parse_metadata)
     return {
         "sample_id": sample_id,
         "file_name": entry.get("file_name"),
@@ -319,6 +334,10 @@ async def _build_material_item(
         "raw_document_id": str(raw_document.id) if raw_document is not None else None,
         "doc_type": document.doc_type if document is not None else DOC_TYPE_BY_ROUTE.get(route),
         "parse_status": document.parse_status if document is not None else "not_ingested",
+        "material_status": material_status["status"],
+        "material_status_label": material_status["label"],
+        "material_status_reason": material_status["reason"],
+        "requires_cloud_parse": material_status["requires_cloud_parse"],
         "parser_backend": parse_metadata.get("parser_backend_used") or parse_metadata.get("parser_backend"),
         "parse_gate_status": parse_metadata.get("parse_gate_status"),
         "parse_gate_reason": parse_metadata.get("parse_gate_reason"),
@@ -332,11 +351,85 @@ async def _build_material_item(
         "quality_flags": _derive_quality_flags(
             route=route,
             document=document,
+            parse_metadata=parse_metadata,
+            material_status=material_status,
             figure_asset_count=figure_asset_count,
             storage_fallback_asset_count=storage_fallback_asset_count,
             entry=entry,
         ),
     }
+
+
+def _resolve_material_status(*, route: str, document: Document | None, parse_metadata: dict[str, Any]) -> dict[str, Any]:
+    if document is None:
+        status = route if route in {"conversion_required", "conversion_failed", "excluded"} else "not_ingested"
+        return {
+            "status": status,
+            "label": MATERIAL_STATUS_LABELS.get(status, status),
+            "reason": None,
+            "requires_cloud_parse": False,
+        }
+
+    parse_status = str(document.parse_status or "").strip().lower()
+    requires_cloud_parse = _requires_cloud_parse(document=document, parse_metadata=parse_metadata)
+    if parse_status in {"pending", "queued", "parsing"}:
+        status = "processing"
+    elif requires_cloud_parse:
+        status = "cloud_parse_required"
+    elif parse_status == "failed":
+        status = "parse_failed"
+    elif parse_status == "parse_insufficient":
+        status = "parse_insufficient"
+    elif parse_status == "done":
+        status = route if route in MATERIAL_STATUS_LABELS else "review_pending"
+    else:
+        status = parse_status or "not_ingested"
+
+    return {
+        "status": status,
+        "label": MATERIAL_STATUS_LABELS.get(status, status),
+        "reason": _material_status_reason(status=status, parse_metadata=parse_metadata),
+        "requires_cloud_parse": requires_cloud_parse,
+    }
+
+
+def _material_status_reason(*, status: str, parse_metadata: dict[str, Any]) -> str | None:
+    if status == "cloud_parse_required":
+        return (
+            str(parse_metadata.get("parse_gate_reason") or "").strip()
+            or str(parse_metadata.get("parse_error") or "").strip()
+            or "local_parser_insufficient"
+        )
+    if status in {"parse_failed", "parse_insufficient"}:
+        return str(parse_metadata.get("parse_error") or parse_metadata.get("parse_gate_reason") or "").strip() or None
+    return None
+
+
+def _requires_cloud_parse(*, document: Document, parse_metadata: dict[str, Any]) -> bool:
+    if bool(parse_metadata.get("requires_cloud_parse")):
+        return True
+    parse_status = str(document.parse_status or "").strip().lower()
+    if parse_status not in {"failed", "parse_insufficient"}:
+        return False
+    parser_backend = str(
+        parse_metadata.get("parser_backend_used") or parse_metadata.get("parser_backend") or ""
+    ).strip().lower()
+    parse_gate_reason = str(parse_metadata.get("parse_gate_reason") or "").strip().lower()
+    parse_error = str(parse_metadata.get("parse_error") or "").strip().lower()
+    cloud_hints = (
+        "cloudparserequired",
+        "aliyun docmind",
+        "document parsing timed out",
+        "exit_code",
+        "fallback_binary_parser",
+        "local parser",
+        "produced insufficient output",
+    )
+    return (
+        parser_backend == "fallback"
+        or parse_gate_reason in {"fallback_binary_parser", "cloud_parse_required"}
+        or any(hint in parse_error for hint in cloud_hints)
+    )
 
 
 async def _build_material_detail(
@@ -448,6 +541,8 @@ def _derive_quality_flags(
     *,
     route: str,
     document: Document | None,
+    parse_metadata: dict[str, Any],
+    material_status: dict[str, Any],
     figure_asset_count: int,
     storage_fallback_asset_count: int,
     entry: dict[str, Any],
@@ -457,7 +552,17 @@ def _derive_quality_flags(
     if document is None and route not in {"conversion_required", "excluded"}:
         flags.append("not_ingested")
     if document is not None and document.parse_status != "done":
-        flags.append(f"parse_status:{document.parse_status}")
+        status = str(material_status.get("status") or "")
+        if status == "cloud_parse_required":
+            flags.append("requires_aliyun_docmind")
+        elif status == "parse_failed":
+            flags.append("parse_failed")
+        elif status == "parse_insufficient":
+            flags.append("parse_insufficient")
+        elif status == "processing":
+            flags.append("processing")
+        else:
+            flags.append(f"parse_status:{document.parse_status}")
     if manifest_image_count > 0 and figure_asset_count == 0:
         flags.append("expected_images_but_no_figure_assets")
     if figure_asset_count > 0 and storage_fallback_asset_count == figure_asset_count:
@@ -525,9 +630,10 @@ async def route_material(
     document = await _resolve_material_document(session=session, entry=entry)
     if document is not None:
         document.doc_type = DOC_TYPE_BY_ROUTE[payload.route]
+        route_metadata = _material_base_metadata(entry, payload.route)
         document.meta = {
             **(document.meta or {}),
-            **_material_base_metadata(entry, payload.route),
+            **route_metadata,
             "manual_route_reason": payload.reason,
             "manual_route_updated_at": materials[sample_id]["updated_at"],
         }
@@ -541,6 +647,12 @@ async def route_material(
                 raw_document.doc_type = document.doc_type
                 raw_document.corpus_scope = "global" if payload.route == "main_indexed" else "review"
                 raw_document.meta = {**(raw_document.meta or {}), **document.meta}
+        await _sync_document_route_to_chunks_and_vectors(
+            session=session,
+            document=document,
+            route=payload.route,
+            route_metadata=route_metadata,
+        )
         await session.commit()
 
     if payload.route == "main_indexed":
@@ -548,6 +660,41 @@ async def route_material(
 
     item = await _build_material_item(session=session, entry=entry, state=state)
     return APIResponse(code=200, message="success", data=item)
+
+
+async def _sync_document_route_to_chunks_and_vectors(
+    *,
+    session: AsyncSession,
+    document: Document,
+    route: str,
+    route_metadata: dict[str, Any],
+) -> None:
+    chunks = (
+        await session.scalars(select(Chunk).where(Chunk.document_id == document.id))
+    ).all()
+    point_ids: list[str] = []
+    for chunk in chunks:
+        if chunk.qdrant_point_id:
+            point_ids.append(str(chunk.qdrant_point_id))
+        chunk.meta = {
+            **(chunk.meta or {}),
+            "doc_type": document.doc_type,
+            "material_route": route,
+            "library_track": route_metadata.get("library_track"),
+        }
+    if not point_ids:
+        return
+    try:
+        QdrantService().set_payload(
+            point_ids=point_ids,
+            payload={
+                "doc_type": document.doc_type,
+                "material_route": route,
+                "library_track": route_metadata.get("library_track"),
+            },
+        )
+    except Exception:
+        logger.exception("Failed to sync Qdrant route payload for document %s", document.id)
 
 
 @router.post(
@@ -783,7 +930,7 @@ async def _run_rebuild_material_item_job(job_id: UUID, parent_job_id: UUID, entr
                         failed += 1
                         logger.exception("Failed to rebuild library material: %s", file_name)
                         document.parse_status = "failed"
-                        document.meta = {**(document.meta or {}), "parse_error": str(exc)}
+                        document.meta = {**(document.meta or {}), **_build_parse_failure_metadata(exc)}
                         _record_material_state(sample_id=sample_id, route=route, status="failed", reason=str(exc))
 
             job.status = "succeeded" if failed == 0 else "failed"

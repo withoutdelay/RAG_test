@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 
 from app.services.knowledge import compile_knowledge_wiki
+from app.services.knowledge.wiki_llm_compiler import compile_llm_wiki_candidates, merge_llm_wiki_items
+from app.services.knowledge.wiki_storage import write_knowledge_wiki_bundle
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,10 +27,15 @@ def parse_args() -> argparse.Namespace:
         default="data/knowledge_wiki",
         help="Directory for generated wiki files.",
     )
+    parser.add_argument(
+        "--enable-llm",
+        action="store_true",
+        help="Run the offline LLM compiler before writing draft/published/rejected layers.",
+    )
     return parser.parse_args()
 
 
-def main() -> None:
+async def main() -> None:
     args = parse_args()
     outline_path = Path(args.outline_library)
     block_path = Path(args.block_library)
@@ -41,78 +49,29 @@ def main() -> None:
         block_entries=block_payload.get("entries") or [],
         term_lexicon=outline_payload.get("term_lexicon") or block_payload.get("term_lexicon") or {},
     )
-    prune_stale_wiki_pages(output_dir=output_dir, active_page_paths=set(bundle["pages"]))
-
-    for relative_path, content in bundle["pages"].items():
-        target_path = output_dir / relative_path
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(content, encoding="utf-8")
-
-    manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(bundle["manifest"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
+    llm_result: dict[str, object] = {"status": "disabled", "items": [], "summary": {}}
+    if args.enable_llm:
+        llm_result = await compile_llm_wiki_candidates(
+            wiki_items=bundle.get("wiki_items") or [],
+            structured_assets=bundle.get("structured_assets") or {},
+            outline_entries=outline_payload.get("entries") or [],
+            block_entries=block_payload.get("entries") or [],
+            enabled=True,
+        )
+        bundle = merge_llm_wiki_items(bundle=bundle, llm_result=llm_result)
+    write_summary = write_knowledge_wiki_bundle(output_dir=output_dir, bundle=bundle)
     structured_assets = bundle["structured_assets"]
-    (output_dir / "glossary.json").write_text(
-        json.dumps(structured_assets["glossary"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "product_cards.json").write_text(
-        json.dumps(structured_assets["product_cards"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "module_cards.json").write_text(
-        json.dumps(structured_assets["module_cards"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "equipment_cards.json").write_text(
-        json.dumps(structured_assets["equipment_cards"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "interface_cards.json").write_text(
-        json.dumps(structured_assets["interface_cards"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "section_templates.json").write_text(
-        json.dumps(structured_assets["section_templates"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "forbidden_phrases.json").write_text(
-        json.dumps(structured_assets["forbidden_phrases"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    log_path = output_dir / "log.md"
-    previous = log_path.read_text(encoding="utf-8") if log_path.exists() else "# AI Wiki Log\n\n"
-    if not previous.endswith("\n"):
-        previous += "\n"
-    log_path.write_text(previous + "\n" + bundle["log_entry"], encoding="utf-8")
 
     print(f"Compiled AI wiki to {output_dir.resolve()}")
+    print(f"  draft items: {write_summary['draft_items']}")
+    print(f"  published items: {write_summary['published_items']}")
+    print(f"  rejected items: {write_summary['rejected_items']}")
     print(f"  pages: {len(bundle['pages']) + 1}")
     print(f"  product cards: {len(structured_assets['product_cards'])}")
     print(f"  module cards: {len(structured_assets['module_cards'])}")
     print(f"  equipment cards: {len(structured_assets['equipment_cards'])}")
     print(f"  interface cards: {len(structured_assets['interface_cards'])}")
     print(f"  templates: {len(structured_assets['section_templates'])}")
-
-
-def prune_stale_wiki_pages(*, output_dir: Path, active_page_paths: set[str]) -> None:
-    keep_paths = set(active_page_paths)
-    keep_paths.add("log.md")
-    for path in output_dir.rglob("*.md"):
-        relative_path = path.relative_to(output_dir).as_posix()
-        if relative_path in keep_paths:
-            continue
-        path.unlink(missing_ok=True)
-    for directory in sorted((path for path in output_dir.rglob("*") if path.is_dir()), reverse=True):
-        try:
-            directory.rmdir()
-        except OSError:
-            continue
-
-
+    print(f"  llm compiler: {llm_result['status']}")
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

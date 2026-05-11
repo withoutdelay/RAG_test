@@ -142,6 +142,29 @@ class LLMClientTests(unittest.TestCase):
         content = asyncio.run(collect())
         self.assertEqual(content, "根据分析，上海电气集团需要新的实施方案。")
 
+    def test_knowledge_compile_with_images_prefers_vision_model(self) -> None:
+        candidates = LLMClient._model_candidates(
+            LLMRequest(
+                task_type=TaskType.KNOWLEDGE_COMPILE,
+                system_prompt="system",
+                user_prompt="user",
+                input_images=[LLMInputImage(image_url="data:image/png;base64,AA==")],
+            )
+        )
+
+        self.assertEqual(candidates[0], ModelType.VISION)
+
+    def test_evidence_select_routes_to_doubao(self) -> None:
+        candidates = LLMClient._model_candidates(
+            LLMRequest(
+                task_type=TaskType.EVIDENCE_SELECT,
+                system_prompt="system",
+                user_prompt="user",
+            )
+        )
+
+        self.assertEqual(candidates[0], ModelType.DOUBAO)
+
     def test_mock_provider_routes_section_write_to_doubao(self) -> None:
         client = self._make_client(MockLLMProvider(chunk_size=12))
 

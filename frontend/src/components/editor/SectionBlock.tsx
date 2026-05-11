@@ -5,6 +5,7 @@ import {
   FileCode2,
   FileText,
   GalleryVerticalEnd,
+  ShieldAlert,
   Layers3,
   Loader2,
   RotateCcw,
@@ -45,6 +46,7 @@ import {
   blockLabel,
   buildPreviewSegments,
   getSectionAssetCandidates,
+  getAssetTrace,
   isFilteredRecommendedAsset,
 } from './sectionBlockUtils';
 
@@ -192,17 +194,29 @@ export function SectionBlock({
       return !asset.asset_id || !recommendedIds.has(asset.asset_id);
     });
   }, [section, visibleRecommendedAssets]);
+  const assetTrace = getAssetTrace(section);
+  const assetDiagnostics = assetTrace?.diagnostics || {};
+  const assetStabilityDiagnostics = assetDiagnostics.asset_stability;
+  const filteredAssets = useMemo(
+    () => (assetStabilityDiagnostics?.filtered_assets || assetDiagnostics.filtered_assets || []) as RecommendedAsset[],
+    [assetDiagnostics.filtered_assets, assetStabilityDiagnostics?.filtered_assets],
+  );
+  const missingAssetDiagnostics = useMemo(
+    () => assetStabilityDiagnostics?.missing_asset_diagnostics || assetDiagnostics.missing_asset_diagnostics || [],
+    [assetDiagnostics.missing_asset_diagnostics, assetStabilityDiagnostics?.missing_asset_diagnostics],
+  );
   const assetCount = visibleRecommendedAssets.length;
   const assetCandidateCount = visibleAssetCandidates.length;
+  const filteredAssetCount = filteredAssets.length;
   const previewSegments = useMemo(() => buildPreviewSegments(content), [content]);
   const assetLookup = useMemo(
     () =>
       new Map(
-        [...visibleRecommendedAssets, ...visibleAssetCandidates]
+        [...visibleRecommendedAssets, ...visibleAssetCandidates, ...filteredAssets]
           .filter((asset) => asset.asset_id)
           .map((asset) => [asset.asset_id as string, asset]),
       ),
-    [visibleRecommendedAssets, visibleAssetCandidates],
+    [visibleRecommendedAssets, visibleAssetCandidates, filteredAssets],
   );
 
 
@@ -345,6 +359,7 @@ export function SectionBlock({
                 <span>{section.citation_refs.length} citations</span>
                 <span>{assetCount} recommended assets</span>
                 {assetCandidateCount > 0 ? <span>{assetCandidateCount} candidates</span> : null}
+                {filteredAssetCount > 0 ? <span>{filteredAssetCount} filtered assets</span> : null}
                 <span>{hasEditableContent ? 'draft ready for review' : 'draft not generated yet'}</span>
               </div>
             </div>
@@ -583,6 +598,12 @@ export function SectionBlock({
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge variant="outline">{assetCount + assetCandidateCount}</Badge>
+                  {filteredAssetCount > 0 ? (
+                    <Badge variant="warning" className="gap-1">
+                      <ShieldAlert className="h-3.5 w-3.5" />
+                      {filteredAssetCount}
+                    </Badge>
+                  ) : null}
                 </div>
               </div>
 
@@ -639,6 +660,16 @@ export function SectionBlock({
                       <ChevronRight className="h-4 w-4" />
                     </button>
                   )}
+                  {filteredAssetCount > 0 ? (
+                    <button
+                      type="button"
+                      className="flex w-full items-center justify-end gap-1 px-1 py-2 text-sm font-medium text-amber-700 transition-colors hover:text-amber-900"
+                      onClick={() => setAllCandidatesOpen(true)}
+                    >
+                      查看 {filteredAssetCount} 个被过滤图资产
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                  ) : null}
                 </div>
               ) : (
                 <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-center">
@@ -646,6 +677,12 @@ export function SectionBlock({
                   <p className="mt-1 text-xs text-slate-500">重新生成后，这里会显示命中的历史图表。</p>
                 </div>
               )}
+              {missingAssetDiagnostics.length > 0 ? (
+                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                  同源章节包含图片线索，但未找到可直接进入正文的稳定图资产。
+                  {typeof missingAssetDiagnostics[0]?.source_title === 'string' ? ` 来源：${missingAssetDiagnostics[0].source_title}` : ''}
+                </div>
+              ) : null}
             </div>
 
             {/* --- Assumptions --- */}
@@ -714,6 +751,7 @@ export function SectionBlock({
         citations={section.citation_refs}
         recommendedAssets={visibleRecommendedAssets}
         assetCandidates={visibleAssetCandidates}
+        filteredAssets={filteredAssets}
         selectedCitationIds={selectedCitationIds}
         onToggleCitationSelection={toggleCitationSelection}
         onRegenerateWith={(ids) => void handleRegenerate(ids)}
@@ -724,4 +762,3 @@ export function SectionBlock({
     </>
   );
 }
-

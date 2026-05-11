@@ -13,6 +13,7 @@ from app.api.library import recover_library_material_rebuild_jobs_on_startup
 from app.api.router import api_router
 from app.config import get_settings
 from app.db import get_engine
+from app.services.domain.taxonomy_registry import load_domain_taxonomy_registries
 from app.services.parsing.docling_runtime import configure_docling_runtime, prewarm_docling_models
 
 
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings = get_settings()
+    load_domain_taxonomy_registries()
     configure_docling_runtime(settings)
     async with get_engine().begin() as connection:
         await connection.execute(text("SELECT 1"))

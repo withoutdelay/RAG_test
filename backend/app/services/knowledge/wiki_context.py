@@ -9,7 +9,7 @@ from app.config import BACKEND_ROOT
 from app.services.vectorstore.block_taxonomy import infer_target_taxonomy
 
 
-DEFAULT_KNOWLEDGE_WIKI_ROOT = BACKEND_ROOT / "data" / "knowledge_wiki"
+DEFAULT_KNOWLEDGE_WIKI_ROOT = BACKEND_ROOT / "data" / "knowledge_wiki" / "published"
 TEXT_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./+-]{2,}|[\u4e00-\u9fff]{2,}")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 
@@ -76,13 +76,20 @@ class KnowledgeWikiContextProvider:
         max_equipment_cards: int = 2,
         max_forbidden_phrases: int = 4,
     ) -> None:
-        self.root = Path(root) if root is not None else DEFAULT_KNOWLEDGE_WIKI_ROOT
+        self.root = self._resolve_root(Path(root) if root is not None else DEFAULT_KNOWLEDGE_WIKI_ROOT)
         self.max_glossary_terms = max_glossary_terms
         self.max_product_cards = max_product_cards
         self.max_module_cards = max_module_cards
         self.max_equipment_cards = max_equipment_cards
         self.max_forbidden_phrases = max_forbidden_phrases
         self._assets: dict[str, list[dict[str, Any]]] | None = None
+
+    @staticmethod
+    def _resolve_root(root: Path) -> Path:
+        published_root = root / "published"
+        if published_root.exists() and (published_root / "manifest.json").exists():
+            return published_root
+        return root
 
     @property
     def available(self) -> bool:
@@ -383,6 +390,13 @@ class KnowledgeWikiContextProvider:
         product_cards = list(selected_assets.get("product_cards") or [])
         module_cards = list(selected_assets.get("module_cards") or [])
         section_type = str(selected_assets.get("section_type") or "").strip().lower()
+        if section_type == "commercial_manual_only":
+            return {
+                "query_expansion_terms": [],
+                "glossary_entries": [],
+                "product_cards": [],
+                "module_cards": [],
+            }
         allow_card_term_expansion = section_type not in {"supply_scope", "bom_or_supply_list"}
 
         for entry in glossary_entries:

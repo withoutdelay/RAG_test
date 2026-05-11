@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     auth_username: str = Field(default="admin", validation_alias="AUTH_USERNAME")
     auth_password: str | None = Field(default=None, validation_alias="AUTH_PASSWORD")
     auth_password_hash: str | None = Field(default=None, validation_alias="AUTH_PASSWORD_HASH")
+    auth_users: str = Field(default="", validation_alias="AUTH_USERS")
     auth_session_cookie_name: str = Field(default="presale_session", validation_alias="AUTH_SESSION_COOKIE_NAME")
     auth_session_ttl_seconds: int = Field(default=28800, validation_alias="AUTH_SESSION_TTL_SECONDS")
     auth_cookie_secure: bool = Field(default=False, validation_alias="AUTH_COOKIE_SECURE")
@@ -42,13 +43,37 @@ class Settings(BaseSettings):
     case_library_block_path: str = str(CASE_LIBRARY_ROOT / "block_library.json")
     hf_endpoint: str | None = Field(default=None, validation_alias="HF_ENDPOINT")
     hf_home: str | None = Field(default=None, validation_alias="HF_HOME")
-    parser_backend: Literal["auto", "docling", "fallback"] = "auto"
+    parser_backend: Literal["auto", "docling", "fallback", "aliyun_docmind", "docmind"] = "auto"
+    parser_cpu_threads: int = Field(default=1, validation_alias="PARSER_CPU_THREADS")
+    parser_process_isolation_enabled: bool = Field(default=True, validation_alias="PARSER_PROCESS_ISOLATION_ENABLED")
+    parser_document_timeout_seconds: float = Field(default=7200.0, validation_alias="PARSER_DOCUMENT_TIMEOUT_SECONDS")
+    parser_cloud_fallback_enabled: bool = Field(default=True, validation_alias="PARSER_CLOUD_FALLBACK_ENABLED")
+    parser_cloud_direct_min_bytes: int = Field(default=30 * 1024 * 1024, validation_alias="PARSER_CLOUD_DIRECT_MIN_BYTES")
     docling_libreoffice_cmd: str | None = None
     docling_cache_dir: str | None = Field(default=None, validation_alias="DOCLING_CACHE_DIR")
     docling_artifacts_path: str | None = Field(default=None, validation_alias="DOCLING_ARTIFACTS_PATH")
     docling_prewarm_models_on_startup: bool = Field(
         default=False,
         validation_alias="DOCLING_PREWARM_MODELS_ON_STARTUP",
+    )
+    aliyun_docmind_access_key_id: str | None = Field(default=None, validation_alias="ALIYUN_DOCMIND_ACCESS_KEY_ID")
+    aliyun_docmind_access_key_secret: str | None = Field(default=None, validation_alias="ALIYUN_DOCMIND_ACCESS_KEY_SECRET")
+    aliyun_docmind_endpoint: str = Field(
+        default="docmind-api.cn-hangzhou.aliyuncs.com",
+        validation_alias="ALIYUN_DOCMIND_ENDPOINT",
+    )
+    aliyun_docmind_poll_interval_seconds: float = Field(default=2.0, validation_alias="ALIYUN_DOCMIND_POLL_INTERVAL_SECONDS")
+    aliyun_docmind_timeout_seconds: float = Field(default=900.0, validation_alias="ALIYUN_DOCMIND_TIMEOUT_SECONDS")
+    aliyun_docmind_llm_enhancement: bool = Field(default=False, validation_alias="ALIYUN_DOCMIND_LLM_ENHANCEMENT")
+    aliyun_docmind_enhancement_mode: str = Field(default="", validation_alias="ALIYUN_DOCMIND_ENHANCEMENT_MODE")
+    aliyun_docmind_formula_enhancement: bool = Field(default=False, validation_alias="ALIYUN_DOCMIND_FORMULA_ENHANCEMENT")
+    aliyun_docmind_output_html_table: bool = Field(default=False, validation_alias="ALIYUN_DOCMIND_OUTPUT_HTML_TABLE")
+    aliyun_docmind_fetch_image_assets: bool = Field(default=True, validation_alias="ALIYUN_DOCMIND_FETCH_IMAGE_ASSETS")
+    aliyun_docmind_max_image_assets: int = Field(default=80, validation_alias="ALIYUN_DOCMIND_MAX_IMAGE_ASSETS")
+    aliyun_docmind_max_image_bytes: int = Field(default=5000000, validation_alias="ALIYUN_DOCMIND_MAX_IMAGE_BYTES")
+    aliyun_docmind_convert_office_to_pdf_min_bytes: int = Field(
+        default=30 * 1024 * 1024,
+        validation_alias="ALIYUN_DOCMIND_CONVERT_OFFICE_TO_PDF_MIN_BYTES",
     )
     parser_llm_asset_review_enabled: bool = False
     parser_llm_asset_review_max_assets: int = 12
@@ -141,6 +166,10 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="SECTION_GENERATION_FAST_COHERENCE_PASS",
     )
+    section_generation_item_timeout_seconds: float = Field(
+        default=240.0,
+        validation_alias="SECTION_GENERATION_ITEM_TIMEOUT_SECONDS",
+    )
     section_generation_granularity: Literal["top_level", "all_nodes"] = Field(
         default="top_level",
         validation_alias="SECTION_GENERATION_GRANULARITY",
@@ -167,6 +196,16 @@ class Settings(BaseSettings):
         validation_alias="EVIDENCE_JUDGE_MODE",
     )
     evidence_judge_max_candidates: int = Field(default=10, validation_alias="EVIDENCE_JUDGE_MAX_CANDIDATES")
+    evidence_judge_timeout_seconds: float = Field(default=18.0, validation_alias="EVIDENCE_JUDGE_TIMEOUT_SECONDS")
+    evidence_selector_mode: Literal["off", "auto", "strict"] = Field(
+        default="off",
+        validation_alias="EVIDENCE_SELECTOR_MODE",
+    )
+    evidence_selector_max_sections: int = Field(default=6, validation_alias="EVIDENCE_SELECTOR_MAX_SECTIONS")
+    evidence_selector_max_blocks: int = Field(default=10, validation_alias="EVIDENCE_SELECTOR_MAX_BLOCKS")
+    evidence_selector_max_assets: int = Field(default=8, validation_alias="EVIDENCE_SELECTOR_MAX_ASSETS")
+    evidence_selector_min_confidence: float = Field(default=0.62, validation_alias="EVIDENCE_SELECTOR_MIN_CONFIDENCE")
+    evidence_selector_timeout_seconds: float = Field(default=18.0, validation_alias="EVIDENCE_SELECTOR_TIMEOUT_SECONDS")
     case_library_section_rerank_enabled: bool = Field(
         default=False,
         validation_alias="CASE_LIBRARY_SECTION_RERANK_ENABLED",
@@ -181,6 +220,21 @@ class Settings(BaseSettings):
     llm_retry_attempts: int = 1
     llm_retry_backoff_seconds: float = 1.0
     llm_mock_stream_chunk_size: int = 48
+    wiki_llm_compile_enabled: bool = Field(default=False, validation_alias="WIKI_LLM_COMPILE_ENABLED")
+    wiki_llm_compile_max_seed_items: int = Field(default=24, validation_alias="WIKI_LLM_COMPILE_MAX_SEED_ITEMS")
+    wiki_llm_compile_max_evidence_per_item: int = Field(
+        default=3,
+        validation_alias="WIKI_LLM_COMPILE_MAX_EVIDENCE_PER_ITEM",
+    )
+    wiki_llm_compile_timeout_seconds: float = Field(
+        default=60.0,
+        validation_alias="WIKI_LLM_COMPILE_TIMEOUT_SECONDS",
+    )
+    wiki_llm_compile_use_vision: bool = Field(default=True, validation_alias="WIKI_LLM_COMPILE_USE_VISION")
+    wiki_llm_compile_image_detail: Literal["auto", "low", "high"] = Field(
+        default="auto",
+        validation_alias="WIKI_LLM_COMPILE_IMAGE_DETAIL",
+    )
     deepseek_api_key: str | None = Field(default=None, validation_alias="DEEPSEEK_API_KEY")
     deepseek_base_url: str = Field(default="https://api.deepseek.com/v1", validation_alias="DEEPSEEK_BASE_URL")
     deepseek_model_name: str = Field(default="deepseek-chat", validation_alias="DEEPSEEK_MODEL")
@@ -239,6 +293,12 @@ def get_settings() -> Settings:
         settings.llm_stream_timeout_seconds = max(settings.llm_timeout_seconds, 90.0)
     if not math.isfinite(settings.llm_retry_backoff_seconds):
         settings.llm_retry_backoff_seconds = 1.0
+    if settings.wiki_llm_compile_max_seed_items < 1:
+        settings.wiki_llm_compile_max_seed_items = 1
+    if settings.wiki_llm_compile_max_evidence_per_item < 1:
+        settings.wiki_llm_compile_max_evidence_per_item = 1
+    if settings.wiki_llm_compile_timeout_seconds <= 0 or not math.isfinite(settings.wiki_llm_compile_timeout_seconds):
+        settings.wiki_llm_compile_timeout_seconds = max(settings.llm_timeout_seconds, 1.0)
     if settings.parser_llm_asset_review_timeout_seconds <= 0 or not math.isfinite(
         settings.parser_llm_asset_review_timeout_seconds
     ):
@@ -247,8 +307,32 @@ def get_settings() -> Settings:
         settings.parser_llm_asset_summary_timeout_seconds
     ):
         settings.parser_llm_asset_summary_timeout_seconds = 60.0
+    if settings.aliyun_docmind_poll_interval_seconds <= 0 or not math.isfinite(
+        settings.aliyun_docmind_poll_interval_seconds
+    ):
+        settings.aliyun_docmind_poll_interval_seconds = 2.0
+    if settings.aliyun_docmind_timeout_seconds <= 0 or not math.isfinite(settings.aliyun_docmind_timeout_seconds):
+        settings.aliyun_docmind_timeout_seconds = 900.0
+    if settings.aliyun_docmind_max_image_assets < 0:
+        settings.aliyun_docmind_max_image_assets = 0
+    if settings.aliyun_docmind_max_image_bytes < 0:
+        settings.aliyun_docmind_max_image_bytes = 0
+    if settings.aliyun_docmind_convert_office_to_pdf_min_bytes < 0:
+        settings.aliyun_docmind_convert_office_to_pdf_min_bytes = 0
+    if settings.parser_cpu_threads < 1:
+        settings.parser_cpu_threads = 1
+    if settings.parser_cpu_threads > 2:
+        settings.parser_cpu_threads = 2
+    if settings.parser_document_timeout_seconds <= 0 or not math.isfinite(settings.parser_document_timeout_seconds):
+        settings.parser_document_timeout_seconds = 7200.0
+    if settings.parser_cloud_direct_min_bytes < 0:
+        settings.parser_cloud_direct_min_bytes = 0
     if settings.section_generation_concurrency < 1:
         settings.section_generation_concurrency = 1
+    if settings.section_generation_item_timeout_seconds <= 0 or not math.isfinite(
+        settings.section_generation_item_timeout_seconds
+    ):
+        settings.section_generation_item_timeout_seconds = 240.0
     if settings.background_job_worker_count < 1:
         settings.background_job_worker_count = 1
     if settings.background_job_worker_count > 4:
@@ -275,4 +359,18 @@ def get_settings() -> Settings:
         settings.evidence_judge_max_candidates = 1
     if settings.evidence_judge_max_candidates > 16:
         settings.evidence_judge_max_candidates = 16
+    if settings.evidence_judge_timeout_seconds <= 0 or not math.isfinite(settings.evidence_judge_timeout_seconds):
+        settings.evidence_judge_timeout_seconds = 18.0
+    if settings.evidence_selector_max_sections < 1:
+        settings.evidence_selector_max_sections = 1
+    if settings.evidence_selector_max_blocks < 1:
+        settings.evidence_selector_max_blocks = 1
+    if settings.evidence_selector_max_assets < 1:
+        settings.evidence_selector_max_assets = 1
+    if settings.evidence_selector_min_confidence < 0:
+        settings.evidence_selector_min_confidence = 0.0
+    if settings.evidence_selector_min_confidence > 1:
+        settings.evidence_selector_min_confidence = 1.0
+    if settings.evidence_selector_timeout_seconds <= 0 or not math.isfinite(settings.evidence_selector_timeout_seconds):
+        settings.evidence_selector_timeout_seconds = 18.0
     return settings

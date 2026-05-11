@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from app.api.documents import (
+    _apply_successful_conversion_route,
     _build_chunk_contextual_text,
     _build_document_upload_message,
+    _clean_successful_parse_metadata,
     _extract_document_id_from_parse_job,
     _resolve_document_parse_outcome,
     _resolve_section_anchor_from_catalog,
     _should_refresh_history_library,
 )
-from app.services.knowledge.library_refresh import filter_baseline_case_library_entries
+from app.services.knowledge.library_refresh import dedupe_case_library_entries, filter_baseline_case_library_entries
 from app.services.parsing.document_sources import is_library_ready_entry
 
 
@@ -76,6 +79,98 @@ class DocumentApiHelperTests(unittest.TestCase):
 
         self.assertEqual(anchor["source_section_id"], "5.1.1")
         self.assertEqual(anchor["source_heading"], "5.1.1 变频器系统示意图")
+
+    def test_resolve_section_anchor_from_catalog_matches_mixed_case_bilingual_heading(self) -> None:
+        section_catalog = [
+            {
+                "section_id": "3",
+                "title": "3. 系统方案 SYSTEM SOLUTION",
+                "source_heading": "3. 系统方案 SYSTEM SOLUTION",
+                "normalized_heading": "系统方案 SYSTEM SOLUTION",
+                "heading_aliases": ["系统方案 SYSTEM SOLUTION"],
+                "level": 2,
+                "section_path": "3. 系统方案 SYSTEM SOLUTION",
+                "normalized_section_path": "系统方案 SYSTEM SOLUTION",
+                "children": [
+                    {
+                        "section_id": "3.1",
+                        "title": "3.1. 变频软起系统单线图 SINGLE LINE DIAGRAM",
+                        "source_heading": "3.1. 变频软起系统单线图 SINGLE LINE DIAGRAM",
+                        "normalized_heading": "变频软起系统单线图 SINGLE LINE DIAGRAM",
+                        "heading_aliases": [
+                            "变频软起系统单线图 SINGLE LINE DIAGRAM",
+                            "变频软起系统单线图SINGLELINEDIAGRAM",
+                        ],
+                        "level": 3,
+                        "section_path": "3. 系统方案 SYSTEM SOLUTION > 3.1. 变频软起系统单线图 SINGLE LINE DIAGRAM",
+                        "normalized_section_path": "系统方案 SYSTEM SOLUTION > 变频软起系统单线图 SINGLE LINE DIAGRAM",
+                        "children": [],
+                    }
+                ],
+            }
+        ]
+
+        child_anchor = _resolve_section_anchor_from_catalog(
+            section_catalog=section_catalog,
+            heading_path="3.1 变频软起系统单线图 Single line Diagram",
+        )
+        parent_anchor = _resolve_section_anchor_from_catalog(
+            section_catalog=section_catalog,
+            heading_path="3 系统方案 System Solution",
+        )
+
+        self.assertEqual(child_anchor["source_section_id"], "3.1")
+        self.assertEqual(parent_anchor["source_section_id"], "3")
+
+    def test_resolve_section_anchor_from_catalog_matches_bilingual_heading_without_spacing(self) -> None:
+        section_catalog = [
+            {
+                "section_id": "1",
+                "title": "1. 工厂设计环境 PLANT DESIGN DATA",
+                "source_heading": "1. 工厂设计环境 PLANT DESIGN DATA",
+                "normalized_heading": "工厂设计环境 PLANT DESIGN DATA",
+                "heading_aliases": ["工厂设计环境 PLANT DESIGN DATA"],
+                "level": 2,
+                "section_path": "1. 工厂设计环境 PLANT DESIGN DATA",
+                "normalized_section_path": "工厂设计环境 PLANT DESIGN DATA",
+                "children": [
+                    {
+                        "section_id": "1.2",
+                        "title": "1.2. 供电条件SUPPLY NETWORK",
+                        "source_heading": "1.2. 供电条件SUPPLY NETWORK",
+                        "normalized_heading": "供电条件SUPPLY NETWORK",
+                        "heading_aliases": ["供电条件SUPPLY NETWORK"],
+                        "level": 3,
+                        "section_path": "1. 工厂设计环境 PLANT DESIGN DATA > 1.2. 供电条件SUPPLY NETWORK",
+                        "normalized_section_path": "工厂设计环境 PLANT DESIGN DATA > 供电条件SUPPLY NETWORK",
+                        "children": [],
+                    }
+                ],
+            },
+            {
+                "section_id": "2",
+                "title": "2. 供货范围SCOPES OF SUPPLY",
+                "source_heading": "2. 供货范围SCOPES OF SUPPLY",
+                "normalized_heading": "供货范围SCOPES OF SUPPLY",
+                "heading_aliases": ["供货范围SCOPES OF SUPPLY"],
+                "level": 2,
+                "section_path": "2. 供货范围SCOPES OF SUPPLY",
+                "normalized_section_path": "供货范围SCOPES OF SUPPLY",
+                "children": [],
+            },
+        ]
+
+        supply_anchor = _resolve_section_anchor_from_catalog(
+            section_catalog=section_catalog,
+            heading_path="1.2 供电条件 Supply Network",
+        )
+        scope_anchor = _resolve_section_anchor_from_catalog(
+            section_catalog=section_catalog,
+            heading_path="2 供货范围 Scopes of supply",
+        )
+
+        self.assertEqual(supply_anchor["source_section_id"], "1.2")
+        self.assertEqual(scope_anchor["source_section_id"], "2")
 
     def test_resolve_section_anchor_from_catalog_returns_empty_for_unknown_heading(self) -> None:
         anchor = _resolve_section_anchor_from_catalog(
@@ -154,6 +249,39 @@ class DocumentApiHelperTests(unittest.TestCase):
         self.assertEqual(outcome["parse_status"], "done")
         self.assertTrue(outcome["history_library_eligible"])
 
+    def test_apply_successful_conversion_route_moves_to_review_pending(self) -> None:
+        document = SimpleNamespace(project_id=None, doc_type="legacy_conversion")
+
+        metadata = _apply_successful_conversion_route(
+            document=document,  # type: ignore[arg-type]
+            metadata={"material_route": "conversion_required", "library_track": "pilot_main"},
+        )
+
+        self.assertEqual(document.doc_type, "historical_review")
+        self.assertEqual(metadata["material_route"], "review_pending")
+        self.assertEqual(metadata["library_track"], "review_pending")
+        self.assertTrue(metadata["auto_route_after_conversion"])
+        self.assertEqual(metadata["previous_material_route"], "conversion_required")
+
+    def test_clean_successful_parse_metadata_clears_stale_failure_flags(self) -> None:
+        cleaned = _clean_successful_parse_metadata(
+            metadata={
+                "parse_error": "old failure",
+                "requires_cloud_parse": True,
+                "parse_gate_status": "insufficient",
+                "parse_gate_reason": "cloud_parse_required",
+                "asset_enrichment_deferred": True,
+            },
+            parse_status="done",
+            figure_asset_count=3,
+        )
+
+        self.assertNotIn("parse_error", cleaned)
+        self.assertNotIn("asset_enrichment_deferred", cleaned)
+        self.assertFalse(cleaned["requires_cloud_parse"])
+        self.assertEqual(cleaned["parse_gate_status"], "ready")
+        self.assertIsNone(cleaned["parse_gate_reason"])
+
     def test_build_document_upload_message_explains_parse_insufficient_history_document(self) -> None:
         message = _build_document_upload_message(
             doc_type="historical_proposal",
@@ -183,6 +311,23 @@ class DocumentApiHelperTests(unittest.TestCase):
         filtered = filter_baseline_case_library_entries(entries)
 
         self.assertEqual([item["sample_id"] for item in filtered], ["sample-a", "sample-b"])
+
+    def test_dedupe_case_library_entries_prefers_source_marked_uploaded_entries(self) -> None:
+        entries = [
+            {"sample_id": "uploaded-1", "file_name": "demo.docx", "library_track": "pilot_main"},
+            {
+                "sample_id": "uploaded-1",
+                "file_name": "demo.docx",
+                "library_track": "pilot_main",
+                "source": "uploaded_documents",
+            },
+            {"sample_id": "sample-a", "file_name": "base.docx", "library_track": "pilot_main"},
+        ]
+
+        deduped = dedupe_case_library_entries(entries, kind="outline")
+
+        self.assertEqual(len(deduped), 2)
+        self.assertEqual(deduped[0]["source"], "uploaded_documents")
 
 
 if __name__ == "__main__":

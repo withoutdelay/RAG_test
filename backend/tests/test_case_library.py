@@ -45,6 +45,36 @@ class CaseLibraryTests(unittest.TestCase):
         self.assertEqual(entry["document_title"], "总标题")
         self.assertEqual(entry["top_level_titles"], ["1 项目概述", "2 技术方案"])
 
+    def test_uploaded_source_is_preserved_in_case_library_entries(self) -> None:
+        sample_entry = {
+            "sample_id": "uploaded-1",
+            "file_name": "demo.docx",
+            "file_format": "docx",
+            "library_track": "pilot_main",
+            "profile": "text_digital",
+            "source": "uploaded_documents",
+        }
+        markdown = "\n".join(
+            [
+                "# 总标题",
+                "",
+                "## 7 提交资料",
+                "",
+                "| 序号 | 资料名称 | 提交节点 |",
+                "| --- | --- | --- |",
+                "| 1 | 操作维护手册 | 随设备发货 |",
+                "| 2 | 出厂测试报告 | 验收前提交 |",
+                "| 3 | 合格证与随机资料 | 随设备发货 |",
+            ]
+        )
+
+        outline_entry = build_outline_library_entry(sample_entry=sample_entry, markdown=markdown)
+        block_entries = build_reusable_block_entries(sample_entry=sample_entry, markdown=markdown)
+
+        self.assertEqual(outline_entry["source"], "uploaded_documents")
+        self.assertTrue(block_entries)
+        self.assertTrue(all(item["source"] == "uploaded_documents" for item in block_entries))
+
     def test_build_outline_library_entry_enriches_section_spans_and_summary(self) -> None:
         entry = build_outline_library_entry(
             sample_entry={"sample_id": "s1", "file_name": "demo.docx", "file_format": "docx", "library_track": "pilot_main", "profile": "text_digital"},

@@ -5,6 +5,7 @@ from app.services.vectorstore.block_taxonomy import (
     heading_family_similarity,
     heading_focus_adjustment,
     infer_target_taxonomy,
+    is_commercial_manual_section_text,
     support_content_forms,
 )
 
@@ -41,6 +42,15 @@ class BlockTaxonomyTests(unittest.TestCase):
         self.assertEqual(taxonomy["section_type"], "commercial_manual_only")
         self.assertEqual(taxonomy["content_form"], "narrative")
 
+    def test_commercial_manual_detector_does_not_catch_equipment_lists(self) -> None:
+        self.assertTrue(
+            is_commercial_manual_section_text(
+                "项目交付资料与文档清单",
+                "列明操作维护手册、测试报告、合格证和提交节点。",
+            )
+        )
+        self.assertFalse(is_commercial_manual_section_text("供货范围与主要设备清单", "列出变频器、控制柜和电缆。"))
+
     def test_classify_interface_table_prefers_interface_form(self) -> None:
         taxonomy = classify_block_taxonomy(
             content="| 序号 | 结点定义 | 技术要求 |\n| 1 | 变频器启动指令 | 干接点输入额定电压24Vdc |\n| 2 | DCS模拟量给定 | 4~20mA |",
@@ -63,6 +73,19 @@ class BlockTaxonomyTests(unittest.TestCase):
         self.assertEqual(taxonomy["section_type"], "bom_or_supply_list")
         self.assertIn("bom_table", taxonomy["preferred_content_forms"])
         self.assertIn("parameter_table", taxonomy["preferred_content_forms"])
+
+    def test_infer_target_taxonomy_keeps_document_delivery_out_of_parameter_preference(self) -> None:
+        taxonomy = infer_target_taxonomy(
+            {
+                "title": "项目交付资料与文档清单",
+                "purpose": "列明设计图纸、操作维护手册、测试报告及合格证等交付文档。",
+                "expected_evidence_types": ["table", "parameter", "section"],
+            }
+        )
+
+        self.assertEqual(taxonomy["section_type"], "commercial_manual_only")
+        self.assertIn("bom_table", taxonomy["preferred_content_forms"])
+        self.assertNotIn("parameter_table", taxonomy["preferred_content_forms"])
 
     def test_infer_target_taxonomy_prefers_main_circuit_over_generic_solution(self) -> None:
         taxonomy = infer_target_taxonomy(

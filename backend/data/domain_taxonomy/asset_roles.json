@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "patterns": {
+    "engineering_visual": "(波形|波特图|时序图|点阵图|电路图|原理图|接线图|示意图|电气图|FFT|Bode|waveform|circuit|schematic|diagram)",
+    "formula_visual": "(公式|equation|latex|math|推导|算式)",
+    "page_furniture": "(版本|页码|总页数|目录|dayu electric|买方|卖方)",
+    "generic_asset_title": "^(系统功能描述|系统方案|系统构成|性能要求|整体要求|项目名称|技术方案|图|附图|page\\s*\\d+|figure\\s*\\d+)$",
+    "generic_diagram_type": "^(other|工程示意图|图示|图形资产|主图|系统图|示意图)$",
+    "hard_fragment": "(cropped\\s+figure\\s+fragment|figure\\s+fragment|symbol\\s*/\\s*cropped|符号局部|局部图案|仅显示(?:一个|上下|单线图中的)?|无法(?:确认|识别|辨认|提炼)|缺乏可识别|信息非常有限|图意不清|文字太小|文字切片|标题文字|封面字样|text_fragment)",
+    "partial_fragment": "(局部|fragment|裁剪|符号|symbol)",
+    "complete_diagram": "(系统图|单线图|一次图|一次接线|原理图|接线图|主回路|系统示意|拓扑|完整|总图)",
+    "layout_illustration": "(外观图|高度关系|平面间距|间距示意|外形|柜体分段|顶部通风|布置图|尺寸图|检修通道)",
+    "product_photo": "(产品照片|设备照片|实拍|现场照片|photo|photograph)",
+    "logo_asset": "(logo|标\\s*识|商标|公司徽标|公司全称|股份有限公司|dayu\\s*electric|大\\s*禹\\s*电\\s*气|大\\s*禹\\s*标\\s*识)",
+    "control_interface_focus": "(控制|监控|监视|联锁|保护|告警|报警|故障|接口|信号|点表|PLC|DCS|励磁|断路器|反馈)",
+    "control_interface_table_noise": "(备品备件|备件|spare|售后|服务|培训|维保|rated\\s*data|额定数据|供货范围)",
+    "vfd_auxiliary_curve_noise": "(润滑油|油站|冷却器|冷却水|辅机)",
+    "vfd_focus": "(LCI|SFC|变频软起|软起动|软启动|同步切换|工频切换|晶闸管|主回路)"
+  },
+  "thresholds": {
+    "min_reusable_figure_dimension": 80,
+    "min_reusable_figure_area": 12000
+  }
+}

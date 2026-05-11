@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "token_groups": {
+    "asset_hints.figure": ["图", "示意", "单线", "接线", "原理", "波形", "曲线", "布局", "布置", "外形", "拓扑", "流程", "结构", "主回路", "总体方案", "架构"],
+    "asset_hints.table": ["表", "参数", "性能", "数据", "清单", "配置", "供货", "范围", "点表", "规格", "容量", "型号", "数量", "尺寸"],
+    "asset_hints.formula": ["公式", "equation", "推导", "算式"],
+    "main_circuit.focus": ["主回路", "主接线", "一次接线", "一次系统", "单线图", "变压器", "旁路", "隔离", "母排", "电缆", "绝缘", "短路", "温升", "谐波"],
+    "main_circuit.topology": ["单线图", "single line diagram", "进线", "断路器", "icb", "ocb", "rcb", "输入变压器", "输出变压器", "同步电机", "并网", "工频", "旁路", "同步装置", "synchrotact", "切换", "加速"],
+    "main_circuit.noise": ["控制", "监控", "辅助设备", "油站", "冷却器", "励磁柜", "启动时间", "同步过程", "运行方式", "dcs", "认证", "证书", "测试", "试验"],
+    "main_circuit.hard_noise": ["fieldbus", "profibus", "modbus", "rs485", "i/o", "digital input", "routine test", "type test", "tests and certificates", "standard and certification", "packing", "transportation", "冷却系统", "润滑", "轴承", "保护功能"],
+    "main_circuit.line_keep": ["进线", "断路器", "icb", "ocb", "rcb", "变频变压器", "输入变压器", "输出变压器", "同步装置", "synchrotact", "励磁装置", "切换", "工频运行", "并网", "同步电机", "主回路"],
+    "main_circuit.line_drop": ["description of start and sychronization", "lci start-up characteristic", "load data", "component technical data", "converter configuration", "converter system overview", "start curve by sfc", "变频启动曲线", "启动曲线", "负载数据", "飞轮力矩", "起动阻力矩", "静阻力矩", "总启动时间", "纯加速时间", "建立磁场", "连续启动3次", "连续启动 3 次", "gd2"],
+    "protection.focus": ["控制", "监控", "监视", "联锁", "保护", "告警", "报警", "跳闸", "顺控", "故障", "信号接口", "plc", "dcs"],
+    "protection.noise": ["主回路", "一次接线", "一次图", "一次方案", "单线图", "功率单元", "结构示意", "波形", "谐波", "启动曲线", "转矩曲线", "外形尺寸", "版本", "页码", "备品备件", "备件", "spare", "售后", "服务", "额定数据", "rated data"],
+    "protection.lci_scenario_noise": ["高浓磨机", "磨机", "lci", "sfc", "变频软起", "同步电机", "励磁柜", "励磁系统", "油站", "冷却器"],
+    "system_diagram.intent": ["系统架构", "系统方案", "系统示意", "单线图", "主回路", "一次接线", "接线图", "拓扑"],
+    "system_diagram.focus": ["系统架构", "系统方案", "系统示意", "单线图", "主回路", "一次接线", "接线图", "拓扑", "结构图"],
+    "system_diagram.noise": ["负载数据", "启动曲线", "曲线", "波形", "load data", "start curve", "外形", "尺寸", "封面", "技术协议"],
+    "curve_figure.intent": ["启动曲线", "启动特性", "曲线", "波形", "特性曲线", "负载曲线", "waveform", "curve"],
+    "layout_figure.intent": ["布置", "布局", "外形", "尺寸", "安装", "基础", "通道"]
+  },
+  "section_type_groups": {
+    "extractive_section_types": ["overall_solution", "design_basis", "site_conditions", "supply_scope", "bom_or_supply_list", "motor_spec", "vfd_spec", "starter_spec", "transformer_spec", "main_circuit_scheme", "control_logic", "communication_interface", "protection_interlock", "cabinet_layout", "installation_conditions"],
+    "table_placeholder_reference_only_section_types": ["bom_or_supply_list", "site_conditions", "supply_scope", "transformer_spec", "vfd_spec", "motor_spec"]
+  },
+  "mappings": {
+    "section_asset_query_hints": {
+      "overall_solution": ["系统示意图", "总体架构图", "单线图", "主回路图"],
+      "main_circuit_scheme": ["主回路图", "单线图", "一次接线图", "原理图"],
+      "communication_interface": ["接口示意图", "通信拓扑图", "控制逻辑图", "点表"],
+      "control_logic": ["控制逻辑图", "联锁逻辑图", "信号流程图", "运行流程图"],
+      "protection_interlock": ["联锁关系图", "保护关系图", "控制逻辑图", "信号流程图"],
+      "cabinet_layout": ["柜体外形图", "设备布置图", "柜内结构图", "接线示意图"],
+      "installation_conditions": ["安装布置图", "基础图", "进出线布置图", "设备外形图"],
+      "vfd_spec": ["系统示意图", "单线图", "结构图", "外形图"],
+      "starter_spec": ["系统示意图", "启动曲线", "单线图", "结构图"],
+      "motor_spec": ["系统示意图", "启动曲线", "负载曲线", "外形图"],
+      "transformer_spec": ["原理图", "绕组示意图", "电压波形图", "参数表"],
+      "bom_or_supply_list": ["供货清单", "配置表", "参数表"],
+      "supply_scope": ["供货清单", "配置表", "参数表"]
+    },
+    "section_template_headings": {
+      "main_circuit_scheme": {
+        "主回路结构与运行切换": ["主回路", "主接线", "一次接线", "旁路", "切换", "隔离", "结构"],
+        "设备选型与容量配置": ["选型", "配置", "容量", "功率单元", "整流变压器", "器件"],
+        "关键技术参数": ["参数", "技术数据", "规格", "额定", "性能"],
+        "保护与联锁条件": ["保护", "联锁", "闭锁", "报警"]
+      },
+      "communication_interface": {
+        "通信架构与接口方式": ["通信", "通讯", "接口", "dcs", "plc", "modbus", "profibus", "profinet"],
+        "接口与信号清单": ["信号", "点表", "ai", "ao", "di", "do", "清单"],
+        "联锁与调试约束": ["联锁", "调试", "试验", "投运"]
+      },
+      "bom_or_supply_list": {
+        "主要设备及供货范围": ["供货", "范围", "清单", "设备"],
+        "关键参数与配置说明": ["参数", "规格", "配置", "说明"]
+      },
+      "supply_scope": {
+        "主要设备及供货范围": ["供货", "范围", "清单", "设备"],
+        "关键参数与配置说明": ["参数", "规格", "配置", "说明"]
+      }
+    },
+    "extractive_section_openings": {
+      "main_circuit_scheme": "本项目主回路按照安全隔离、旁路切换和连续运行要求进行配置，具体结构如下。",
+      "communication_interface": "本项目控制系统接口按照上位机协同、信号闭环和调试可实施的原则进行配置，具体如下。",
+      "supply_scope": "以下内容用于说明本项目主要设备供货边界和系统组成，最终以双方确认的供货清单为准。",
+      "bom_or_supply_list": "以下内容用于说明本项目主要设备供货边界和系统组成，最终以双方确认的供货清单为准。"
+    },
+    "extractive_table_leads": {
+      "main_circuit_scheme": {
+        "设备选型与容量配置": "主要设备配置如下表所示。",
+        "关键技术参数": "主要技术参数如下表所示。"
+      },
+      "communication_interface": {
+        "接口与信号清单": "建议接口与信号清单如下表所示。"
+      },
+      "supply_scope": {
+        "主要设备及供货范围": "主要设备供货范围如下表所示。",
+        "关键参数与配置说明": "关键参数与配置说明如下表所示。"
+      },
+      "bom_or_supply_list": {
+        "主要设备及供货范围": "主要设备供货范围如下表所示。",
+        "关键参数与配置说明": "关键参数与配置说明如下表所示。"
+      }
+    },
+    "generic_reuse_headings": {
+      "values": ["产品简介", "技术方案", "总体方案", "总体说明", "项目概述", "系统方案", "文件清单"]
+    }
+  },
+  "item_rules": {
+    "supply_scope_required_items": [
+      {"item": "LCI/SFC 变频软起动装置", "triggers": ["lci", "sfc", "变频软起", "软起动", "软启动"]},
+      {"item": "输入变压器", "triggers": ["输入变压器", "进线变压器"]},
+      {"item": "输出变压器", "triggers": ["输出变压器", "出线变压器"]},
+      {"item": "励磁控制盘", "triggers": ["励磁控制盘", "励磁柜", "励磁控制柜", "励磁调节"]}
+    ]
+  },
+  "wiki": {
+    "product_families": {
+      "vfd_system": {"title": "高压变频器方案族", "aliases": ["高压变频器", "中压变频器", "变频装置", "变频柜", "VFD"]},
+      "lci_system": {"title": "LCI 变频软起方案族", "aliases": ["LCI", "LCI 软起", "变频软起"]},
+      "soft_starter_system": {"title": "高压软起动方案族", "aliases": ["软起动", "软启动", "高压软起动装置"]},
+      "water_resistance_starter": {"title": "水电阻起动柜方案族", "aliases": ["水电阻柜", "水电阻起动柜"]},
+      "permanent_magnet_vfd_upgrade": {"title": "永磁电机变频改造方案族", "aliases": ["永磁", "永磁电机", "节能改造", "变频改造"]},
+      "maintenance_service": {"title": "运维巡检方案族", "aliases": ["维保", "巡检", "检修", "维护"]},
+      "generic_engineering_solution": {"title": "通用工程方案族", "aliases": ["工程方案", "技术方案", "系统方案"]}
+    },
+    "module_cards": {
+      "power-cell": {"title": "功率单元", "aliases": ["功率单元", "功率模块", "逆变单元", "整流单元", "H桥"]},
+      "control-cabinet": {"title": "控制柜", "aliases": ["控制柜", "控制单元", "PLC柜"]},
+      "transformer-cabinet": {"title": "变压器柜", "aliases": ["变压器柜", "隔离变压器", "整流变压器", "移相变压器"]},
+      "precharge-cabinet": {"title": "预充柜", "aliases": ["预充柜"]},
+      "power-cabinet": {"title": "功率柜", "aliases": ["功率柜"]},
+      "bypass-cabinet": {"title": "旁路柜", "aliases": ["旁路柜", "旁路开关柜"]},
+      "output-reactor-cabinet": {"title": "输出电抗器柜", "aliases": ["输出电抗器柜"]},
+      "water-resistance-cabinet": {"title": "水电阻柜", "aliases": ["水电阻柜"]},
+      "thyristor-stack": {"title": "晶闸管", "aliases": ["晶闸管"]},
+      "igbt-stack": {"title": "IGBT", "aliases": ["IGBT"]},
+      "cooling-fan": {"title": "冷却风机", "aliases": ["冷却风机"]}
+    },
+    "section_template_guidance": {
+      "communication_interface": ["说明 DCS/PLC/现场设备之间的接口边界。", "给出 DI/DO、AI/AO、通讯协议和关键联锁信号。", "说明信号方向、责任边界和异常处理方式。"],
+      "protection_interlock": ["说明启动、停机、报警、跳闸和旁路条件。", "给出关键联锁链路与故障响应逻辑。", "避免用营销语言替代动作条件和闭锁关系。"],
+      "control_logic": ["按阶段说明控制流程、状态切换和关键判断条件。", "明确本地控制、远方控制和自动控制的边界。", "补充异常状态的保护与恢复路径。"],
+      "main_circuit_scheme": ["说明电力主回路、隔离、旁路和切换路径。", "突出输入输出变压器、功率单元和电机连接方式。", "优先使用系统图或一次图辅助说明。"]
+    }
+  }
+}

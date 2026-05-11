@@ -21,6 +21,7 @@ from app.services.knowledge.library_refresh import (
 )
 from app.services.knowledge.wiki_compiler import compile_knowledge_wiki
 from app.services.knowledge.wiki_context import KnowledgeWikiContextProvider
+from app.services.knowledge.wiki_storage import write_knowledge_wiki_bundle
 
 
 class KnowledgeWikiCompilerTests(unittest.TestCase):
@@ -71,6 +72,126 @@ class KnowledgeWikiCompilerTests(unittest.TestCase):
         self.assertEqual(bundle["manifest"]["categories"]["interfaces"], 1)
         self.assertEqual(len(bundle["structured_assets"]["product_cards"]), 1)
         self.assertEqual(len(bundle["structured_assets"]["module_cards"]), 2)
+        self.assertIn("wiki_items", bundle)
+
+    def test_compile_knowledge_wiki_builds_governed_wiki_items_with_evidence(self) -> None:
+        bundle = compile_knowledge_wiki(
+            outline_entries=[
+                {
+                    "sample_id": "sample-a",
+                    "file_name": "案例A.pdf",
+                    "document_title": "高压变频器系统方案",
+                    "top_level_titles": ["系统方案", "主回路方案"],
+                },
+                {
+                    "sample_id": "sample-b",
+                    "file_name": "案例B.pdf",
+                    "document_title": "高压变频器技术方案",
+                    "top_level_titles": ["系统方案", "变频器技术方案"],
+                }
+            ],
+            block_entries=[
+                {
+                    "sample_id": "sample-a",
+                    "raw_document_id": "raw-a",
+                    "file_name": "案例A.pdf",
+                    "source_section_id": "2.1",
+                    "heading_path": "2.1 高压变频器主回路方案",
+                    "equipment_type": "vfd",
+                    "section_type": "main_circuit_scheme",
+                    "section_summary": "高压变频器主回路采用输入输出隔离和旁路切换。",
+                    "content": "高压变频器主回路采用输入输出隔离和旁路切换。",
+                },
+                {
+                    "sample_id": "sample-b",
+                    "raw_document_id": "raw-b",
+                    "file_name": "案例B.pdf",
+                    "source_section_id": "3.1",
+                    "heading_path": "3.1 高压变频器技术方案",
+                    "equipment_type": "vfd",
+                    "section_type": "vfd_spec",
+                    "section_summary": "变频器配置功率单元、控制柜和旁路回路。",
+                    "content": "变频器配置功率单元、控制柜和旁路回路。",
+                },
+            ],
+            term_lexicon={"vfd": ["vfd", "变频器", "变频柜"]},
+        )
+
+        items = {item["item_id"]: item for item in bundle["wiki_items"]}
+
+        product_item = items["product_family:vfd-system"]
+        template_item = items["section_template:main-circuit-scheme"]
+        self.assertEqual(product_item["item_type"], "product_family")
+        self.assertGreaterEqual(product_item["quality_score"], 0.82)
+        self.assertEqual(product_item["status"], "auto_approved")
+        self.assertEqual(product_item["evidence"][0]["raw_document_id"], "raw-a")
+        self.assertEqual(template_item["item_type"], "section_template")
+        self.assertTrue(template_item["evidence"][0]["source_section_id"])
+
+    def test_write_knowledge_wiki_bundle_splits_draft_published_rejected_layers(self) -> None:
+        bundle = compile_knowledge_wiki(
+            outline_entries=[
+                {
+                    "sample_id": "sample-a",
+                    "file_name": "案例A.pdf",
+                    "document_title": "高压变频器系统方案",
+                    "top_level_titles": ["系统方案", "主回路方案"],
+                },
+                {
+                    "sample_id": "sample-b",
+                    "file_name": "案例B.pdf",
+                    "document_title": "高压变频器技术方案",
+                    "top_level_titles": ["系统方案", "变频器技术方案"],
+                }
+            ],
+            block_entries=[
+                {
+                    "sample_id": "sample-a",
+                    "raw_document_id": "raw-a",
+                    "file_name": "案例A.pdf",
+                    "source_section_id": "2.1",
+                    "heading_path": "2.1 高压变频器主回路方案",
+                    "equipment_type": "vfd",
+                    "section_type": "main_circuit_scheme",
+                    "section_summary": "高压变频器主回路采用输入输出隔离和旁路切换。",
+                    "content": "高压变频器主回路采用输入输出隔离和旁路切换。",
+                },
+                {
+                    "sample_id": "sample-b",
+                    "raw_document_id": "raw-b",
+                    "file_name": "案例B.pdf",
+                    "source_section_id": "3.1",
+                    "heading_path": "3.1 高压变频器技术方案",
+                    "equipment_type": "vfd",
+                    "section_type": "vfd_spec",
+                    "section_summary": "变频器配置功率单元、控制柜和旁路回路。",
+                    "content": "变频器配置功率单元、控制柜和旁路回路。",
+                },
+            ],
+            term_lexicon={"vfd": ["vfd", "变频器", "变频柜"]},
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            summary = write_knowledge_wiki_bundle(output_dir=root, bundle=bundle)
+            draft_items = json.loads((root / "draft" / "wiki_items.json").read_text(encoding="utf-8"))
+            published_items = json.loads((root / "published" / "wiki_items.json").read_text(encoding="utf-8"))
+            published_manifest = json.loads((root / "published" / "manifest.json").read_text(encoding="utf-8"))
+            provider = KnowledgeWikiContextProvider(root)
+
+            context = provider.build_section_context(
+                section={"title": "主回路系统方案", "purpose": "说明高压变频器主回路。", "keywords": ["变频器", "主回路"]},
+                global_params={},
+            )
+
+        self.assertGreater(summary["draft_items"], 0)
+        self.assertGreater(summary["published_items"], 0)
+        self.assertTrue(draft_items)
+        self.assertTrue(published_items)
+        self.assertEqual({item["status"] for item in published_items}, {"published"})
+        self.assertEqual(published_manifest["wiki_layer"], "published")
+        self.assertIn("产品族知识卡", context)
+        self.assertIn("高压变频器方案族", context)
 
     def test_compile_knowledge_wiki_builds_equipment_and_template_pages(self) -> None:
         bundle = compile_knowledge_wiki(
@@ -483,6 +604,51 @@ class KnowledgeWikiContextProviderTests(unittest.TestCase):
         self.assertNotIn("控制柜", bundle["query_expansion_terms"])
         self.assertEqual(bundle["product_cards"][0]["title"], "LCI 变频软起方案族")
         self.assertEqual(bundle["module_cards"][0]["title"], "控制柜")
+
+    def test_collect_retrieval_prior_bundle_disables_card_terms_for_document_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "manifest.json").write_text(json.dumps({"generated_at": "2026-04-20T00:00:00Z"}), encoding="utf-8")
+            (root / "glossary.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "primary_term": "lci",
+                            "display_primary_term": "LCI",
+                            "aliases": ["LCI 软起"],
+                            "display_aliases": ["LCI 软起"],
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (root / "product_cards.json").write_text(
+                json.dumps([{"title": "LCI 变频软起方案族", "aliases": ["LCI"]}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (root / "module_cards.json").write_text(
+                json.dumps([{"title": "控制柜", "aliases": ["PLC柜"]}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (root / "equipment_cards.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+            (root / "interface_cards.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+            (root / "section_templates.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+            (root / "forbidden_phrases.json").write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+
+            provider = KnowledgeWikiContextProvider(root)
+            bundle = provider.collect_retrieval_prior_bundle(
+                section={
+                    "title": "项目交付资料与文档清单",
+                    "purpose": "列明设计图纸、操作维护手册、测试报告及合格证等交付文档。",
+                    "keywords": ["交付文档", "技术图纸", "LCI"],
+                },
+                global_params={"project_name": "某钢铁厂 LCI 变频软起项目"},
+            )
+
+        self.assertEqual(bundle["query_expansion_terms"], [])
+        self.assertEqual(bundle["product_cards"], [])
+        self.assertEqual(bundle["module_cards"], [])
 
     def test_collect_retrieval_prior_bundle_filters_unanchored_product_cards(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

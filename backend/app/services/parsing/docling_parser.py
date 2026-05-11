@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from io import BytesIO
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from typing import Any
+import xml.etree.ElementTree as ET
 import zipfile
 
 try:
@@ -44,6 +47,23 @@ DOCX_RASTER_MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"
 DOCX_VECTOR_MEDIA_EXTENSIONS = {".wmf", ".emf"}
 OFFICE_HTML_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 LAYOUT_DRAWING_MARKERS = ("外观图", "高度关系", "平面间距", "间距示意", "外形", "柜体分段", "顶部通风", "布置图", "尺寸图", "检修通道")
+COMPOSITE_FIGURE_TITLE_MARKERS = (
+    "单线图",
+    "接线图",
+    "主接线",
+    "一次图",
+    "一次原理",
+    "原理图",
+    "系统图",
+    "系统示意",
+    "拓扑",
+    "框图",
+    "diagram",
+    "schematic",
+    "topology",
+)
+OOXML_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+OOXML_EMU_PER_PIXEL = 9525
 
 
 @dataclass
@@ -135,6 +155,12 @@ class DoclingParser:
                         source_path=path,
                         effective_path=effective_path,
                     )
+                    assets, composite_repair_note = self._repair_docx_composite_figures(
+                        assets,
+                        source_path=path,
+                        effective_path=effective_path,
+                    )
+                    asset_repair_note.update(composite_repair_note)
                 structure = self._extract_structure_hints(items, markdown=normalized_markdown)
                 return ParsedDocument(
                     markdown=normalized_markdown,
@@ -328,6 +354,809 @@ class DoclingParser:
         )
         stats["asset_repair_unresolved_count"] = len(remaining)
         return assets, stats
+
+    def _repair_docx_composite_figures(
+        self,
+        assets: list[ParsedAsset],
+        *,
+        source_path: Path,
+        effective_path: Path,
+    ) -> tuple[list[ParsedAsset], dict[str, Any]]:
+        docx_path = self._select_docx_source_for_composite_repair(source_path=source_path, effective_path=effective_path)
+        if docx_path is None:
+            return assets, {
+                "docx_composite_repair_attempted": False,
+                "docx_composite_group_count": 0,
+                "docx_composite_export_success_count": 0,
+                "docx_composite_child_suppressed_count": 0,
+            }
+
+        composites = self._extract_docx_composite_groups(docx_path)
+        if not composites:
+            return assets, {
+                "docx_composite_repair_attempted": False,
+                "docx_composite_group_count": 0,
+                "docx_composite_export_success_count": 0,
+                "docx_composite_child_suppressed_count": 0,
+            }
+
+        media_targets_by_asset_index = self._match_assets_to_docx_media_targets(assets, docx_path)
+        new_assets: list[ParsedAsset] = []
+        suppressed_count = 0
+        exported_count = 0
+
+        for composite_index, composite in enumerate(composites):
+            media_targets = set(composite.get("media_targets") or [])
+            child_indexes = [
+                index
+                for index, media_target in media_targets_by_asset_index.items()
+                if media_target in media_targets
+            ]
+            if not child_indexes and not self._docx_composite_heading_has_figure_intent(composite.get("heading_path")):
+                continue
+            if not child_indexes and not composite.get("image_bytes"):
+                continue
+
+            child_context = assets[child_indexes[0]] if child_indexes else None
+            title = (
+                (child_context.title if child_context else None)
+                or composite.get("heading_path")
+                or composite.get("name")
+                or "DOCX composite figure"
+            )
+            heading_path = (
+                (child_context.heading_path if child_context else None)
+                or composite.get("heading_path")
+                or title
+            )
+            context_before = child_context.context_before if child_context else None
+            context_after = child_context.context_after if child_context else None
+
+            composite_asset_added = False
+            image_bytes = composite.get("image_bytes")
+            image_size = composite.get("image_size")
+            if isinstance(image_bytes, bytes) and image_bytes:
+                new_assets.append(
+                    ParsedAsset(
+                        asset_type="figure",
+                        page_no=None,
+                        title=title,
+                        caption=composite.get("name"),
+                        heading_path=heading_path,
+                        context_before=context_before,
+                        context_after=context_after,
+                        bbox=None,
+                        source_ref=str(composite.get("source_ref") or f"docx-composite:{composite_index}"),
+                        image_bytes=image_bytes,
+                        image_ext=".png",
+                        meta={
+                            "width": image_size[0] if image_size else None,
+                            "height": image_size[1] if image_size else None,
+                            "visual_role": "engineering_figure",
+                            "quality_flags": [],
+                            "preserve_in_vector_db": True,
+                            "asset_repair_method": "docx_ooxml_composite_group",
+                            "asset_repair_precision": "word_group_object",
+                            "asset_repair_source": str(docx_path),
+                            "composite_figure": True,
+                            "composite_group_name": composite.get("name"),
+                            "composite_group_index": composite_index,
+                            "composite_child_media": sorted(media_targets),
+                            "storage_fallback": False,
+                            "review_required": True,
+                        },
+                    )
+                )
+                composite_asset_added = True
+                exported_count += 1
+
+            for child_index in child_indexes:
+                child = assets[child_index]
+                child_flags = list((child.meta or {}).get("quality_flags") or [])
+                for flag in (
+                    "child_of_docx_composite_figure",
+                    "not_preserved_for_vector_db",
+                    "visual_role:asset_fragment",
+                ):
+                    if flag not in child_flags:
+                        child_flags.append(flag)
+                child.meta = {
+                    **(child.meta or {}),
+                    "visual_role": "asset_fragment",
+                    "quality_flags": child_flags,
+                    "preserve_in_vector_db": False,
+                    "composite_child_asset": True,
+                    "composite_parent_name": composite.get("name"),
+                    "composite_parent_source_ref": composite.get("source_ref"),
+                    "composite_required": not composite_asset_added,
+                    "review_required": True,
+                }
+                suppressed_count += 1
+
+        if new_assets:
+            assets = [*assets, *new_assets]
+
+        return assets, {
+            "docx_composite_repair_attempted": True,
+            "docx_composite_group_count": len(composites),
+            "docx_composite_export_success_count": exported_count,
+            "docx_composite_child_suppressed_count": suppressed_count,
+        }
+
+    def _select_docx_source_for_composite_repair(self, *, source_path: Path, effective_path: Path) -> Path | None:
+        if source_path.suffix.lower() == ".docx" and source_path.exists():
+            return source_path
+        if effective_path.suffix.lower() == ".docx" and effective_path.exists():
+            return effective_path
+        return None
+
+    def _match_assets_to_docx_media_targets(self, assets: list[ParsedAsset], docx_path: Path) -> dict[int, str]:
+        media_items = self._extract_docx_media_items(docx_path)
+        if not media_items:
+            return {}
+
+        media_by_digest: dict[str, list[str]] = {}
+        media_by_size: dict[tuple[int, int], list[str]] = {}
+        for item in media_items:
+            raw_bytes = bytes(item.get("bytes") or b"")
+            if not raw_bytes:
+                continue
+            target = str(item.get("name") or "")
+            media_by_digest.setdefault(hashlib.sha256(raw_bytes).hexdigest(), []).append(target)
+            image_size = self._read_image_size(raw_bytes)
+            if image_size is not None:
+                media_by_size.setdefault(image_size, []).append(target)
+
+        matched: dict[int, str] = {}
+        for index, asset in enumerate(assets):
+            if asset.asset_type != "figure" or not asset.image_bytes:
+                continue
+            digest = hashlib.sha256(asset.image_bytes).hexdigest()
+            digest_matches = media_by_digest.get(digest) or []
+            if len(digest_matches) == 1:
+                matched[index] = digest_matches[0]
+                continue
+
+            width = (asset.meta or {}).get("width")
+            height = (asset.meta or {}).get("height")
+            try:
+                image_size = (int(width), int(height))
+            except (TypeError, ValueError):
+                image_size = self._read_image_size(asset.image_bytes)
+            if image_size is None:
+                continue
+            size_matches = media_by_size.get(image_size) or []
+            if len(size_matches) == 1:
+                matched[index] = size_matches[0]
+        return matched
+
+    def _extract_docx_composite_groups(self, docx_path: Path) -> list[dict[str, Any]]:
+        try:
+            with zipfile.ZipFile(docx_path) as archive:
+                document_xml = archive.read("word/document.xml")
+                relationships = self._read_docx_relationships(archive, "word/_rels/document.xml.rels")
+                root = ET.fromstring(document_xml)
+                paragraphs = [node for node in root.iter() if self._xml_local_name(node.tag) == "p"]
+                composites: list[dict[str, Any]] = []
+                current_heading: str | None = None
+                for paragraph_index, paragraph in enumerate(paragraphs):
+                    paragraph_text = self._xml_text_content(paragraph)
+                    if self._looks_like_docx_heading_text(paragraph_text):
+                        current_heading = paragraph_text
+                    group_nodes = [
+                        node
+                        for node in paragraph.iter()
+                        if self._xml_local_name(node.tag) == "wgp"
+                    ]
+                    for group_index, group_node in enumerate(group_nodes):
+                        composite = self._build_docx_composite_group(
+                            archive=archive,
+                            relationships=relationships,
+                            group_node=group_node,
+                            heading_path=current_heading,
+                            paragraph_index=paragraph_index,
+                            group_index=group_index,
+                        )
+                        if composite is not None:
+                            composites.append(composite)
+                return composites
+        except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError):
+            return []
+
+    def _read_docx_relationships(self, archive: zipfile.ZipFile, rels_path: str) -> dict[str, str]:
+        try:
+            root = ET.fromstring(archive.read(rels_path))
+        except (KeyError, ET.ParseError):
+            return {}
+        relationships: dict[str, str] = {}
+        for relationship in root:
+            if self._xml_local_name(relationship.tag) != "Relationship":
+                continue
+            rel_id = relationship.attrib.get("Id")
+            target = relationship.attrib.get("Target")
+            if not rel_id or not target:
+                continue
+            if not target.startswith("word/"):
+                target = f"word/{target.lstrip('/')}"
+            relationships[rel_id] = target
+        return relationships
+
+    def _build_docx_composite_group(
+        self,
+        *,
+        archive: zipfile.ZipFile,
+        relationships: dict[str, str],
+        group_node: ET.Element,
+        heading_path: str | None,
+        paragraph_index: int,
+        group_index: int,
+    ) -> dict[str, Any] | None:
+        media_targets = self._collect_docx_group_media_targets(group_node, relationships=relationships)
+        shape_count = sum(1 for node in group_node.iter() if self._xml_local_name(node.tag) in {"wsp", "cxnSp", "sp"})
+        picture_count = sum(1 for node in group_node.iter() if self._xml_local_name(node.tag) == "pic")
+        if shape_count + picture_count < 2:
+            return None
+
+        image_bytes, image_size = self._render_docx_composite_group(
+            archive=archive,
+            relationships=relationships,
+            group_node=group_node,
+        )
+        return {
+            "source_ref": f"docx-composite:{paragraph_index}:{group_index}",
+            "name": self._docx_group_name(group_node) or f"DOCX composite group {paragraph_index + 1}.{group_index + 1}",
+            "heading_path": heading_path,
+            "media_targets": sorted(media_targets),
+            "shape_count": shape_count,
+            "picture_count": picture_count,
+            "image_bytes": image_bytes,
+            "image_size": image_size,
+        }
+
+    def _collect_docx_group_media_targets(
+        self,
+        group_node: ET.Element,
+        *,
+        relationships: dict[str, str],
+    ) -> set[str]:
+        targets: set[str] = set()
+        for node in group_node.iter():
+            if self._xml_local_name(node.tag) != "blip":
+                continue
+            rel_id = (
+                node.attrib.get(f"{{{OOXML_REL_NS}}}embed")
+                or node.attrib.get(f"{{{OOXML_REL_NS}}}link")
+                or node.attrib.get("embed")
+                or node.attrib.get("link")
+            )
+            target = relationships.get(str(rel_id or ""))
+            if target:
+                targets.add(target)
+        return targets
+
+    def _render_docx_composite_group(
+        self,
+        *,
+        archive: zipfile.ZipFile,
+        relationships: dict[str, str],
+        group_node: ET.Element,
+    ) -> tuple[bytes | None, tuple[int, int] | None]:
+        try:
+            from PIL import Image, ImageDraw
+        except Exception:
+            return None, None
+
+        transform = self._docx_group_transform(group_node)
+        if transform is None:
+            return None, None
+        transform = self._docx_expand_group_transform_to_content_bounds(group_node=group_node, transform=transform)
+        canvas_width, canvas_height = transform["canvas_size"]
+        if canvas_width <= 0 or canvas_height <= 0:
+            return None, None
+
+        canvas = Image.new("RGBA", (canvas_width, canvas_height), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(canvas)
+        for child in list(group_node):
+            local_name = self._xml_local_name(child.tag)
+            if local_name == "pic":
+                self._draw_docx_composite_picture(
+                    canvas=canvas,
+                    archive=archive,
+                    relationships=relationships,
+                    picture_node=child,
+                    transform=transform,
+                )
+            elif local_name in {"wsp", "cxnSp", "sp"}:
+                self._draw_docx_composite_shape(draw=draw, shape_node=child, transform=transform)
+
+        bbox = canvas.getbbox()
+        if bbox:
+            margin = 12
+            left = max(0, bbox[0] - margin)
+            upper = max(0, bbox[1] - margin)
+            right = min(canvas.size[0], bbox[2] + margin)
+            lower = min(canvas.size[1], bbox[3] + margin)
+            canvas = canvas.crop((left, upper, right, lower))
+        if canvas.width <= 0 or canvas.height <= 0:
+            return None, None
+        handle = BytesIO()
+        canvas.save(handle, format="PNG")
+        return handle.getvalue(), canvas.size
+
+    def _docx_group_transform(self, group_node: ET.Element) -> dict[str, Any] | None:
+        xfrm = self._find_first_xml_descendant(group_node, "xfrm")
+        if xfrm is None:
+            return None
+        ext = self._find_first_xml_child(xfrm, "ext")
+        ch_ext = self._find_first_xml_child(xfrm, "chExt")
+        ch_off = self._find_first_xml_child(xfrm, "chOff")
+        if ext is None or ch_ext is None:
+            return None
+        try:
+            group_width = max(1, int(float(ext.attrib.get("cx") or 0)))
+            group_height = max(1, int(float(ext.attrib.get("cy") or 0)))
+            child_width = max(1.0, float(ch_ext.attrib.get("cx") or group_width))
+            child_height = max(1.0, float(ch_ext.attrib.get("cy") or group_height))
+            child_left = float(ch_off.attrib.get("x") or 0) if ch_off is not None else 0.0
+            child_top = float(ch_off.attrib.get("y") or 0) if ch_off is not None else 0.0
+        except (TypeError, ValueError):
+            return None
+        canvas_width = max(1, min(2400, int(round(group_width / OOXML_EMU_PER_PIXEL))))
+        canvas_height = max(1, min(2400, int(round(group_height / OOXML_EMU_PER_PIXEL))))
+
+        def map_point(x_value: float, y_value: float) -> tuple[float, float]:
+            x = (float(x_value) - child_left) * canvas_width / child_width
+            y = (float(y_value) - child_top) * canvas_height / child_height
+            return x, y
+
+        def map_box(off_x: float, off_y: float, ext_x: float, ext_y: float) -> tuple[float, float, float, float]:
+            left, upper = map_point(off_x, off_y)
+            right, lower = map_point(float(off_x) + float(ext_x), float(off_y) + float(ext_y))
+            return left, upper, right, lower
+
+        return {
+            "canvas_size": (canvas_width, canvas_height),
+            "child_size": (child_width, child_height),
+            "map_point": map_point,
+            "map_box": map_box,
+        }
+
+    def _docx_expand_group_transform_to_content_bounds(
+        self,
+        *,
+        group_node: ET.Element,
+        transform: dict[str, Any],
+    ) -> dict[str, Any]:
+        bounds = self._docx_group_content_bounds(group_node=group_node, transform=transform)
+        if bounds is None:
+            return transform
+
+        canvas_width, canvas_height = transform["canvas_size"]
+        min_x, min_y, max_x, max_y = bounds
+        margin = 32
+        final_left = min(0, int(round(min_x - margin)))
+        final_upper = min(0, int(round(min_y - margin)))
+        final_right = max(canvas_width, int(round(max_x + margin)))
+        final_lower = max(canvas_height, int(round(max_y + margin)))
+        final_width = final_right - final_left
+        final_height = final_lower - final_upper
+        if final_width <= 0 or final_height <= 0:
+            return transform
+        if final_width > 3600 or final_height > 3600:
+            return transform
+        if final_left == 0 and final_upper == 0 and final_right == canvas_width and final_lower == canvas_height:
+            return transform
+
+        base_map_point = transform["map_point"]
+
+        def map_point(x_value: float, y_value: float) -> tuple[float, float]:
+            x, y = base_map_point(x_value, y_value)
+            return x - final_left, y - final_upper
+
+        def map_box(off_x: float, off_y: float, ext_x: float, ext_y: float) -> tuple[float, float, float, float]:
+            left, upper = map_point(off_x, off_y)
+            right, lower = map_point(float(off_x) + float(ext_x), float(off_y) + float(ext_y))
+            return left, upper, right, lower
+
+        return {
+            **transform,
+            "canvas_size": (final_width, final_height),
+            "map_point": map_point,
+            "map_box": map_box,
+            "pixel_bounds_expanded": True,
+            "pixel_bounds_offset": (-final_left, -final_upper),
+        }
+
+    def _docx_group_content_bounds(
+        self,
+        *,
+        group_node: ET.Element,
+        transform: dict[str, Any],
+    ) -> tuple[float, float, float, float] | None:
+        boxes: list[tuple[float, float, float, float]] = []
+        for child in list(group_node):
+            local_name = self._xml_local_name(child.tag)
+            if local_name not in {"pic", "wsp", "cxnSp", "sp"}:
+                continue
+            xfrm = self._find_first_xml_descendant(child, "xfrm")
+            box = self._docx_xfrm_box(xfrm, transform=transform)
+            if box is None:
+                continue
+            boxes.append(box)
+            if local_name in {"wsp", "cxnSp", "sp"}:
+                point_bounds = self._docx_custom_geometry_point_bounds(
+                    shape_node=child,
+                    box=self._normalize_pixel_box(box),
+                    transform=transform,
+                )
+                if point_bounds is not None:
+                    boxes.append(point_bounds)
+
+        if not boxes:
+            return None
+        min_x = min(min(left, right) for left, _upper, right, _lower in boxes)
+        min_y = min(min(upper, lower) for _left, upper, _right, lower in boxes)
+        max_x = max(max(left, right) for left, _upper, right, _lower in boxes)
+        max_y = max(max(upper, lower) for _left, upper, _right, lower in boxes)
+        return min_x, min_y, max_x, max_y
+
+    def _docx_custom_geometry_point_bounds(
+        self,
+        *,
+        shape_node: ET.Element,
+        box: tuple[int, int, int, int],
+        transform: dict[str, Any],
+    ) -> tuple[float, float, float, float] | None:
+        points: list[tuple[float, float]] = []
+        for path in (node for node in shape_node.iter() if self._xml_local_name(node.tag) == "path"):
+            try:
+                path_width = max(1.0, float(path.attrib.get("w") or 1.0))
+                path_height = max(1.0, float(path.attrib.get("h") or 1.0))
+            except (TypeError, ValueError):
+                path_width, path_height = 1.0, 1.0
+            for command in list(path):
+                point_node = self._find_first_xml_child(command, "pt")
+                if point_node is None:
+                    continue
+                try:
+                    raw_x = float(point_node.attrib.get("x") or 0)
+                    raw_y = float(point_node.attrib.get("y") or 0)
+                except (TypeError, ValueError):
+                    continue
+                points.append(
+                    self._map_docx_custom_point(
+                        raw_x=raw_x,
+                        raw_y=raw_y,
+                        path_width=path_width,
+                        path_height=path_height,
+                        box=box,
+                        transform=transform,
+                    )
+                )
+
+        if not points:
+            return None
+        return (
+            min(x for x, _y in points),
+            min(y for _x, y in points),
+            max(x for x, _y in points),
+            max(y for _x, y in points),
+        )
+
+    def _draw_docx_composite_picture(
+        self,
+        *,
+        canvas: Any,
+        archive: zipfile.ZipFile,
+        relationships: dict[str, str],
+        picture_node: ET.Element,
+        transform: dict[str, Any],
+    ) -> None:
+        try:
+            from PIL import Image
+        except Exception:
+            return
+        rel_id = None
+        for node in picture_node.iter():
+            if self._xml_local_name(node.tag) == "blip":
+                rel_id = (
+                    node.attrib.get(f"{{{OOXML_REL_NS}}}embed")
+                    or node.attrib.get(f"{{{OOXML_REL_NS}}}link")
+                    or node.attrib.get("embed")
+                    or node.attrib.get("link")
+                )
+                break
+        target = relationships.get(str(rel_id or ""))
+        if not target:
+            return
+        xfrm = self._find_first_xml_descendant(picture_node, "xfrm")
+        box = self._docx_xfrm_box(xfrm, transform=transform)
+        if box is None:
+            return
+        left, upper, right, lower = self._normalize_pixel_box(box)
+        width = max(1, right - left)
+        height = max(1, lower - upper)
+        try:
+            with Image.open(BytesIO(archive.read(target))) as image:
+                prepared = image.convert("RGBA").resize((width, height))
+                canvas.alpha_composite(prepared, (left, upper))
+        except Exception:
+            return
+
+    def _draw_docx_composite_shape(self, *, draw: Any, shape_node: ET.Element, transform: dict[str, Any]) -> None:
+        xfrm = self._find_first_xml_descendant(shape_node, "xfrm")
+        box = self._docx_xfrm_box(xfrm, transform=transform)
+        if box is None:
+            return
+        left, upper, right, lower = self._normalize_pixel_box(box)
+        outline = self._docx_shape_line_color(shape_node) or (0, 0, 0, 255)
+        width = self._docx_shape_line_width(shape_node)
+        fill = self._docx_shape_fill_color(shape_node)
+        geometry = self._docx_shape_geometry(shape_node)
+        if geometry == "line":
+            draw.line(self._docx_line_points(shape_node=shape_node, box=(left, upper, right, lower)), fill=outline, width=width)
+        elif geometry in {"rect", "roundRect"}:
+            draw.rectangle((left, upper, right, lower), outline=outline, fill=fill, width=width)
+        elif geometry in {"ellipse", "oval"}:
+            draw.ellipse((left, upper, right, lower), outline=outline, fill=fill, width=width)
+        elif geometry == "triangle":
+            draw.polygon(((left + right) / 2, upper, right, lower, left, lower), outline=outline, fill=fill)
+        else:
+            self._draw_docx_custom_geometry(draw=draw, shape_node=shape_node, box=(left, upper, right, lower), transform=transform, outline=outline, width=width)
+
+        text_lines = self._docx_shape_text_lines(shape_node)
+        if text_lines:
+            font = self._load_docx_composite_font(max(8, min(18, int((lower - upper) * 0.45) or 10)))
+            line_height = max(8, int((lower - upper) / max(1, len(text_lines))))
+            for line_index, text in enumerate(text_lines):
+                draw.text((left, upper + line_index * line_height), text, fill=outline, font=font)
+
+    def _docx_line_points(
+        self,
+        *,
+        shape_node: ET.Element,
+        box: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int]:
+        left, upper, right, lower = box
+        xfrm = self._find_first_xml_descendant(shape_node, "xfrm")
+        flip_h = str((xfrm.attrib if xfrm is not None else {}).get("flipH") or "").strip() in {"1", "true"}
+        flip_v = str((xfrm.attrib if xfrm is not None else {}).get("flipV") or "").strip() in {"1", "true"}
+        start_x, start_y = left, upper
+        end_x, end_y = right, lower
+        if flip_h:
+            start_x, end_x = end_x, start_x
+        if flip_v:
+            start_y, end_y = end_y, start_y
+        return start_x, start_y, end_x, end_y
+
+    def _docx_shape_text_lines(self, shape_node: ET.Element) -> list[str]:
+        text_container = None
+        for node in shape_node.iter():
+            if self._xml_local_name(node.tag) in {"txBody", "txbxContent"}:
+                text_container = node
+                break
+        if text_container is None:
+            text = self._xml_text_content(shape_node)
+            return [text] if text else []
+
+        lines: list[str] = []
+        for paragraph in (node for node in text_container.iter() if self._xml_local_name(node.tag) == "p"):
+            fragments = [
+                "".join(text_node.itertext())
+                for text_node in paragraph.iter()
+                if self._xml_local_name(text_node.tag) == "t"
+            ]
+            line = "".join(fragments).strip()
+            if line:
+                lines.append(line)
+        if lines:
+            return lines
+        text = self._xml_text_content(text_container)
+        return [text] if text else []
+
+    def _draw_docx_custom_geometry(
+        self,
+        *,
+        draw: Any,
+        shape_node: ET.Element,
+        box: tuple[int, int, int, int],
+        transform: dict[str, Any],
+        outline: tuple[int, int, int, int],
+        width: int,
+    ) -> None:
+        paths = [node for node in shape_node.iter() if self._xml_local_name(node.tag) == "path"]
+        if not paths:
+            left, upper, right, lower = box
+            if right > left and lower > upper:
+                draw.rectangle((left, upper, right, lower), outline=outline, width=width)
+            return
+        for path in paths:
+            try:
+                path_width = max(1.0, float(path.attrib.get("w") or 1.0))
+                path_height = max(1.0, float(path.attrib.get("h") or 1.0))
+            except (TypeError, ValueError):
+                path_width, path_height = 1.0, 1.0
+            points: list[tuple[float, float]] = []
+            start_point: tuple[float, float] | None = None
+            for command in list(path):
+                command_name = self._xml_local_name(command.tag)
+                if command_name == "close":
+                    if start_point is not None and points:
+                        points.append(start_point)
+                    continue
+                point_node = self._find_first_xml_child(command, "pt")
+                if point_node is None:
+                    continue
+                try:
+                    raw_x = float(point_node.attrib.get("x") or 0)
+                    raw_y = float(point_node.attrib.get("y") or 0)
+                except (TypeError, ValueError):
+                    continue
+                point = self._map_docx_custom_point(
+                    raw_x=raw_x,
+                    raw_y=raw_y,
+                    path_width=path_width,
+                    path_height=path_height,
+                    box=box,
+                    transform=transform,
+                )
+                if command_name == "moveTo":
+                    if len(points) > 1:
+                        draw.line(points, fill=outline, width=width)
+                    points = [point]
+                    start_point = point
+                elif command_name == "lnTo":
+                    points.append(point)
+            if len(points) > 1:
+                draw.line(points, fill=outline, width=width)
+
+    def _map_docx_custom_point(
+        self,
+        *,
+        raw_x: float,
+        raw_y: float,
+        path_width: float,
+        path_height: float,
+        box: tuple[int, int, int, int],
+        transform: dict[str, Any],
+    ) -> tuple[float, float]:
+        outside_local_path = raw_x < 0 or raw_y < 0 or raw_x > path_width * 1.25 or raw_y > path_height * 1.25
+        if outside_local_path:
+            return transform["map_point"](raw_x, raw_y)
+        left, upper, right, lower = box
+        return (
+            left + raw_x / path_width * max(1, right - left),
+            upper + raw_y / path_height * max(1, lower - upper),
+        )
+
+    def _docx_xfrm_box(self, xfrm: ET.Element | None, *, transform: dict[str, Any]) -> tuple[float, float, float, float] | None:
+        if xfrm is None:
+            return None
+        off = self._find_first_xml_child(xfrm, "off")
+        ext = self._find_first_xml_child(xfrm, "ext")
+        if off is None or ext is None:
+            return None
+        try:
+            off_x = float(off.attrib.get("x") or 0.0)
+            off_y = float(off.attrib.get("y") or 0.0)
+            ext_x = float(ext.attrib.get("cx") or 0.0)
+            ext_y = float(ext.attrib.get("cy") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return transform["map_box"](off_x, off_y, ext_x, ext_y)
+
+    def _normalize_pixel_box(self, box: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
+        left, upper, right, lower = box
+        normalized_left = int(round(min(left, right)))
+        normalized_right = int(round(max(left, right)))
+        normalized_upper = int(round(min(upper, lower)))
+        normalized_lower = int(round(max(upper, lower)))
+        return normalized_left, normalized_upper, normalized_right, normalized_lower
+
+    def _docx_group_name(self, group_node: ET.Element) -> str | None:
+        for node in group_node.iter():
+            if self._xml_local_name(node.tag) in {"cNvPr", "docPr"}:
+                name = str(node.attrib.get("name") or "").strip()
+                if name:
+                    return name
+        return None
+
+    def _docx_shape_geometry(self, node: ET.Element) -> str:
+        for child in node.iter():
+            if self._xml_local_name(child.tag) == "prstGeom":
+                return str(child.attrib.get("prst") or "").strip()
+        if any(self._xml_local_name(child.tag) == "custGeom" for child in node.iter()):
+            return "custom"
+        return "rect"
+
+    def _docx_shape_line_color(self, node: ET.Element) -> tuple[int, int, int, int] | None:
+        line_node = self._find_first_xml_descendant(node, "ln")
+        if line_node is None:
+            return None
+        if any(self._xml_local_name(child.tag) == "noFill" for child in list(line_node)):
+            return None
+        return self._first_srgb_color(line_node) or (0, 0, 0, 255)
+
+    def _docx_shape_fill_color(self, node: ET.Element) -> tuple[int, int, int, int] | None:
+        sp_pr = self._find_first_xml_descendant(node, "spPr")
+        if sp_pr is None:
+            return None
+        for child in list(sp_pr):
+            if self._xml_local_name(child.tag) == "noFill":
+                return None
+            if self._xml_local_name(child.tag) == "solidFill":
+                return self._first_srgb_color(child)
+        return None
+
+    def _first_srgb_color(self, node: ET.Element) -> tuple[int, int, int, int] | None:
+        for child in node.iter():
+            if self._xml_local_name(child.tag) != "srgbClr":
+                continue
+            value = str(child.attrib.get("val") or "").strip()
+            if re.fullmatch(r"[0-9a-fA-F]{6}", value):
+                return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16), 255)
+        return None
+
+    def _docx_shape_line_width(self, node: ET.Element) -> int:
+        line_node = self._find_first_xml_descendant(node, "ln")
+        if line_node is None:
+            return 1
+        try:
+            return max(1, min(8, int(round(float(line_node.attrib.get("w") or OOXML_EMU_PER_PIXEL) / OOXML_EMU_PER_PIXEL))))
+        except (TypeError, ValueError):
+            return 1
+
+    def _load_docx_composite_font(self, size: int) -> Any:
+        try:
+            from PIL import ImageFont
+
+            for candidate in (
+                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            ):
+                if Path(candidate).exists():
+                    return ImageFont.truetype(candidate, size=size)
+            return ImageFont.load_default()
+        except Exception:
+            return None
+
+    def _looks_like_docx_heading_text(self, text: str | None) -> bool:
+        normalized = " ".join(str(text or "").split())
+        if not normalized or len(normalized) > 180:
+            return False
+        if re.match(r"^第[一二三四五六七八九十百]+章", normalized):
+            return True
+        if re.match(r"^\d+(?:\.\d+){0,4}\s+[^\d\s]", normalized):
+            return True
+        if re.match(r"^\d+[、.]\s*[^\d\s]", normalized):
+            return True
+        return self._docx_composite_heading_has_figure_intent(normalized)
+
+    def _docx_composite_heading_has_figure_intent(self, text: Any) -> bool:
+        lowered = str(text or "").strip().lower()
+        return bool(lowered) and any(marker in lowered for marker in COMPOSITE_FIGURE_TITLE_MARKERS)
+
+    def _xml_text_content(self, node: ET.Element) -> str:
+        return " ".join("".join(node.itertext()).split())
+
+    def _xml_local_name(self, tag: Any) -> str:
+        raw = str(tag or "")
+        if "}" in raw:
+            return raw.rsplit("}", 1)[-1]
+        return raw
+
+    def _find_first_xml_descendant(self, node: ET.Element, local_name: str) -> ET.Element | None:
+        for child in node.iter():
+            if self._xml_local_name(child.tag) == local_name:
+                return child
+        return None
+
+    def _find_first_xml_child(self, node: ET.Element, local_name: str) -> ET.Element | None:
+        for child in list(node):
+            if self._xml_local_name(child.tag) == local_name:
+                return child
+        return None
 
     def _repair_from_docx_media(
         self,

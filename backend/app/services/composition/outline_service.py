@@ -17,6 +17,7 @@ from app.models.proposal_outline import ProposalOutline
 from app.models.requirement_card import RequirementCard
 from app.services.agents.planner import PlannerAgent
 from app.services.retrieval.case_service import build_outline_examples
+from app.services.vectorstore.block_taxonomy import is_commercial_manual_section_text
 from app.services.v2_errors import ArtifactNotFoundError, ArtifactValidationError
 
 
@@ -48,6 +49,8 @@ PARAMETER_SENSITIVE_HINTS = ("参数", "配置", "清单", "规格", "容量", "
 
 def _suggest_evidence_types(title: str) -> list[str]:
     lowered = title.lower()
+    if is_commercial_manual_section_text(title):
+        return ["section"]
     if "供货" in title or "清单" in title or "物料" in title:
         return ["table", "parameter", "section"]
     if "接口" in title or "通讯" in title or "通信" in title:
@@ -88,6 +91,8 @@ def _normalize_keywords(raw_keywords: Any, *, title: str, evidence_types: list[s
 
 
 def _suggest_section_class(title: str) -> str:
+    if is_commercial_manual_section_text(title):
+        return "service"
     if "供货" in title or "清单" in title or "物料" in title:
         return "configuration"
     if "接口" in title or "通讯" in title or "通信" in title:
@@ -110,6 +115,8 @@ def _suggest_section_class(title: str) -> str:
 
 
 def _suggest_customer_specificity(*, section_class: str, title: str) -> str:
+    if is_commercial_manual_section_text(title):
+        return "low"
     if "供货" in title or "清单" in title or "物料" in title:
         return "medium"
     if "接口" in title or "通讯" in title or "通信" in title:
@@ -168,8 +175,15 @@ def _normalize_section_payload(
     section_id = str(section.get("section_id") or fallback_id)
     section_title = str(section.get("title") or f"章节 {section_id}")
     purpose = str(section.get("purpose") or section.get("description") or f"围绕{section_title}展开说明。")
+    is_manual_delivery_section = is_commercial_manual_section_text(
+        section_title,
+        purpose,
+        " ".join(str(item) for item in (section.get("keywords") or []) if item),
+    )
     evidence_types = section.get("expected_evidence_types")
-    if not isinstance(evidence_types, list) or not evidence_types:
+    if is_manual_delivery_section:
+        evidence_types = ["section"]
+    elif not isinstance(evidence_types, list) or not evidence_types:
         evidence_types = _suggest_evidence_types(section_title)
     evidence_types = [str(item) for item in evidence_types if str(item).strip()]
     if not evidence_types:
@@ -183,6 +197,8 @@ def _normalize_section_payload(
         allowed=SECTION_CLASS_CHOICES,
         fallback=_suggest_section_class(section_title),
     )
+    if is_manual_delivery_section:
+        section_class = "service"
     customer_specificity = _normalize_choice(
         section.get("customer_specificity"),
         allowed=CUSTOMER_SPECIFICITY_CHOICES,
@@ -194,12 +210,16 @@ def _normalize_section_payload(
         else any(item in evidence_types for item in ["figure", "table", "parameter"])
         or any(hint in section_title for hint in ASSET_REQUIRED_HINTS)
     )
+    if is_manual_delivery_section:
+        asset_required = False
     parameter_sensitive = (
         bool(section.get("parameter_sensitive"))
         if "parameter_sensitive" in section
         else any(item in evidence_types for item in ["table", "parameter"])
         or any(hint in section_title for hint in PARAMETER_SENSITIVE_HINTS)
     )
+    if is_manual_delivery_section:
+        parameter_sensitive = False
     reuse_level = _normalize_choice(
         section.get("reuse_level"),
         allowed=REUSE_LEVEL_CHOICES,
@@ -220,6 +240,12 @@ def _normalize_section_payload(
         ),
     )
     keywords = _normalize_keywords(section.get("keywords"), title=section_title, evidence_types=evidence_types)
+    if is_manual_delivery_section:
+        keywords = [
+            item
+            for item in keywords
+            if str(item).strip().lower() not in {"table", "parameter", "configuration"}
+        ]
 
     children_raw = section.get("children") if isinstance(section.get("children"), list) else []
     children = [
@@ -227,7 +253,7 @@ def _normalize_section_payload(
         for index, child in enumerate(children_raw, start=1)
     ]
 
-    return {
+    normalized_section = {
         "section_id": section_id,
         "title": section_title,
         "purpose": purpose,
@@ -243,6 +269,12 @@ def _normalize_section_payload(
         "keywords": keywords,
         "children": children,
     }
+    explicit_target_section_type = str(section.get("target_section_type") or "").strip()
+    if explicit_target_section_type:
+        normalized_section["target_section_type"] = explicit_target_section_type
+    elif is_manual_delivery_section:
+        normalized_section["target_section_type"] = "commercial_manual_only"
+    return normalized_section
 
 
 def normalize_outline_payload(payload: dict[str, Any], *, project_name: str) -> dict[str, Any]:

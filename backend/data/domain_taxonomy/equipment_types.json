@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "equipment_types": [
+    {"key": "lci", "label": "LCI 变频软起系统", "keywords": ["lci"]},
+    {"key": "vfd", "label": "高压变频器", "keywords": ["变频", "vfd"]},
+    {"key": "soft_starter", "label": "高压软起动装置", "keywords": ["软起动", "软启动", "液阻", "水电阻", "固态软起", "自耦变"]},
+    {"key": "motor", "label": "电机", "keywords": ["电机", "同步机", "异步机"]},
+    {"key": "transformer", "label": "变压器", "keywords": ["变压器", "整流变压器"]},
+    {"key": "switchgear", "label": "开关柜", "keywords": ["开关柜", "高压柜", "配电柜"]},
+    {"key": "cabinet", "label": "柜体", "keywords": ["柜体", "控制柜", "功率柜", "旁路柜", "机柜"]},
+    {"key": "dcs_plc_interface", "label": "DCS/PLC 接口", "keywords": ["dcs", "plc", "通讯接口", "通信接口", "控制接口", "上位机接口"]},
+    {"key": "cooling_system", "label": "冷却系统", "keywords": ["冷却", "水冷", "风冷", "冷却系统"]},
+    {"key": "fan_blower", "label": "风机/鼓风机", "keywords": ["风机", "鼓风机", "环冷风机"]},
+    {"key": "compressor", "label": "压缩机", "keywords": ["压缩机", "空压机"]}
+  ]
+}

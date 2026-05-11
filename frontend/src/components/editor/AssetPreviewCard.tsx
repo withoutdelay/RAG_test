@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { ExternalLink, Eye } from 'lucide-react';
+import { ExternalLink, Eye, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { buildAssetContentUrl } from '@/lib/api';
 import type { RecommendedAsset, SectionDraft } from '@/lib/types';
@@ -40,6 +40,12 @@ export function AssetPreviewCard({
   const assetContentUrl = asset?.asset_id && binaryPreview ? buildAssetContentUrl(asset.asset_id) : null;
   const summaryText = (asset?.caption || asset?.preview_text || '').trim();
   const metadata = (asset?.metadata || {}) as Record<string, unknown>;
+  const sourceBinding = (metadata.source_binding || {}) as Record<string, unknown>;
+  const stabilityGate = (metadata.asset_stability_gate || {}) as Record<string, unknown>;
+  const gateBlockingFlags = Array.isArray(stabilityGate.blocking_flags) ? stabilityGate.blocking_flags.map(String) : [];
+  const gateWarningFlags = Array.isArray(stabilityGate.warning_flags) ? stabilityGate.warning_flags.map(String) : [];
+  const sourceTier = typeof sourceBinding.tier === 'string' ? sourceBinding.tier : '';
+  const sourceSectionId = typeof sourceBinding.source_section_id === 'string' ? sourceBinding.source_section_id : '';
   const breakdown = asset?.score_breakdown || (metadata.retrieval_score_breakdown as Record<string, number | string> | undefined);
   const visualBackend =
     typeof breakdown?.visual_backend === 'string'
@@ -80,6 +86,37 @@ export function AssetPreviewCard({
           {[asset?.document_name, asset?.heading_path].filter(Boolean).join(' / ')}
         </p>
       )}
+      {sourceTier || sourceSectionId || gateBlockingFlags.length > 0 || gateWarningFlags.length > 0 ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+          {sourceTier ? (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 font-medium ${
+                sourceTier === 'high'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : 'border-amber-200 bg-amber-50 text-amber-700'
+              }`}
+            >
+              {sourceTier === 'high' ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
+              source {sourceTier}
+            </span>
+          ) : null}
+          {sourceSectionId ? (
+            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-slate-600">
+              section {sourceSectionId}
+            </span>
+          ) : null}
+          {gateWarningFlags.slice(0, 2).map((flag) => (
+            <span key={`warn-${flag}`} className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 font-medium text-amber-700">
+              {flag}
+            </span>
+          ))}
+          {gateBlockingFlags.slice(0, 2).map((flag) => (
+            <span key={`block-${flag}`} className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 font-medium text-rose-700">
+              {flag}
+            </span>
+          ))}
+        </div>
+      ) : null}
       {assetContentUrl && !imageFailed ? (
         <div className="mt-3 overflow-hidden rounded-[1.25rem] border border-white/80 bg-white/90 p-3 shadow-[0_20px_50px_-28px_rgba(15,23,42,0.45)]">
           <div className="relative overflow-hidden rounded-[1rem] border border-slate-200/80 bg-slate-50">

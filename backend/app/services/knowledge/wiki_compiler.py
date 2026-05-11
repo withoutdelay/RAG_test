@@ -3,153 +3,33 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import re
 from typing import Any, Iterable, Mapping
 
+from app.services.domain.taxonomy_registry import (
+    get_forbidden_phrase_registry,
+    get_retrieval_policy_registry,
+    get_taxonomy_registry,
+)
+from app.services.knowledge.wiki_quality import (
+    evaluate_wiki_item_quality,
+    is_publishable_evidence_item,
+    quality_score_for_item,
+    status_for_quality,
+)
 
-INTERFACE_SECTION_TYPES = {
-    "communication_interface",
-    "protection_interlock",
-    "control_logic",
-}
-EQUIPMENT_TYPE_LABELS = {
-    "vfd": "高压变频器",
-    "soft_starter": "高压软起动装置",
-    "motor": "电机",
-    "transformer": "变压器",
-    "switchgear": "开关柜",
-    "fan_blower": "风机/鼓风机",
-    "compressor": "压缩机",
-    "cooling_system": "冷却系统",
-    "lci": "LCI 变频软起系统",
-    "dcs_plc_interface": "DCS/PLC 接口",
-}
-SECTION_TYPE_LABELS = {
-    "vfd_spec": "变频器规格",
-    "starter_spec": "软起动规格",
-    "motor_spec": "电机参数",
-    "transformer_spec": "变压器参数",
-    "communication_interface": "通讯接口",
-    "protection_interlock": "联锁保护",
-    "control_logic": "控制逻辑",
-    "main_circuit_scheme": "主回路方案",
-    "overall_solution": "总体方案",
-    "site_conditions": "现场条件",
-    "design_basis": "设计依据",
-    "service_support": "服务支持",
-    "commissioning_acceptance": "调试验收",
-    "bom_or_supply_list": "供货清单",
-    "supply_scope": "供货范围",
-    "cabinet_layout": "柜体布置",
-    "commercial_manual_only": "商务说明",
-}
-PRODUCT_FAMILY_DEFINITIONS = {
-    "vfd_system": {
-        "title": "高压变频器方案族",
-        "aliases": ["高压变频器", "中压变频器", "变频装置", "变频柜", "VFD"],
-    },
-    "lci_system": {
-        "title": "LCI 变频软起方案族",
-        "aliases": ["LCI", "LCI 软起", "变频软起"],
-    },
-    "soft_starter_system": {
-        "title": "高压软起动方案族",
-        "aliases": ["软起动", "软启动", "高压软起动装置"],
-    },
-    "water_resistance_starter": {
-        "title": "水电阻起动柜方案族",
-        "aliases": ["水电阻柜", "水电阻起动柜"],
-    },
-    "permanent_magnet_vfd_upgrade": {
-        "title": "永磁电机变频改造方案族",
-        "aliases": ["永磁", "永磁电机", "节能改造", "变频改造"],
-    },
-    "maintenance_service": {
-        "title": "运维巡检方案族",
-        "aliases": ["维保", "巡检", "检修", "维护"],
-    },
-    "generic_engineering_solution": {
-        "title": "通用工程方案族",
-        "aliases": ["工程方案", "技术方案", "系统方案"],
-    },
-}
-MODULE_CARD_DEFINITIONS = {
-    "power-cell": {
-        "title": "功率单元",
-        "aliases": ["功率单元", "功率模块", "逆变单元", "整流单元", "H桥"],
-    },
-    "control-cabinet": {
-        "title": "控制柜",
-        "aliases": ["控制柜", "控制单元", "PLC柜"],
-    },
-    "transformer-cabinet": {
-        "title": "变压器柜",
-        "aliases": ["变压器柜", "隔离变压器", "整流变压器", "移相变压器"],
-    },
-    "precharge-cabinet": {
-        "title": "预充柜",
-        "aliases": ["预充柜"],
-    },
-    "power-cabinet": {
-        "title": "功率柜",
-        "aliases": ["功率柜"],
-    },
-    "bypass-cabinet": {
-        "title": "旁路柜",
-        "aliases": ["旁路柜", "旁路开关柜"],
-    },
-    "output-reactor-cabinet": {
-        "title": "输出电抗器柜",
-        "aliases": ["输出电抗器柜"],
-    },
-    "water-resistance-cabinet": {
-        "title": "水电阻柜",
-        "aliases": ["水电阻柜"],
-    },
-    "thyristor-stack": {
-        "title": "晶闸管",
-        "aliases": ["晶闸管"],
-    },
-    "igbt-stack": {
-        "title": "IGBT",
-        "aliases": ["IGBT"],
-    },
-    "cooling-fan": {
-        "title": "冷却风机",
-        "aliases": ["冷却风机"],
-    },
-}
-SECTION_TEMPLATE_GUIDANCE = {
-    "communication_interface": [
-        "说明 DCS/PLC/现场设备之间的接口边界。",
-        "给出 DI/DO、AI/AO、通讯协议和关键联锁信号。",
-        "说明信号方向、责任边界和异常处理方式。",
-    ],
-    "protection_interlock": [
-        "说明启动、停机、报警、跳闸和旁路条件。",
-        "给出关键联锁链路与故障响应逻辑。",
-        "避免用营销语言替代动作条件和闭锁关系。",
-    ],
-    "control_logic": [
-        "按阶段说明控制流程、状态切换和关键判断条件。",
-        "明确本地控制、远方控制和自动控制的边界。",
-        "补充异常状态的保护与恢复路径。",
-    ],
-    "main_circuit_scheme": [
-        "说明电力主回路、隔离、旁路和切换路径。",
-        "突出输入输出变压器、功率单元和电机连接方式。",
-        "优先使用系统图或一次图辅助说明。",
-    ],
-}
-FORBIDDEN_PHRASE_SEEDS = [
-    {"phrase": "我公司", "reason": "客户稿中口径不稳，容易暴露供应方视角", "preferred": "本方案 / 本系统 / 本装置"},
-    {"phrase": "我们团队经验证明", "reason": "主观营销口径，不适合作为技术依据", "preferred": "根据既有项目经验 / 按设计边界说明"},
-    {"phrase": "国内领先", "reason": "缺乏可验证依据", "preferred": "按参数、标准、功能事实描述"},
-    {"phrase": "国际先进", "reason": "泛化宣传语，无法校验", "preferred": "列出标准、指标和配置事实"},
-    {"phrase": "绝对满足", "reason": "绝对化表达存在风险", "preferred": "在给定边界条件下满足"},
-    {"phrase": "唯一方案", "reason": "过度结论化", "preferred": "推荐方案 / 标准配置 / 备选方案"},
-]
+_DOMAIN_TAXONOMY = get_taxonomy_registry()
+_RETRIEVAL_POLICIES = get_retrieval_policy_registry()
+
+INTERFACE_SECTION_TYPES = {"communication_interface", "protection_interlock", "control_logic"}
+EQUIPMENT_TYPE_LABELS = dict(_DOMAIN_TAXONOMY.equipment_types.labels)
+SECTION_TYPE_LABELS = dict(_DOMAIN_TAXONOMY.section_types.labels)
+PRODUCT_FAMILY_DEFINITIONS = _RETRIEVAL_POLICIES.wiki_mapping("product_families")
+MODULE_CARD_DEFINITIONS = _RETRIEVAL_POLICIES.wiki_mapping("module_cards")
+SECTION_TEMPLATE_GUIDANCE = _RETRIEVAL_POLICIES.wiki_mapping("section_template_guidance")
+FORBIDDEN_PHRASE_SEEDS = [dict(item) for item in get_forbidden_phrase_registry().items]
 SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
 LOW_VALUE_HEADING_SUBSTRINGS = (
     "公司简介",
@@ -238,6 +118,12 @@ def compile_knowledge_wiki(
         "section_templates": section_templates,
         "forbidden_phrases": forbidden_phrases,
     }
+    wiki_items = build_wiki_items(
+        structured_assets=structured_assets,
+        outline_entries=outline_entries_list,
+        block_entries=block_entries_list,
+        generated_at=normalized_generated_at,
+    )
 
     index_page = _build_index_page(
         pages=pages,
@@ -255,8 +141,129 @@ def compile_knowledge_wiki(
         "pages": page_map,
         "manifest": manifest,
         "structured_assets": structured_assets,
+        "wiki_items": wiki_items,
         "log_entry": log_entry,
     }
+
+
+def build_wiki_items(
+    *,
+    structured_assets: Mapping[str, Any],
+    outline_entries: Iterable[dict[str, Any]],
+    block_entries: Iterable[dict[str, Any]],
+    generated_at: datetime,
+    published_items: Iterable[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    outline_entries_list = [entry for entry in outline_entries if isinstance(entry, dict)]
+    block_entries_list = [entry for entry in block_entries if isinstance(entry, dict)]
+    existing_items = {
+        str(item.get("item_id") or ""): item
+        for item in (published_items or [])
+        if isinstance(item, dict) and str(item.get("item_id") or "")
+    }
+    items: list[dict[str, Any]] = []
+
+    for entry in structured_assets.get("glossary") or []:
+        if not isinstance(entry, dict):
+            continue
+        primary = str(entry.get("display_primary_term") or entry.get("primary_term") or "").strip()
+        aliases = [str(item).strip() for item in (entry.get("display_aliases") or entry.get("aliases") or []) if str(item).strip()]
+        if not primary:
+            continue
+        evidence = _find_evidence_for_terms(
+            block_entries=block_entries_list,
+            terms=[primary, *aliases, str(entry.get("primary_term") or "")],
+            limit=4,
+        )
+        item_id = f"term_alias:{_item_slug(primary)}"
+        items.append(
+            _build_wiki_item(
+                item_id=item_id,
+                item_type="term_alias",
+                canonical_name=primary,
+                aliases=aliases,
+                summary=f"统一“{primary}”及其常见别名，减少章节生成中的术语漂移。",
+                evidence=evidence,
+                source_documents=_source_documents_from_evidence(evidence),
+                generated_at=generated_at,
+                created_by="compiler",
+                existing_item=existing_items.get(item_id),
+            )
+        )
+
+    for card in structured_assets.get("product_cards") or []:
+        if not isinstance(card, dict):
+            continue
+        family_key = str(card.get("product_family") or "").strip()
+        title = str(card.get("title") or family_key).strip()
+        if not family_key or not title:
+            continue
+        source_documents = [str(item).strip() for item in (card.get("source_documents") or []) if str(item).strip()]
+        evidence = _find_evidence_for_card(
+            block_entries=block_entries_list,
+            source_documents=source_documents,
+            section_types=[
+                str(item.get("section_type") or "")
+                for item in (card.get("top_section_types") or [])
+                if isinstance(item, dict)
+            ],
+            equipment_types=[
+                str(item.get("equipment_type") or "")
+                for item in (card.get("top_equipment_types") or [])
+                if isinstance(item, dict)
+            ],
+            fallback_terms=[title, *[str(item) for item in (card.get("aliases") or [])]],
+            limit=5,
+        )
+        item_id = f"product_family:{_slugify(family_key)}"
+        items.append(
+            _build_wiki_item(
+                item_id=item_id,
+                item_type="product_family",
+                canonical_name=title,
+                aliases=[str(item).strip() for item in (card.get("aliases") or []) if str(item).strip()],
+                summary=f"围绕 {title} 汇总的产品族/方案族知识卡。",
+                evidence=evidence,
+                source_documents=source_documents or _source_documents_from_evidence(evidence),
+                generated_at=generated_at,
+                created_by="compiler",
+                existing_item=existing_items.get(item_id),
+            )
+        )
+
+    for template in structured_assets.get("section_templates") or []:
+        if not isinstance(template, dict):
+            continue
+        section_type = str(template.get("section_type") or "").strip()
+        title = str(template.get("title") or section_type).strip()
+        if not section_type or not title:
+            continue
+        source_documents = [str(item).strip() for item in (template.get("source_documents") or []) if str(item).strip()]
+        evidence = _find_evidence_for_card(
+            block_entries=block_entries_list,
+            source_documents=source_documents,
+            section_types=[section_type],
+            equipment_types=[],
+            fallback_terms=[title, *[str(item) for item in (template.get("common_headings") or [])]],
+            limit=5,
+        )
+        item_id = f"section_template:{_slugify(section_type)}"
+        items.append(
+            _build_wiki_item(
+                item_id=item_id,
+                item_type="section_template",
+                canonical_name=title,
+                aliases=[str(item).strip() for item in (template.get("common_headings") or []) if str(item).strip()],
+                summary=f"围绕 {title} 归纳出的章节模板。",
+                evidence=evidence,
+                source_documents=source_documents or _source_documents_from_evidence(evidence),
+                generated_at=generated_at,
+                created_by="compiler",
+                existing_item=existing_items.get(item_id),
+            )
+        )
+
+    return sorted(items, key=lambda item: (str(item.get("item_type") or ""), str(item.get("item_id") or "")))
 
 
 def _normalize_term_lexicon(term_lexicon: Mapping[str, Iterable[str]] | None) -> dict[str, tuple[str, ...]]:
@@ -759,6 +766,193 @@ def _build_log_entry(*, generated_at: datetime, manifest: dict[str, Any]) -> str
     )
 
 
+def _build_wiki_item(
+    *,
+    item_id: str,
+    item_type: str,
+    canonical_name: str,
+    aliases: list[str],
+    summary: str,
+    evidence: list[dict[str, Any]],
+    source_documents: list[str],
+    generated_at: datetime,
+    created_by: str,
+    existing_item: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    quality = evaluate_wiki_item_quality(
+        item_type=item_type,
+        canonical_name=canonical_name,
+        aliases=aliases,
+        evidence=evidence,
+        source_documents=source_documents,
+        existing_item=existing_item,
+    )
+    return {
+        "item_id": item_id,
+        "item_type": item_type,
+        "canonical_name": canonical_name,
+        "aliases": _dedupe_keep_order(aliases),
+        "summary": summary,
+        "source_documents": _dedupe_keep_order(source_documents),
+        "evidence": evidence,
+        "quality_score": quality.quality_score,
+        "quality_flags": quality.quality_flags,
+        "status": quality.status,
+        "created_by": created_by,
+        "updated_at": generated_at.astimezone(timezone.utc).isoformat(),
+    }
+
+
+def _quality_flags_for_item(
+    *,
+    evidence: list[dict[str, Any]],
+    source_documents: list[str],
+    existing_item: dict[str, Any] | None,
+    canonical_name: str,
+    aliases: list[str],
+) -> list[str]:
+    return evaluate_wiki_item_quality(
+        item_type="wiki_item",
+        canonical_name=canonical_name,
+        aliases=aliases,
+        evidence=evidence,
+        source_documents=source_documents,
+        existing_item=existing_item,
+    ).quality_flags
+
+
+def _quality_score_for_item(
+    *,
+    item_type: str,
+    evidence: list[dict[str, Any]],
+    source_documents: list[str],
+    quality_flags: list[str],
+) -> float:
+    return quality_score_for_item(
+        item_type=item_type,
+        evidence=evidence,
+        source_documents=source_documents,
+        quality_flags=quality_flags,
+    )
+
+
+def _status_for_item(*, quality_score: float, quality_flags: list[str]) -> str:
+    return status_for_quality(quality_score=quality_score, quality_flags=quality_flags)
+
+
+def _published_item_conflicts(*, existing_item: dict[str, Any], canonical_name: str, aliases: list[str]) -> bool:
+    existing_name = str(existing_item.get("canonical_name") or "").strip()
+    if existing_name and existing_name != canonical_name:
+        return True
+    existing_aliases = {str(item).strip() for item in (existing_item.get("aliases") or []) if str(item).strip()}
+    new_aliases = {str(item).strip() for item in aliases if str(item).strip()}
+    return bool(existing_aliases and new_aliases and existing_aliases != new_aliases)
+
+
+def _evidence_has_required_fields(item: dict[str, Any]) -> bool:
+    return is_publishable_evidence_item(item)
+
+
+def _find_evidence_for_terms(
+    *,
+    block_entries: list[dict[str, Any]],
+    terms: list[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    normalized_terms = [str(term).strip().casefold() for term in terms if str(term).strip()]
+    evidence: list[dict[str, Any]] = []
+    for entry in block_entries:
+        text = " ".join(
+            str(entry.get(key) or "")
+            for key in ("heading_path", "source_heading", "section_summary", "content", "semantic_retrieval_text")
+        ).casefold()
+        if not any(term and term in text for term in normalized_terms):
+            continue
+        item = _evidence_from_entry(entry)
+        if item:
+            evidence.append(item)
+        if len(evidence) >= limit:
+            break
+    return _dedupe_evidence(evidence)
+
+
+def _find_evidence_for_card(
+    *,
+    block_entries: list[dict[str, Any]],
+    source_documents: list[str],
+    section_types: list[str],
+    equipment_types: list[str],
+    fallback_terms: list[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    source_document_set = {str(item).strip() for item in source_documents if str(item).strip()}
+    section_type_set = {str(item).strip().lower() for item in section_types if str(item).strip()}
+    equipment_type_set = {str(item).strip().lower() for item in equipment_types if str(item).strip()}
+    fallback_terms_normalized = [str(term).strip().casefold() for term in fallback_terms if str(term).strip()]
+    scored_entries: list[tuple[int, dict[str, Any]]] = []
+    for entry in block_entries:
+        score = 0
+        file_name = str(entry.get("file_name") or "").strip()
+        if source_document_set and file_name in source_document_set:
+            score += 4
+        if section_type_set and str(entry.get("section_type") or "").strip().lower() in section_type_set:
+            score += 3
+        if equipment_type_set and str(entry.get("equipment_type") or "").strip().lower() in equipment_type_set:
+            score += 2
+        if fallback_terms_normalized:
+            text = " ".join(str(entry.get(key) or "") for key in ("heading_path", "section_summary", "content")).casefold()
+            if any(term and term in text for term in fallback_terms_normalized):
+                score += 1
+        if score <= 0:
+            continue
+        scored_entries.append((score, entry))
+    scored_entries.sort(key=lambda item: item[0], reverse=True)
+    return _dedupe_evidence(
+        item
+        for _score, entry in scored_entries[: limit * 2]
+        if (item := _evidence_from_entry(entry))
+    )[:limit]
+
+
+def _evidence_from_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
+    quote = _truncate_text(str(entry.get("section_summary") or entry.get("content") or "").strip(), limit=260)
+    heading_path = str(entry.get("heading_path") or entry.get("source_heading") or entry.get("section_path") or "").strip()
+    sample_id = str(entry.get("sample_id") or "").strip()
+    raw_document_id = str(entry.get("raw_document_id") or entry.get("source_doc_id") or sample_id or entry.get("file_name") or "").strip()
+    source_section_id = str(entry.get("source_section_id") or "").strip()
+    if not any((quote, heading_path, sample_id, raw_document_id, source_section_id)):
+        return None
+    return {
+        "sample_id": sample_id,
+        "raw_document_id": raw_document_id,
+        "source_section_id": source_section_id,
+        "heading_path": heading_path,
+        "source_document": str(entry.get("file_name") or "").strip(),
+        "evidence_quote": quote,
+    }
+
+
+def _source_documents_from_evidence(evidence: list[dict[str, Any]]) -> list[str]:
+    return _dedupe_keep_order(str(item.get("source_document") or "").strip() for item in evidence if str(item.get("source_document") or "").strip())
+
+
+def _dedupe_evidence(values: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in values:
+        signature = (
+            str(item.get("sample_id") or ""),
+            str(item.get("raw_document_id") or ""),
+            str(item.get("source_section_id") or ""),
+            str(item.get("evidence_quote") or "")[:120],
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduped.append(item)
+    return deduped
+
+
 def _extract_heading_label(entry: dict[str, Any]) -> str:
     label = str(entry.get("source_heading") or entry.get("heading_path") or entry.get("section_path") or "").strip()
     return "" if _is_low_value_heading(label) else label
@@ -927,6 +1121,16 @@ def _slugify(text: str) -> str:
     normalized = SLUG_PATTERN.sub("-", normalized)
     normalized = normalized.strip("-")
     return normalized or "page"
+
+
+def _item_slug(text: str) -> str:
+    slug = _slugify(text)
+    if slug != "page":
+        return slug
+    normalized = str(text or "").strip()
+    if not normalized:
+        return slug
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
 
 
 def _truncate_text(text: str, *, limit: int) -> str:

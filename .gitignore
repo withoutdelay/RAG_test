@@ -43,8 +43,19 @@ scripts/*.pid
 /.windsurf/
 /GEMINI.md
 
-backend/data/knowledge_wiki/
+backend/data/knowledge_wiki/*
+!backend/data/knowledge_wiki/
+!backend/data/knowledge_wiki/published/
+backend/data/knowledge_wiki/published/*
+!backend/data/knowledge_wiki/published/.gitkeep
+!backend/data/knowledge_wiki/draft/
+backend/data/knowledge_wiki/draft/*
+!backend/data/knowledge_wiki/draft/.gitkeep
+!backend/data/knowledge_wiki/rejected/
+backend/data/knowledge_wiki/rejected/*
+!backend/data/knowledge_wiki/rejected/.gitkeep
 backend/data/visual_index/
+backend/data/*.zip
 install-assets/*
 !install-assets/.gitkeep
 output/project-replay-history/

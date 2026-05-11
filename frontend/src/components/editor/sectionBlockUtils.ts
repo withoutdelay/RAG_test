@@ -4,6 +4,7 @@
 
 import type {
   Citation,
+  AssetRetrievalTrace,
   EvidenceCard,
   RecommendedAsset,
   ReuseBlockLike,
@@ -351,6 +352,15 @@ export function getGenerationDetails(section: SectionDraft): SectionGenerationDe
 
 export function getReuseTrace(section: SectionDraft): ReuseRetrievalTrace | undefined {
   return getSectionValidatorResult(section)?.reuse_pack?.retrieval_trace;
+}
+
+export function getAssetTrace(section: SectionDraft): AssetRetrievalTrace | undefined {
+  const validatorResult = getSectionValidatorResult(section);
+  if (validatorResult?.asset_trace) return validatorResult.asset_trace;
+  const retrievalTrace = validatorResult?.generation_details?.retrieval_trace as
+    | { layers?: { assets?: AssetRetrievalTrace } }
+    | undefined;
+  return retrievalTrace?.layers?.assets;
 }
 
 export function reusableBlockOrder(block: ReuseBlockLike, fallbackIndex: number): number {

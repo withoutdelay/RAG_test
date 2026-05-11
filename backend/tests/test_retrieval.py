@@ -12,6 +12,7 @@ from app.services.retrieval.asset_service import (
     _asset_anchor_boost,
     _asset_noise_penalty,
     _asset_quality_flags,
+    _asset_source_binding,
     _asset_summary_boost,
     _asset_taxonomy_boost,
     _build_asset_display_title,
@@ -1134,10 +1135,88 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
                 (0.2, correct, {"final": 0.2}, ["low_text_score"]),
             ],
             anchor_document_names={"乌海建龙技术方案.docx"},
+            anchor_headings=["3.2 高压变频器主回路方案说明"],
             anchor_sample_ids={"sample-a"},
             anchor_image_document_names={"乌海建龙技术方案.docx"},
             anchor_image_sample_ids={"sample-a"},
             anchor_image_source_section_ids={"3.2"},
+        )
+
+        self.assertEqual([item[1].asset_id for item in promoted], [correct_asset_id])
+        self.assertEqual(promoted[0][2]["source_section_relation"], "descendant")
+
+    def test_promote_source_section_asset_matches_recovers_heading_child_when_section_id_missing(self) -> None:
+        correct_asset_id = uuid4()
+        correct = AssetCard(
+            asset_card_id="asset:correct",
+            asset_id=correct_asset_id,
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="illustration",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=False,
+            page_no=None,
+            heading_path="3.1 变频软起系统单线图 Single line Diagram",
+            title="3.1 变频软起系统单线图 Single line Diagram",
+            display_title="3.1 变频软起系统单线图 Single line Diagram",
+            caption=None,
+            source_ref="#/pictures/2",
+            asset_uri="s3://correct",
+            preview_text="单套变频驱动系统的单线图如下所示。",
+            retrieval_text="LCI SFC ICB OCB RCB 单线图 主回路",
+            section_type="unknown",
+            equipment_type="generic",
+            content_form="figure",
+            metadata={
+                "sample_id": "uploaded-863a4465",
+                "asset_audit_status": "review_passed",
+                "asset_quality_score": 0.86,
+            },
+        )
+        unrelated = AssetCard(
+            asset_card_id="asset:unrelated",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="其他方案.docx",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="low",
+            usage_mode="reference_only",
+            review_required=False,
+            page_no=3,
+            heading_path="3.1 一次方案图",
+            title="高压固态软起动一次方案图",
+            display_title="高压固态软起动一次方案图",
+            caption=None,
+            source_ref="#/pictures/1",
+            asset_uri="s3://unrelated",
+            preview_text="高压固态软起动主回路。",
+            retrieval_text="高压固态软起动 一次方案图",
+            section_type="starter_spec",
+            equipment_type="soft_starter",
+            content_form="figure",
+            metadata={"sample_id": "sample-b", "source_section_id": "3.1"},
+        )
+
+        promoted = _promote_source_section_asset_matches(
+            scored_cards=[
+                (0.95, unrelated, {"final": 0.95}, ["high_text_score"]),
+                (0.2, correct, {"final": 0.2}, ["low_text_score"]),
+            ],
+            anchor_document_names={"宝山钢铁股份有限公司三鼓风LCI改造方案.docx"},
+            anchor_headings=["3. 系统方案 SYSTEM SOLUTION"],
+            anchor_sample_ids={"uploaded-863a4465"},
+            anchor_image_document_names={"宝山钢铁股份有限公司三鼓风LCI改造方案.docx"},
+            anchor_image_sample_ids={"uploaded-863a4465"},
+            anchor_image_source_section_ids={"3"},
         )
 
         self.assertEqual([item[1].asset_id for item in promoted], [correct_asset_id])
@@ -1315,6 +1394,43 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         )
 
         self.assertTrue(_asset_quality_flags(card=logo)["low_information"])
+
+    def test_asset_source_binding_marks_missing_section_as_non_high_confidence(self) -> None:
+        card = AssetCard(
+            asset_card_id="asset:weak",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="样板.pdf",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=3,
+            heading_path="4.1 LCI 变频软起系统方案",
+            title="LCI变频软起系统图",
+            display_title="LCI变频软起系统图",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/lci.png",
+            preview_text="LCI 主回路拓扑。",
+            retrieval_text="LCI 主回路拓扑",
+            section_type="main_circuit_scheme",
+            equipment_type="motor_drive",
+            content_form="figure",
+            metadata={"sample_id": "sample-a"},
+        )
+
+        binding = _asset_source_binding(card=card)
+        quality = _asset_quality_flags(card=card)
+
+        self.assertEqual(binding["tier"], "medium")
+        self.assertIn("source_section_id", binding["missing_fields"])
+        self.assertFalse(binding["high_confidence_eligible"])
+        self.assertTrue(quality["source_section_missing"])
 
     def test_build_preview_text_uses_semantic_summary_when_context_is_sparse(self) -> None:
         preview = _build_preview_text(

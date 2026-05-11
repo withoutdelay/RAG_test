@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -29,11 +30,14 @@ def authenticate_credentials(username: str, password: str) -> AuthenticatedUser 
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Authentication is enabled but AUTH_PASSWORD or AUTH_PASSWORD_HASH is not configured",
         )
-    if not secrets.compare_digest(str(username or ""), settings.auth_username):
+    users = _configured_auth_users()
+    requested_username = str(username or "")
+    credential = users.get(requested_username)
+    if credential is None:
         return None
-    if not _verify_password(password):
+    if not _verify_password(password, credential):
         return None
-    return AuthenticatedUser(username=settings.auth_username)
+    return AuthenticatedUser(username=requested_username)
 
 
 def create_session_token(user: AuthenticatedUser) -> str:
@@ -68,7 +72,7 @@ def verify_session_token(token: str | None) -> AuthenticatedUser | None:
     username = str(payload.get("sub") or "")
     if not username:
         return None
-    if settings.auth_enabled and not secrets.compare_digest(username, settings.auth_username):
+    if settings.auth_enabled and username not in _configured_auth_users():
         return None
     return AuthenticatedUser(username=username)
 
@@ -112,15 +116,53 @@ def expired_session_cookie_kwargs() -> dict[str, Any]:
 
 
 def _auth_is_configured() -> bool:
-    settings = get_settings()
-    return bool(settings.auth_password or settings.auth_password_hash)
+    return bool(_configured_auth_users())
 
 
-def _verify_password(password: str) -> bool:
+def _configured_auth_users() -> dict[str, str]:
     settings = get_settings()
-    if settings.auth_password_hash:
-        return _verify_password_hash(password, settings.auth_password_hash)
-    return secrets.compare_digest(str(password or ""), str(settings.auth_password or ""))
+    users: dict[str, str] = {}
+    if settings.auth_username and (settings.auth_password or settings.auth_password_hash):
+        users[str(settings.auth_username)] = str(settings.auth_password_hash or settings.auth_password or "")
+    users.update(_parse_auth_users(settings.auth_users))
+    return {username: credential for username, credential in users.items() if username and credential}
+
+
+def _parse_auth_users(raw_users: str | None) -> dict[str, str]:
+    raw = str(raw_users or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return {
+            str(username).strip(): str(credential)
+            for username, credential in parsed.items()
+            if str(username).strip() and str(credential)
+        }
+
+    users: dict[str, str] = {}
+    for item in re.split(r"[;,\n]+", raw):
+        item = item.strip()
+        if not item:
+            continue
+        separator = ":" if ":" in item else "=" if "=" in item else ""
+        if not separator:
+            continue
+        username, credential = item.split(separator, 1)
+        username = username.strip()
+        credential = credential.strip()
+        if username and credential:
+            users[username] = credential
+    return users
+
+
+def _verify_password(password: str, credential: str) -> bool:
+    if str(credential or "").startswith("pbkdf2_sha256$"):
+        return _verify_password_hash(password, credential)
+    return secrets.compare_digest(str(password or ""), str(credential or ""))
 
 
 def _verify_password_hash(password: str, password_hash: str) -> bool:
@@ -156,4 +198,3 @@ def _b64encode(value: bytes) -> str:
 def _b64decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
     return base64.urlsafe_b64decode((value + padding).encode("ascii"))
-

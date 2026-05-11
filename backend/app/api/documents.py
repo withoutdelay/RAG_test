@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import logging
@@ -8,9 +9,11 @@ import mimetypes
 import uuid
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import Any
 from uuid import UUID
+import zipfile
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import String, cast, delete, select
 from sqlalchemy.exc import IntegrityError
@@ -42,7 +45,7 @@ from app.services.knowledge import (
     write_uploaded_document_library_cache,
 )
 from app.services.parsing.docling_parser import ParsedDocument
-from app.services.parsing.parser import ParserService
+from app.services.parsing.parser import CloudParseRequiredError, ParserService
 from app.services.parsing.section_catalog import flatten_section_catalog, normalize_section_heading
 from app.services.parsing.table_profile import build_table_profile
 from app.services.retrieval import AssetRetrievalService
@@ -66,6 +69,8 @@ LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE = {
 LIBRARY_IMPORT_DOC_TYPES = frozenset(LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE.values())
 DEDUPABLE_LIBRARY_PARSE_STATUSES = {"pending", "queued", "parsing", "done", "parse_insufficient", "failed"}
 RECOVERABLE_DOCUMENT_PARSE_STATUSES = {"pending", "queued", "parsing"}
+CONVERSION_DOC_TYPES = {"legacy_conversion"}
+CONVERSION_ROUTES = {"conversion_required", "conversion_failed"}
 
 
 def _extract_document_id_from_parse_job(job: Job) -> UUID | None:
@@ -123,6 +128,89 @@ def _resolve_document_parse_outcome(*, doc_type: str, parsed_metadata: dict[str,
     }
 
 
+def _apply_successful_conversion_route(*, document: Document, metadata: dict) -> dict:
+    """Move converted materials to review after parsing succeeds.
+
+    A conversion-required material is not safe to auto-promote into the main library,
+    but keeping it as legacy_conversion after a successful cloud parse makes the audit
+    page look as if conversion is still pending.
+    """
+
+    if document.project_id is not None:
+        return metadata
+    current_route = str(metadata.get("material_route") or "").strip()
+    if document.doc_type not in CONVERSION_DOC_TYPES and current_route not in CONVERSION_ROUTES:
+        return metadata
+    previous_doc_type = document.doc_type
+    previous_route = current_route or "conversion_required"
+    document.doc_type = "historical_review"
+    return {
+        **metadata,
+        "previous_doc_type": metadata.get("previous_doc_type") or previous_doc_type,
+        "previous_material_route": metadata.get("previous_material_route") or previous_route,
+        "material_route": "review_pending",
+        "library_track": "review_pending",
+        "auto_route_after_conversion": True,
+        "auto_route_reason": "cloud_parse_succeeded",
+    }
+
+
+def _clean_successful_parse_metadata(*, metadata: dict, parse_status: str, figure_asset_count: int) -> dict:
+    if parse_status != "done":
+        return metadata
+    cleaned = dict(metadata)
+    cleaned.pop("parse_error", None)
+    cleaned["requires_cloud_parse"] = False
+    if str(cleaned.get("parse_gate_status") or "").strip().lower() in {"insufficient", "parse_insufficient"}:
+        cleaned["parse_gate_status"] = "ready"
+    if str(cleaned.get("parse_gate_reason") or "").strip().lower() == "cloud_parse_required":
+        cleaned["parse_gate_reason"] = None
+    if figure_asset_count > 0:
+        cleaned.pop("asset_enrichment_deferred", None)
+    return cleaned
+
+
+def _build_parse_failure_metadata(exc: Exception) -> dict[str, object]:
+    metadata: dict[str, object] = {"parse_error": str(exc)}
+    if isinstance(exc, CloudParseRequiredError):
+        metadata.update(
+            {
+                "requires_cloud_parse": True,
+                "parse_gate_status": "insufficient",
+                "parse_gate_reason": "cloud_parse_required",
+            }
+        )
+    return metadata
+
+
+def _should_parse_document_with_cloud(*, document: Document, base_metadata: dict, settings: object) -> bool:
+    if getattr(settings, "parser_backend", "") in {"aliyun_docmind", "docmind"}:
+        return False
+    if not bool(getattr(settings, "parser_cloud_fallback_enabled", False)):
+        return False
+    metadata = {**(document.meta or {}), **base_metadata}
+    if bool(metadata.get("requires_cloud_parse")):
+        return True
+    parse_gate_reason = str(metadata.get("parse_gate_reason") or "").strip().lower()
+    if parse_gate_reason in {"cloud_parse_required", "fallback_binary_parser"}:
+        return True
+    min_bytes = int(getattr(settings, "parser_cloud_direct_min_bytes", 0) or 0)
+    return min_bytes > 0 and int(document.file_size_bytes or 0) >= min_bytes
+
+
+def _cloud_parse_reason_for_document(*, document: Document, base_metadata: dict, settings: object) -> str:
+    metadata = {**(document.meta or {}), **base_metadata}
+    parse_gate_reason = str(metadata.get("parse_gate_reason") or "").strip()
+    if bool(metadata.get("requires_cloud_parse")):
+        return parse_gate_reason or "previous_local_parse_failed"
+    if parse_gate_reason:
+        return parse_gate_reason
+    min_bytes = int(getattr(settings, "parser_cloud_direct_min_bytes", 0) or 0)
+    if min_bytes > 0 and int(document.file_size_bytes or 0) >= min_bytes:
+        return f"large_document:{document.file_size_bytes}_bytes"
+    return "cloud_parser_selected"
+
+
 def get_asset_retrieval_service() -> AssetRetrievalService:
     return AssetRetrievalService()
 
@@ -143,6 +231,10 @@ def _resolve_section_anchor_from_catalog(
     raw_leaf = raw_heading.split(">")[-1].strip()
     normalized_heading = normalize_section_heading(raw_heading)
     normalized_leaf = normalize_section_heading(raw_leaf)
+    normalized_heading_fold = normalized_heading.casefold()
+    normalized_leaf_fold = normalized_leaf.casefold()
+    normalized_heading_compact_fold = "".join(normalized_heading.split()).casefold()
+    normalized_leaf_compact_fold = "".join(normalized_leaf.split()).casefold()
     best_section: dict[str, object] | None = None
     best_key = (0, 0, 0)
 
@@ -156,6 +248,12 @@ def _resolve_section_anchor_from_catalog(
             for item in (section.get("heading_aliases") or [])
             if str(item).strip()
         }
+        normalized_section_heading_fold = normalized_section_heading.casefold()
+        normalized_section_path_fold = normalized_section_path.casefold()
+        aliases_fold = {item.casefold() for item in aliases}
+        normalized_section_heading_compact_fold = "".join(normalized_section_heading.split()).casefold()
+        normalized_section_path_compact_fold = "".join(normalized_section_path.split()).casefold()
+        aliases_compact_fold = {"".join(item.split()).casefold() for item in aliases}
         score = 0
         if raw_heading and raw_heading == section_path:
             score = max(score, 8)
@@ -167,12 +265,35 @@ def _resolve_section_anchor_from_catalog(
             score = max(score, 5)
         if normalized_leaf and normalized_leaf in {normalized_section_heading, *aliases}:
             score = max(score, 5)
+        if normalized_heading_fold and normalized_heading_fold in {
+            normalized_section_heading_fold,
+            normalized_section_path_fold,
+        }:
+            score = max(score, 5)
+        if normalized_leaf_fold and normalized_leaf_fold in {normalized_section_heading_fold, *aliases_fold}:
+            score = max(score, 5)
+        if normalized_heading_compact_fold and normalized_heading_compact_fold in {
+            normalized_section_heading_compact_fold,
+            normalized_section_path_compact_fold,
+        }:
+            score = max(score, 5)
+        if normalized_leaf_compact_fold and normalized_leaf_compact_fold in {
+            normalized_section_heading_compact_fold,
+            *aliases_compact_fold,
+        }:
+            score = max(score, 5)
         if section_path and raw_heading and section_path.endswith(raw_heading):
             score = max(score, 4)
         if section_path and raw_leaf and section_path.endswith(raw_leaf):
             score = max(score, 4)
         normalized_path_segments = [normalize_section_heading(part) for part in section_path.split(">") if part.strip()]
         if normalized_leaf and normalized_leaf in normalized_path_segments:
+            score = max(score, 4)
+        if normalized_leaf_fold and normalized_leaf_fold in {part.casefold() for part in normalized_path_segments}:
+            score = max(score, 4)
+        if normalized_leaf_compact_fold and normalized_leaf_compact_fold in {
+            "".join(part.split()).casefold() for part in normalized_path_segments
+        }:
             score = max(score, 4)
         if score <= 0:
             continue
@@ -304,7 +425,17 @@ async def _parse_and_index_document(
         parser = ParserService()
         materialized: MaterializedObject = storage.materialize(document.storage_path)
         try:
-            parsed_document = await parser.parse_document(str(materialized.path))
+            if _should_parse_document_with_cloud(document=document, base_metadata=base_metadata, settings=settings):
+                parsed_document = await parser.parse_document_with_cloud(
+                    str(materialized.path),
+                    reason=_cloud_parse_reason_for_document(
+                        document=document,
+                        base_metadata=base_metadata,
+                        settings=settings,
+                    ),
+                )
+            else:
+                parsed_document = await parser.parse_document(str(materialized.path))
         finally:
             materialized.cleanup()
 
@@ -312,12 +443,21 @@ async def _parse_and_index_document(
         doc_type=document.doc_type,
         parsed_metadata=parsed_document.metadata,
     )
+    parse_status = str(parse_outcome.get("parse_status") or "done")
+    effective_base_metadata = dict(base_metadata)
+    parsed_gate_status = str((parsed_document.metadata or {}).get("parse_gate_status") or "").strip().lower()
+    if parse_status == "done" and parsed_gate_status not in {"insufficient", "parse_insufficient"}:
+        effective_base_metadata = _apply_successful_conversion_route(
+            document=document,
+            metadata=effective_base_metadata,
+        )
+        document.meta = {**(document.meta or {}), **effective_base_metadata}
     if not bool(parse_outcome.get("history_library_eligible", True)):
         await _purge_document_raw_artifacts(session=session, document=document, storage=storage)
         delete_uploaded_document_library_cache(document_id=str(document.id))
         document.parse_status = str(parse_outcome.get("parse_status") or "parse_insufficient")
         document.meta = {
-            **base_metadata,
+            **effective_base_metadata,
             **parsed_document.metadata,
             "raw_document_id": None,
             "figure_asset_count": 0,
@@ -335,7 +475,7 @@ async def _parse_and_index_document(
     chunk_payloads = chunker.split(
         parsed_document.markdown,
         base_metadata={
-            **base_metadata,
+            **effective_base_metadata,
             "doc_type": document.doc_type,
             "document_name": document.filename,
             "project_id": str(document.project_id) if document.project_id else None,
@@ -374,7 +514,7 @@ async def _parse_and_index_document(
         chunk_meta.update(
             _build_chunk_contextual_text(
                 document_name=document.filename,
-                base_metadata=base_metadata,
+                base_metadata=effective_base_metadata,
                 chunk_index=payload.chunk_index,
                 chunk_content=payload.content,
                 chunk_type=payload.chunk_type,
@@ -415,9 +555,9 @@ async def _parse_and_index_document(
                         "contextualized_block_text": chunk_meta.get("contextualized_block_text"),
                         "semantic_retrieval_text": chunk_meta.get("semantic_retrieval_text"),
                         "semantic_retrieval_version": chunk_meta.get("semantic_retrieval_version"),
-                        "industry": base_metadata.get("industry"),
-                        "year": base_metadata.get("year"),
-                        "amount_range": base_metadata.get("amount_range"),
+                        "industry": effective_base_metadata.get("industry"),
+                        "year": effective_base_metadata.get("year"),
+                        "amount_range": effective_base_metadata.get("amount_range"),
                         "doc_type": document.doc_type,
                         "image_url": None,
                         "token_count": payload.token_count,
@@ -437,7 +577,7 @@ async def _parse_and_index_document(
             qdrant.upsert_chunk(point_id=point_id, vector=vector, payload=qdrant_payload)
         indexed_chunk_count = len(index_records)
 
-    raw_document = await _upsert_raw_document(session=session, document=document, base_metadata=base_metadata)
+    raw_document = await _upsert_raw_document(session=session, document=document, base_metadata=effective_base_metadata)
     figure_asset_count = await _replace_figure_assets(
         session=session,
         document=document,
@@ -451,9 +591,9 @@ async def _parse_and_index_document(
         raw_document=raw_document,
     )
 
-    document.parse_status = str(parse_outcome.get("parse_status") or "done")
-    document.meta = {
-        **base_metadata,
+    document.parse_status = parse_status
+    document_metadata = {
+        **effective_base_metadata,
         **parsed_document.metadata,
         "raw_document_id": str(raw_document.id),
         "figure_asset_count": figure_asset_count,
@@ -462,9 +602,15 @@ async def _parse_and_index_document(
         "skipped_chunk_count": skipped_chunk_count,
         **_build_table_asset_counter_fields(table_asset_counts),
     }
-    raw_document.parse_status = str(parse_outcome.get("parse_status") or "done")
-    raw_document.meta = {
+    document.meta = _clean_successful_parse_metadata(
+        metadata=document_metadata,
+        parse_status=parse_status,
+        figure_asset_count=figure_asset_count,
+    )
+    raw_document.parse_status = parse_status
+    raw_document_metadata = {
         **(raw_document.meta or {}),
+        **effective_base_metadata,
         **parsed_document.metadata,
         "legacy_document_id": str(document.id),
         "figure_asset_count": figure_asset_count,
@@ -473,6 +619,11 @@ async def _parse_and_index_document(
         "skipped_chunk_count": skipped_chunk_count,
         **_build_table_asset_counter_fields(table_asset_counts),
     }
+    raw_document.meta = _clean_successful_parse_metadata(
+        metadata=raw_document_metadata,
+        parse_status=parse_status,
+        figure_asset_count=figure_asset_count,
+    )
     try:
         write_uploaded_document_library_cache(
             document=document,
@@ -515,6 +666,11 @@ async def _run_document_parse_job(job_id: UUID, document_id: UUID, base_metadata
             "progress": {"stage": "parsing", "document_id": str(document_id)},
         }
         document.parse_status = "parsing"
+        document.meta = {
+            key: value
+            for key, value in (document.meta or {}).items()
+            if key not in {"parse_error", "requires_cloud_parse"}
+        }
         await session.commit()
 
         try:
@@ -534,9 +690,9 @@ async def _run_document_parse_job(job_id: UUID, document_id: UUID, base_metadata
             await session.commit()
         except Exception as exc:  # noqa: BLE001
             document.parse_status = "failed"
-            document.meta = {**(document.meta or {}), "parse_error": str(exc)}
+            document.meta = {**(document.meta or {}), **_build_parse_failure_metadata(exc)}
             job.status = "failed"
-            job.error_code = exc.__class__.__name__[:50]
+            job.error_code = "CloudParseRequired" if isinstance(exc, CloudParseRequiredError) else exc.__class__.__name__[:50]
             job.output_ref = {
                 **(job.output_ref or {}),
                 "error": str(exc),
@@ -950,6 +1106,138 @@ def _safe_delete_storage_path(*, storage: object, storage_path: str | None) -> N
         pass
 
 
+def _json_default(value: object) -> str:
+    if isinstance(value, (datetime, UUID)):
+        return str(value)
+    return str(value)
+
+
+def _sanitize_parse_bundle_metadata(metadata: dict | None) -> dict:
+    cleaned = dict(metadata or {})
+    # DocMind status/result can contain temporary signed URLs and security tokens.
+    cleaned.pop("docmind_status", None)
+    cleaned.pop("docmind_result", None)
+    return cleaned
+
+
+def _safe_bundle_member(name: str) -> str:
+    normalized = str(name or "").replace("\\", "/").lstrip("/")
+    parts = [part for part in normalized.split("/") if part and part != "."]
+    if not parts or any(part == ".." for part in parts):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid parse bundle member path")
+    return "/".join(parts)
+
+
+def _read_bundle_member_bytes(archive: zipfile.ZipFile, member: str | None) -> bytes | None:
+    if not member:
+        return None
+    member = _safe_bundle_member(member)
+    try:
+        return archive.read(member)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Missing parse bundle member: {member}") from exc
+
+
+def _coerce_bundle_decimal(value: object) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _write_storage_object_to_bundle(
+    *,
+    archive: zipfile.ZipFile,
+    storage: object,
+    storage_path: str,
+    member: str,
+) -> bool:
+    try:
+        materialized = storage.materialize(storage_path)
+    except Exception:
+        return False
+    try:
+        archive.write(materialized.path, member)
+        return True
+    finally:
+        materialized.cleanup()
+
+
+def _qdrant_payload_for_imported_chunk(*, document: Document, chunk: Chunk) -> dict:
+    chunk_meta = chunk.meta or {}
+    return {
+        "project_id": str(document.project_id) if document.project_id else None,
+        "document_id": str(document.id),
+        "document_name": document.filename,
+        "chunk_id": str(chunk.id),
+        "chunk_index": chunk.chunk_index,
+        "chunk_type": chunk.chunk_type,
+        "heading_path": chunk.heading_path,
+        "content": chunk.content,
+        "contextual_text": chunk_meta.get("contextual_text"),
+        "contextualized_block_text": chunk_meta.get("contextualized_block_text"),
+        "semantic_retrieval_text": chunk_meta.get("semantic_retrieval_text"),
+        "semantic_retrieval_version": chunk_meta.get("semantic_retrieval_version"),
+        "doc_type": document.doc_type,
+        "image_url": chunk.image_url,
+        "token_count": chunk.token_count,
+        "indexable": True,
+        **chunk_meta,
+    }
+
+
+def _route_to_doc_type_for_bundle(route: str | None, fallback_doc_type: str | None) -> tuple[str, str]:
+    normalized_route = str(route or "").strip()
+    if normalized_route:
+        normalized_route = _normalize_library_import_route(normalized_route)
+        return normalized_route, LIBRARY_IMPORT_DOC_TYPE_BY_ROUTE[normalized_route]
+    fallback = str(fallback_doc_type or "").strip()
+    if fallback == "historical_proposal":
+        return "main_indexed", "historical_proposal"
+    if fallback == "holdout_eval":
+        return "holdout_eval", "holdout_eval"
+    return "review_pending", "historical_review"
+
+
+def _parse_bundle_manifest(archive: zipfile.ZipFile) -> dict[str, Any]:
+    try:
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Parse bundle is missing manifest.json") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid parse bundle manifest") from exc
+    if str(manifest.get("bundle_version") or "") != "parse-bundle-v1":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported parse bundle version")
+    return manifest
+
+
+def _export_qdrant_vectors(*, chunks: list[Chunk]) -> dict[str, list[float]]:
+    point_ids = [str(chunk.qdrant_point_id) for chunk in chunks if chunk.qdrant_point_id]
+    if not point_ids:
+        return {}
+    try:
+        qdrant = QdrantService()
+        points = qdrant.client.retrieve(
+            collection_name=qdrant.collection_name,
+            ids=point_ids,
+            with_payload=False,
+            with_vectors=True,
+        )
+    except Exception:
+        logger.exception("Failed to export Qdrant vectors for parse bundle")
+        return {}
+    vectors: dict[str, list[float]] = {}
+    for point in points:
+        vector = getattr(point, "vector", None)
+        if isinstance(vector, dict):
+            vector = next(iter(vector.values()), None)
+        if isinstance(vector, list):
+            vectors[str(point.id)] = [float(item) for item in vector]
+    return vectors
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1298,31 +1586,92 @@ async def get_document(
     return APIResponse(code=200, message="success", data=DocumentRead.model_validate(document))
 
 
-@router.post("/documents/{document_id}/reparse", response_model=APIResponse[DocumentUploadAccepted])
+@router.post(
+    "/documents/{document_id}/reparse",
+    response_model=APIResponse[DocumentUploadAccepted],
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def reparse_document(
     document_id: UUID,
-    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[DocumentUploadAccepted]:
     document = await session.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    dedupe_key = f"document_parse:{document.id}"
+    queue = get_background_task_queue()
+    active_job_id = queue.active_job_id(dedupe_key)
+    if active_job_id is not None:
+        active_job = await session.get(Job, active_job_id)
+        if active_job is not None and active_job.status in {"queued", "running"}:
+            return APIResponse(
+                code=202,
+                message="success",
+                data=DocumentUploadAccepted(
+                    id=document.id,
+                    filename=document.filename,
+                    parse_status=document.parse_status,
+                    message="文档已在解析队列中，请稍后刷新状态",
+                    job_id=active_job.id,
+                    next_poll=f"/api/v1/jobs/{active_job.id}",
+                ),
+            )
+
+    active_job = await session.scalar(
+        select(Job)
+        .where(Job.job_type == "document_parse")
+        .where(Job.status.in_(["queued", "running"]))
+        .where(cast(Job.input_ref, String).contains(str(document.id)))
+        .order_by(Job.created_at.desc())
+    )
+    if active_job is not None:
+        return APIResponse(
+            code=202,
+            message="success",
+            data=DocumentUploadAccepted(
+                id=document.id,
+                filename=document.filename,
+                parse_status=document.parse_status,
+                message="文档已在解析队列中，请稍后刷新状态",
+                job_id=active_job.id,
+                next_poll=f"/api/v1/jobs/{active_job.id}",
+            ),
+        )
+
     document.parse_status = "parsing"
+    job = Job(
+        project_id=document.project_id,
+        job_type="document_parse",
+        status="queued",
+        input_ref={
+            "document_id": str(document.id),
+            "filename": document.filename,
+            "doc_type": document.doc_type,
+            "reparse": True,
+        },
+        output_ref={"progress": {"stage": "queued", "document_id": str(document.id), "reparse": True}},
+        trace_id=f"document-reparse-{uuid.uuid4()}",
+    )
+    session.add(job)
     await session.flush()
+    job_id = job.id
+    base_metadata = dict(document.meta or {})
+    await session.commit()
+    await session.refresh(job)
+    await session.refresh(document)
 
-    try:
-        await _parse_and_index_document(session=session, document=document, base_metadata=document.meta or {})
-        await session.commit()
-    except Exception as exc:
-        document.parse_status = "failed"
-        await session.commit()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Document reparse failed: {exc}") from exc
-
-    if _should_refresh_history_library(doc_type=document.doc_type):
-        background_tasks.add_task(request_case_library_refresh)
+    queue.submit(
+        job_id=job_id,
+        job_type="document_parse",
+        label=f"reparse:{document.filename}",
+        run=lambda: _run_document_parse_job(job_id, document_id, base_metadata),
+        dedupe_key=dedupe_key,
+        priority=20,
+    )
 
     return APIResponse(
-        code=200,
+        code=202,
         message="success",
         data=DocumentUploadAccepted(
             id=document.id,
@@ -1333,6 +1682,8 @@ async def reparse_document(
                 parse_status=document.parse_status,
                 reparsed=True,
             ),
+            job_id=job.id,
+            next_poll=f"/api/v1/jobs/{job.id}",
         ),
     )
 
@@ -1416,6 +1767,368 @@ async def get_document_figure_assets(
         code=200,
         message="success",
         data=[FigureAssetRead.model_validate(asset) for asset in result.all()],
+    )
+
+
+@router.get("/documents/{document_id}/parse-bundle/export")
+async def export_document_parse_bundle(
+    document_id: UUID,
+    session: AsyncSession = Depends(get_db_session),
+) -> FileResponse:
+    document = await session.get(Document, document_id)
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    chunks = (
+        await session.scalars(select(Chunk).where(Chunk.document_id == document.id).order_by(Chunk.chunk_index.asc()))
+    ).all()
+    raw_document: RawDocument | None = None
+    assets: list[FigureAsset] = []
+    raw_document_id = (document.meta or {}).get("raw_document_id")
+    if raw_document_id:
+        try:
+            raw_document = await session.get(RawDocument, UUID(str(raw_document_id)))
+        except (TypeError, ValueError):
+            raw_document = None
+    if raw_document is not None:
+        assets = (
+            await session.scalars(
+                select(FigureAsset)
+                .where(FigureAsset.raw_document_id == raw_document.id)
+                .order_by(FigureAsset.page_no.asc().nulls_last(), FigureAsset.created_at.asc())
+            )
+        ).all()
+
+    storage = get_object_storage()
+    vector_by_point_id = _export_qdrant_vectors(chunks=chunks)
+    with NamedTemporaryFile(delete=False, suffix=".parse-bundle.zip") as handle:
+        bundle_path = Path(handle.name)
+
+    document_member = f"objects/document_original{Path(document.filename).suffix or '.bin'}"
+    markdown_member = "parsed/parsed_markdown.md"
+    asset_entries: list[dict[str, Any]] = []
+    with zipfile.ZipFile(bundle_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        has_document_file = _write_storage_object_to_bundle(
+            archive=archive,
+            storage=storage,
+            storage_path=document.storage_path,
+            member=document_member,
+        )
+        parsed_markdown = "\n\n".join(chunk.content for chunk in chunks)
+        archive.writestr(markdown_member, parsed_markdown)
+
+        for asset in assets:
+            asset_member = None
+            if not bool((asset.meta or {}).get("storage_fallback")):
+                suffix = Path(str(asset.asset_uri or "")).suffix or ".bin"
+                asset_member = f"assets/{asset.id}{suffix}"
+                if not _write_storage_object_to_bundle(
+                    archive=archive,
+                    storage=storage,
+                    storage_path=asset.asset_uri,
+                    member=asset_member,
+                ):
+                    asset_member = None
+            asset_entries.append(
+                {
+                    "id": str(asset.id),
+                    "page_no": asset.page_no,
+                    "asset_type": asset.asset_type,
+                    "title": asset.title,
+                    "caption": asset.caption,
+                    "reuse_mode": asset.reuse_mode,
+                    "parse_confidence": str(asset.parse_confidence) if asset.parse_confidence is not None else None,
+                    "metadata": _sanitize_parse_bundle_metadata(asset.meta),
+                    "asset_member": asset_member,
+                    "storage_fallback": bool((asset.meta or {}).get("storage_fallback")) or asset_member is None,
+                }
+            )
+
+        manifest = {
+            "bundle_version": "parse-bundle-v1",
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "document": {
+                "id": str(document.id),
+                "filename": document.filename,
+                "file_type": document.file_type,
+                "file_size_bytes": document.file_size_bytes,
+                "content_sha256": document.content_sha256,
+                "doc_type": document.doc_type,
+                "parse_status": document.parse_status,
+                "metadata": _sanitize_parse_bundle_metadata(document.meta),
+                "storage_member": document_member if has_document_file else None,
+                "parsed_markdown_member": markdown_member,
+            },
+            "raw_document": None
+            if raw_document is None
+            else {
+                "id": str(raw_document.id),
+                "corpus_scope": raw_document.corpus_scope,
+                "doc_type": raw_document.doc_type,
+                "file_name": raw_document.file_name,
+                "checksum": raw_document.checksum,
+                "version_label": raw_document.version_label,
+                "parse_status": raw_document.parse_status,
+                "confidentiality_level": raw_document.confidentiality_level,
+                "metadata": _sanitize_parse_bundle_metadata(raw_document.meta),
+            },
+            "chunks": [
+                {
+                    "id": str(chunk.id),
+                    "chunk_index": chunk.chunk_index,
+                    "chunk_type": chunk.chunk_type,
+                    "content": chunk.content,
+                    "token_count": chunk.token_count,
+                    "heading_path": chunk.heading_path,
+                    "image_url": chunk.image_url,
+                    "metadata": _sanitize_parse_bundle_metadata(chunk.meta),
+                    "vector": vector_by_point_id.get(str(chunk.qdrant_point_id)) if chunk.qdrant_point_id else None,
+                }
+                for chunk in chunks
+            ],
+            "figure_assets": asset_entries,
+        }
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, default=_json_default, indent=2))
+
+    filename = f"{Path(document.filename).stem or document.id}.parse-bundle.zip"
+    return FileResponse(
+        path=bundle_path,
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(lambda: bundle_path.unlink(missing_ok=True)),
+    )
+
+
+@router.post(
+    "/documents/parse-bundle/import",
+    response_model=APIResponse[DocumentUploadAccepted],
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_document_parse_bundle(
+    response: Response,
+    file: UploadFile = File(...),
+    route: str = Form(default="review_pending"),
+    session: AsyncSession = Depends(get_db_session),
+) -> APIResponse[DocumentUploadAccepted]:
+    with NamedTemporaryFile(delete=False, suffix=".parse-bundle.zip") as handle:
+        temp_path = Path(handle.name)
+        while chunk := await file.read(1024 * 1024):
+            handle.write(chunk)
+
+    storage = get_object_storage()
+    try:
+        with zipfile.ZipFile(temp_path) as archive:
+            manifest = _parse_bundle_manifest(archive)
+            document_payload = dict(manifest.get("document") or {})
+            raw_payload = dict(manifest.get("raw_document") or {})
+            route_name, doc_type = _route_to_doc_type_for_bundle(route, str(document_payload.get("doc_type") or ""))
+            original_filename = str(document_payload.get("filename") or file.filename or "parse-bundle.md")
+            original_file_type = str(document_payload.get("file_type") or Path(original_filename).suffix.lstrip(".") or "md")
+            content_sha256 = str(document_payload.get("content_sha256") or "").strip() or None
+
+            if content_sha256:
+                duplicate = await _find_duplicate_global_library_document(
+                    session=session,
+                    storage=storage,
+                    content_sha256=content_sha256,
+                    file_size_bytes=int(document_payload.get("file_size_bytes") or 0) or None,
+                )
+                if duplicate is not None:
+                    await session.commit()
+                    response.status_code = status.HTTP_200_OK
+                    return APIResponse(
+                        code=200,
+                        message="success",
+                        data=DocumentUploadAccepted(
+                            id=duplicate.id,
+                            filename=duplicate.filename,
+                            parse_status=duplicate.parse_status,
+                            message="解析包已存在，已跳过重复导入",
+                            duplicate=True,
+                            duplicate_of_id=duplicate.id,
+                        ),
+                    )
+
+            document_bytes = _read_bundle_member_bytes(archive, document_payload.get("storage_member"))
+            if document_bytes is None:
+                document_bytes = _read_bundle_member_bytes(archive, document_payload.get("parsed_markdown_member")) or b""
+                original_file_type = "md"
+                if not original_filename.endswith(".md"):
+                    original_filename = f"{Path(original_filename).stem or 'parse-bundle'}.md"
+            storage_path = storage.save_bytes(
+                document_bytes,
+                suffix=Path(original_filename).suffix or f".{original_file_type}",
+                prefix="parse_bundle_document_",
+            )
+            if content_sha256 is None:
+                content_sha256 = hashlib.sha256(document_bytes).hexdigest()
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            document_meta = {
+                **_sanitize_parse_bundle_metadata(document_payload.get("metadata") or {}),
+                "source_kind": "parse_bundle_import",
+                "parse_bundle_imported_at": now_iso,
+                "parse_bundle_source_document_id": document_payload.get("id"),
+                "material_route": route_name,
+                "library_track": "pilot_main" if route_name == "main_indexed" else route_name,
+                "requires_cloud_parse": False,
+            }
+            document = Document(
+                project_id=None,
+                filename=original_filename,
+                file_type=original_file_type,
+                file_size_bytes=len(document_bytes),
+                content_sha256=content_sha256,
+                storage_path=storage_path,
+                doc_type=doc_type,
+                parse_status="done",
+                meta=document_meta,
+            )
+            session.add(document)
+            await session.flush()
+
+            raw_document = RawDocument(
+                project_id=None,
+                corpus_scope="global" if route_name == "main_indexed" else "review",
+                doc_type=doc_type,
+                file_uri=storage_path,
+                file_name=original_filename,
+                checksum=content_sha256,
+                version_label=raw_payload.get("version_label"),
+                parse_status="done",
+                confidentiality_level=raw_payload.get("confidentiality_level"),
+                meta={
+                    **_sanitize_parse_bundle_metadata(raw_payload.get("metadata") or {}),
+                    **document_meta,
+                    "legacy_document_id": str(document.id),
+                    "parse_bundle_source_raw_document_id": raw_payload.get("id"),
+                },
+            )
+            session.add(raw_document)
+            await session.flush()
+
+            chunks_payload = list(manifest.get("chunks") or [])
+            vector_records: list[tuple[Chunk, list[float] | None]] = []
+            for item in chunks_payload:
+                chunk = Chunk(
+                    document_id=document.id,
+                    chunk_index=int(item.get("chunk_index") or 0),
+                    chunk_type=str(item.get("chunk_type") or "PLAIN"),
+                    content=str(item.get("content") or ""),
+                    token_count=item.get("token_count"),
+                    heading_path=item.get("heading_path"),
+                    image_url=item.get("image_url"),
+                    qdrant_point_id=None,
+                    meta={
+                        **_sanitize_parse_bundle_metadata(item.get("metadata") or {}),
+                        "doc_type": doc_type,
+                        "material_route": route_name,
+                        "library_track": document_meta.get("library_track"),
+                        "parse_bundle_source_chunk_id": item.get("id"),
+                    },
+                )
+                session.add(chunk)
+                await session.flush()
+                vector = item.get("vector")
+                if chunk.meta.get("indexable") is not False:
+                    vector_records.append((chunk, [float(value) for value in vector] if isinstance(vector, list) else None))
+
+            asset_count = 0
+            for item in list(manifest.get("figure_assets") or []):
+                asset_member = item.get("asset_member")
+                asset_bytes = _read_bundle_member_bytes(archive, asset_member) if asset_member else None
+                asset_uri = raw_document.file_uri
+                if asset_bytes is not None:
+                    suffix = Path(str(asset_member)).suffix or ".bin"
+                    asset_uri = storage.save_bytes(asset_bytes, suffix=suffix, prefix="parse_bundle_asset_")
+                asset = FigureAsset(
+                    raw_document_id=raw_document.id,
+                    page_no=item.get("page_no"),
+                    asset_uri=asset_uri,
+                    asset_type=str(item.get("asset_type") or "figure"),
+                    title=item.get("title"),
+                    caption=item.get("caption"),
+                    reuse_mode=str(item.get("reuse_mode") or "reference_only"),
+                    parse_confidence=_coerce_bundle_decimal(item.get("parse_confidence")),
+                    meta={
+                        **_sanitize_parse_bundle_metadata(item.get("metadata") or {}),
+                        "legacy_document_id": str(document.id),
+                        "raw_document_id": str(raw_document.id),
+                        "parse_bundle_source_asset_id": item.get("id"),
+                        "storage_fallback": asset_bytes is None,
+                    },
+                )
+                session.add(asset)
+                asset_count += 1
+
+            qdrant = QdrantService()
+            settings = get_settings()
+            texts_to_embed: list[str] = []
+            embed_targets: list[Chunk] = []
+            for chunk, vector in vector_records:
+                if vector is not None and len(vector) == int(settings.embedding_dimension):
+                    point_id = uuid.uuid4()
+                    chunk.qdrant_point_id = point_id
+                    qdrant.upsert_chunk(
+                        point_id=point_id,
+                        vector=vector,
+                        payload=_qdrant_payload_for_imported_chunk(document=document, chunk=chunk),
+                    )
+                else:
+                    texts_to_embed.append((chunk.meta or {}).get("semantic_retrieval_text") or chunk.content)
+                    embed_targets.append(chunk)
+            if texts_to_embed:
+                vectors = await Embedder().embed_texts(texts_to_embed)
+                for chunk, vector in zip(embed_targets, vectors):
+                    point_id = uuid.uuid4()
+                    chunk.qdrant_point_id = point_id
+                    qdrant.upsert_chunk(
+                        point_id=point_id,
+                        vector=vector,
+                        payload=_qdrant_payload_for_imported_chunk(document=document, chunk=chunk),
+                    )
+
+            document.meta = {
+                **document.meta,
+                "raw_document_id": str(raw_document.id),
+                "chunk_count": len(chunks_payload),
+                "indexed_chunk_count": sum(1 for chunk, _vector in vector_records if chunk.qdrant_point_id),
+                "figure_asset_count": asset_count,
+            }
+            raw_document.meta = {
+                **raw_document.meta,
+                "legacy_document_id": str(document.id),
+                "figure_asset_count": asset_count,
+                "chunk_count": len(chunks_payload),
+                "indexed_chunk_count": document.meta["indexed_chunk_count"],
+            }
+            await session.commit()
+    except zipfile.BadZipFile as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid parse bundle zip") from exc
+    except HTTPException:
+        await session.rollback()
+        raise
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Parse bundle document already exists") from exc
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    if _should_refresh_history_library(doc_type=doc_type):
+        await request_case_library_refresh()
+    return APIResponse(
+        code=201,
+        message="success",
+        data=DocumentUploadAccepted(
+            id=document.id,
+            filename=document.filename,
+            parse_status=document.parse_status,
+            message="解析包已导入并完成入库",
+        ),
     )
 
 

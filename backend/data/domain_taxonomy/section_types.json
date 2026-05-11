@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "section_types": [
+    {"key": "commercial_manual_only", "label": "商务说明", "keywords": ["商务", "报价", "合同", "法务", "授权", "保密", "资料提供", "提交资料", "交付资料", "随机资料", "文档清单", "交付文档", "资料归档", "操作维护手册", "测试报告", "合格证", "提交节点"], "support_content_forms": ["narrative", "bom_table"]},
+    {"key": "company_profile", "label": "公司简介", "keywords": ["公司简介", "企业简介", "企业介绍", "公司概况"], "support_content_forms": ["narrative"]},
+    {"key": "bom_or_supply_list", "label": "供货清单", "keywords": ["供货清单", "设备清单", "主要设备清单", "配置清单", "物料清单", "bom"], "support_content_forms": ["bom_table", "parameter_table", "narrative"], "related_section_types": ["supply_scope"]},
+    {"key": "supply_scope", "label": "供货范围", "keywords": ["供货范围", "供货内容", "供货界面"], "support_content_forms": ["bom_table", "parameter_table", "narrative"], "related_section_types": ["bom_or_supply_list"]},
+    {"key": "site_conditions", "label": "现场条件", "keywords": ["工况条件", "工厂设计环境", "环境条件", "现场环境", "现场条件"], "support_content_forms": ["narrative"]},
+    {"key": "main_circuit_scheme", "label": "主回路方案", "keywords": ["主回路", "一次系统", "一次接线", "主接线", "旁路切换", "电气原理"], "support_content_forms": ["narrative", "parameter_table", "bom_table", "figure"], "related_section_types": ["vfd_spec", "starter_spec", "transformer_spec", "motor_spec", "control_logic", "protection_interlock"]},
+    {"key": "communication_interface", "label": "通讯接口", "keywords": ["通信接口", "通讯接口", "控制接口", "控制信号接口", "上位机接口", "上位机", "点表", "自动化通信", "dcs接口", "plc接口", "rs485", "iec 61850", "modbus", "profibus", "profinet"], "support_content_forms": ["narrative", "interface_table", "parameter_table", "figure"]},
+    {"key": "protection_interlock", "label": "联锁保护", "keywords": ["保护", "联锁", "闭锁", "报警", "trip"], "support_content_forms": ["narrative", "protection_table", "parameter_table"]},
+    {"key": "control_logic", "label": "控制逻辑", "keywords": ["控制策略", "控制逻辑", "运行功能", "启停逻辑", "切换逻辑", "操作流程"], "support_content_forms": ["narrative", "interface_table", "parameter_table"]},
+    {"key": "cabinet_layout", "label": "柜体布置", "keywords": ["柜体", "盘柜", "机柜", "设备布置", "现场布置", "外形尺寸", "柜体结构"], "support_content_forms": ["narrative"]},
+    {"key": "installation_conditions", "label": "安装条件", "keywords": ["安装条件", "安装要求", "配套要求", "施工条件", "土建条件", "基础要求"], "support_content_forms": ["narrative"]},
+    {"key": "commissioning_acceptance", "label": "调试验收", "keywords": ["调试", "试验", "测试", "验收", "联调", "开车"], "support_content_forms": ["narrative"]},
+    {"key": "service_support", "label": "服务支持", "keywords": ["售后", "培训", "维保", "质保", "备件", "巡检"], "support_content_forms": ["narrative"]},
+    {"key": "motor_spec", "label": "电机参数", "keywords": ["电机技术", "高压电机", "同步电机", "异步电机", "电机参数"], "support_content_forms": ["narrative", "parameter_table", "bom_table", "figure"], "related_section_types": ["protection_interlock"]},
+    {"key": "vfd_spec", "label": "变频器规格", "keywords": ["变频器技术", "高压变频", "变频装置", "vfd", "lci"], "support_content_forms": ["narrative", "parameter_table", "bom_table", "figure"], "related_section_types": ["main_circuit_scheme", "control_logic"]},
+    {"key": "starter_spec", "label": "软起动规格", "keywords": ["软起动", "软启动", "液阻", "水电阻", "固态软起", "自耦变"], "support_content_forms": ["narrative", "parameter_table", "bom_table", "figure"], "related_section_types": ["main_circuit_scheme", "control_logic"]},
+    {"key": "transformer_spec", "label": "变压器参数", "keywords": ["变压器技术", "整流变压器", "变压器参数", "变压器"], "support_content_forms": ["narrative"]},
+    {"key": "overall_solution", "label": "总体方案", "keywords": ["总体方案", "整体方案", "系统总体", "总体设计", "总体说明"], "support_content_forms": ["narrative", "figure", "parameter_table", "bom_table"], "related_section_types": ["main_circuit_scheme", "control_logic", "communication_interface", "protection_interlock", "motor_spec", "vfd_spec", "starter_spec", "transformer_spec"]},
+    {"key": "project_overview", "label": "项目概述", "keywords": ["项目概述", "项目背景", "建设目标", "项目简介", "编制说明"], "support_content_forms": ["narrative"]},
+    {"key": "design_basis", "label": "设计依据", "keywords": ["设计依据", "编制依据", "技术要求", "标准规范", "执行标准"], "support_content_forms": ["narrative"]}
+  ],
+  "commercial_manual": {
+    "manual_only_terms": ["商务", "报价", "合同", "法务", "授权", "保密", "资料提供", "提交资料", "交付资料", "随机资料", "文档清单", "交付文档", "资料归档", "操作维护手册", "测试报告", "合格证", "提交节点"],
+    "exact_compound_terms": ["同步资料", "启动资料", "启动同步资料"],
+    "conditional_terms": ["技术资料", "设计图纸"],
+    "context_terms": ["提交", "交付", "随机", "提供", "归档", "审查", "文档", "资料", "手册", "报告", "证书"],
+    "technical_list_only_terms": ["供货清单", "设备清单", "配置清单", "物料清单", "bom"],
+    "supply_scope_terms": ["供货范围", "供货内容", "供货界面", "供货边界"],
+    "strong_delivery_terms": ["资料提供", "提交资料", "交付资料", "文档清单", "交付文档", "资料归档", "操作维护手册", "测试报告", "合格证", "提交节点"]
+  },
+  "content_form_terms": {
+    "bom": ["供货", "清单", "设备", "数量", "序号", "名称", "型号", "规格"],
+    "interface": ["接口", "通讯", "通信", "dcs", "plc", "di", "do", "ai", "ao", "点表", "rs485"],
+    "protection": ["保护", "联锁", "报警", "trip", "闭锁"],
+    "parameter": ["参数", "规格", "额定", "性能", "技术数据", "技术要求"],
+    "figure": ["波形", "波特图", "时序图", "点阵图", "电路图", "原理图", "接线图", "示意图", "电气图", "fft", "bode", "waveform", "circuit", "schematic", "diagram"],
+    "certificate": ["证书", "合格证", "资质", "认证", "检测报告"]
+  },
+  "heading_focus_terms": {
+    "overall_solution": ["总体方案", "整体方案", "系统总体", "总体说明", "技术方案"],
+    "main_circuit_scheme": ["主回路", "主接线", "一次接线", "一次系统", "旁路", "隔离", "电气原理", "选型", "技术参数"],
+    "communication_interface": ["接口", "通信", "通讯", "dcs", "plc", "开关量", "模拟量", "点表", "上位机", "rs485"],
+    "control_logic": ["控制策略", "控制逻辑", "运行功能", "启停逻辑", "切换逻辑"],
+    "protection_interlock": ["保护", "联锁", "闭锁", "报警", "trip"],
+    "bom_or_supply_list": ["供货清单", "设备清单", "配置清单", "物料清单", "供货范围"],
+    "supply_scope": ["供货范围", "供货内容", "供货界面"],
+    "vfd_spec": ["变频器", "变频装置", "技术参数", "选型"],
+    "starter_spec": ["软起动", "软启动", "液阻", "水电阻", "固态软起", "自耦变"]
+  },
+  "heading_noise_terms": {
+    "overall_solution": ["公司简介", "企业简介", "必要性", "意义", "培训", "维保", "售后"],
+    "main_circuit_scheme": ["公司简介", "企业简介", "必要性", "意义", "产品简介", "改造工程", "测试制度", "质量保证", "文档控制", "掉电不停机", "驱动原理"],
+    "communication_interface": ["公司简介", "企业简介", "必要性", "意义", "产品简介", "改造工程", "驱动原理", "性能要求", "整体要求"],
+    "control_logic": ["公司简介", "企业简介", "必要性", "意义", "产品简介"],
+    "protection_interlock": ["公司简介", "企业简介", "必要性", "意义", "产品简介"],
+    "bom_or_supply_list": ["公司简介", "企业简介", "必要性", "意义", "产品简介", "改造工程"],
+    "supply_scope": ["公司简介", "企业简介", "必要性", "意义", "产品简介", "改造工程"],
+    "vfd_spec": ["公司简介", "企业简介", "必要性", "意义", "产品简介", "改造工程"],
+    "starter_spec": ["公司简介", "企业简介", "必要性", "意义", "产品简介", "改造工程"]
+  },
+  "heading_rules": {
+    "overall_solution_heading_terms": ["总体方案", "整体方案", "系统总体", "总体设计", "总体说明"],
+    "specialized_heading_terms": ["主回路", "接口", "通讯", "通信", "清单", "供货", "保护", "联锁"],
+    "interface_heading_all_terms": ["上位机", "接口"],
+    "performance_routes": [
+      {"section_type": "vfd_spec", "keywords": ["变频"]},
+      {"section_type": "starter_spec", "keywords": ["软起动", "软启动", "液阻", "水电阻", "固态软起", "自耦变"]},
+      {"section_type": "motor_spec", "keywords": ["电机"]},
+      {"section_type": "transformer_spec", "keywords": ["变压器"]}
+    ]
+  }
+}

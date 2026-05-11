@@ -67,6 +67,7 @@ interface AllCandidatesDialogProps {
   citations: Citation[];
   recommendedAssets: RecommendedAsset[];
   assetCandidates: RecommendedAsset[];
+  filteredAssets?: RecommendedAsset[];
   selectedCitationIds: string[];
   onToggleCitationSelection: (citation: Citation) => void;
   onRegenerateWith: (ids?: string[]) => void;
@@ -268,6 +269,7 @@ export function AllCandidatesDialog({
   citations,
   recommendedAssets,
   assetCandidates,
+  filteredAssets = [],
   selectedCitationIds,
   onToggleCitationSelection,
   onRegenerateWith,
@@ -275,7 +277,7 @@ export function AllCandidatesDialog({
   contentMd,
   regenerating,
 }: AllCandidatesDialogProps) {
-  const totalCount = citations.length + recommendedAssets.length + assetCandidates.length;
+  const totalCount = citations.length + recommendedAssets.length + assetCandidates.length + filteredAssets.length;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -332,6 +334,20 @@ export function AllCandidatesDialog({
               {assetCandidates.map((asset, index) => (
                 <AssetRow
                   key={`candidate-${asset.asset_id || asset.title || index}`}
+                  asset={asset}
+                  section={section}
+                  contentMd={contentMd}
+                  onInsert={() => onInsertAsset(asset)}
+                />
+              ))}
+            </HorizontalScrollContainer>
+          </CategorySection>
+
+          <CategorySection title="Filtered Assets" icon={GalleryVerticalEnd} count={filteredAssets.length} defaultOpen={false}>
+            <HorizontalScrollContainer>
+              {filteredAssets.map((asset, index) => (
+                <AssetRow
+                  key={`filtered-${asset.asset_id || asset.title || index}`}
                   asset={asset}
                   section={section}
                   contentMd={contentMd}
