@@ -28,9 +28,11 @@ from app.models.requirement_card import RequirementCard
 from app.models.section_draft import SectionDraft
 from app.services.agents.executor import ExecutorAgent
 from app.services.agents.state import WorkflowState
+from app.services.composition.evidence_selector import select_evidence_for_section
 from app.services.composition.outline_service import outline_is_approved
 from app.services.composition.section_quality import SectionQualityGateService
 from app.services.domain.synonyms import expand_domain_terms, extract_domain_terms
+from app.services.domain.taxonomy_registry import get_retrieval_policy_registry
 from app.services.evidence_binding import resolve_outline_evidence_bundle
 from app.services.knowledge import KnowledgeWikiContextProvider
 from app.services.llm.client import LLMInputImage, LLMRequest, TaskType
@@ -85,127 +87,17 @@ REUSE_STOPWORDS = {
     "以及",
     "进行",
 }
-FIGURE_ASSET_HINTS = (
-    "图",
-    "示意",
-    "单线",
-    "接线",
-    "原理",
-    "波形",
-    "曲线",
-    "布局",
-    "布置",
-    "外形",
-    "拓扑",
-    "流程",
-    "结构",
-    "主回路",
-    "总体方案",
-    "架构",
-)
-TABLE_ASSET_HINTS = (
-    "表",
-    "参数",
-    "性能",
-    "数据",
-    "清单",
-    "配置",
-    "供货",
-    "范围",
-    "点表",
-    "规格",
-    "容量",
-    "型号",
-    "数量",
-    "尺寸",
-)
-FORMULA_ASSET_HINTS = ("公式", "equation", "推导", "算式")
-SECTION_ASSET_QUERY_HINTS: dict[str, tuple[str, ...]] = {
-    "overall_solution": ("系统示意图", "总体架构图", "单线图", "主回路图"),
-    "main_circuit_scheme": ("主回路图", "单线图", "一次接线图", "原理图"),
-    "communication_interface": ("接口示意图", "通信拓扑图", "控制逻辑图", "点表"),
-    "control_logic": ("控制逻辑图", "联锁逻辑图", "信号流程图", "运行流程图"),
-    "protection_interlock": ("联锁关系图", "保护关系图", "控制逻辑图", "信号流程图"),
-    "cabinet_layout": ("柜体外形图", "设备布置图", "柜内结构图", "接线示意图"),
-    "installation_conditions": ("安装布置图", "基础图", "进出线布置图", "设备外形图"),
-    "vfd_spec": ("系统示意图", "单线图", "结构图", "外形图"),
-    "starter_spec": ("系统示意图", "启动曲线", "单线图", "结构图"),
-    "motor_spec": ("系统示意图", "启动曲线", "负载曲线", "外形图"),
-    "transformer_spec": ("原理图", "绕组示意图", "电压波形图", "参数表"),
-    "bom_or_supply_list": ("供货清单", "配置表", "参数表"),
-    "supply_scope": ("供货清单", "配置表", "参数表"),
-}
+_RETRIEVAL_POLICIES = get_retrieval_policy_registry()
+FIGURE_ASSET_HINTS = _RETRIEVAL_POLICIES.tokens("asset_hints.figure")
+TABLE_ASSET_HINTS = _RETRIEVAL_POLICIES.tokens("asset_hints.table")
+FORMULA_ASSET_HINTS = _RETRIEVAL_POLICIES.tokens("asset_hints.formula")
+SECTION_ASSET_QUERY_HINTS: dict[str, tuple[str, ...]] = _RETRIEVAL_POLICIES.tuple_mapping("section_asset_query_hints")
 EXTRACTIVE_SECTION_CLASSES = {"architecture", "configuration", "implementation", "custom"}
-EXTRACTIVE_SECTION_TYPES = {
-    "overall_solution",
-    "design_basis",
-    "site_conditions",
-    "supply_scope",
-    "bom_or_supply_list",
-    "motor_spec",
-    "vfd_spec",
-    "starter_spec",
-    "transformer_spec",
-    "main_circuit_scheme",
-    "control_logic",
-    "communication_interface",
-    "protection_interlock",
-    "cabinet_layout",
-    "installation_conditions",
-}
-SECTION_TEMPLATE_HEADINGS: dict[str, dict[str, tuple[str, ...]]] = {
-    "main_circuit_scheme": {
-        "主回路结构与运行切换": ("主回路", "主接线", "一次接线", "旁路", "切换", "隔离", "结构"),
-        "设备选型与容量配置": ("选型", "配置", "容量", "功率单元", "整流变压器", "器件"),
-        "关键技术参数": ("参数", "技术数据", "规格", "额定", "性能"),
-        "保护与联锁条件": ("保护", "联锁", "闭锁", "报警"),
-    },
-    "communication_interface": {
-        "通信架构与接口方式": ("通信", "通讯", "接口", "dcs", "plc", "modbus", "profibus", "profinet"),
-        "接口与信号清单": ("信号", "点表", "ai", "ao", "di", "do", "清单"),
-        "联锁与调试约束": ("联锁", "调试", "试验", "投运"),
-    },
-    "bom_or_supply_list": {
-        "主要设备及供货范围": ("供货", "范围", "清单", "设备"),
-        "关键参数与配置说明": ("参数", "规格", "配置", "说明"),
-    },
-    "supply_scope": {
-        "主要设备及供货范围": ("供货", "范围", "清单", "设备"),
-        "关键参数与配置说明": ("参数", "规格", "配置", "说明"),
-    },
-}
-EXTRACTIVE_SECTION_OPENINGS = {
-    "main_circuit_scheme": "本项目主回路按照安全隔离、旁路切换和连续运行要求进行配置，具体结构如下。",
-    "communication_interface": "本项目控制系统接口按照上位机协同、信号闭环和调试可实施的原则进行配置，具体如下。",
-    "supply_scope": "以下内容用于说明本项目主要设备供货边界和系统组成，最终以双方确认的供货清单为准。",
-    "bom_or_supply_list": "以下内容用于说明本项目主要设备供货边界和系统组成，最终以双方确认的供货清单为准。",
-}
-EXTRACTIVE_TABLE_LEADS: dict[str, dict[str, str]] = {
-    "main_circuit_scheme": {
-        "设备选型与容量配置": "主要设备配置如下表所示。",
-        "关键技术参数": "主要技术参数如下表所示。",
-    },
-    "communication_interface": {
-        "接口与信号清单": "建议接口与信号清单如下表所示。",
-    },
-    "supply_scope": {
-        "主要设备及供货范围": "主要设备供货范围如下表所示。",
-        "关键参数与配置说明": "关键参数与配置说明如下表所示。",
-    },
-    "bom_or_supply_list": {
-        "主要设备及供货范围": "主要设备供货范围如下表所示。",
-        "关键参数与配置说明": "关键参数与配置说明如下表所示。",
-    },
-}
-GENERIC_REUSE_HEADINGS = {
-    "产品简介",
-    "技术方案",
-    "总体方案",
-    "总体说明",
-    "项目概述",
-    "系统方案",
-    "文件清单",
-}
+EXTRACTIVE_SECTION_TYPES = _RETRIEVAL_POLICIES.section_types("extractive_section_types")
+SECTION_TEMPLATE_HEADINGS: dict[str, dict[str, tuple[str, ...]]] = _RETRIEVAL_POLICIES.nested_tuple_mapping("section_template_headings")
+EXTRACTIVE_SECTION_OPENINGS = _RETRIEVAL_POLICIES.text_mapping("extractive_section_openings")
+EXTRACTIVE_TABLE_LEADS: dict[str, dict[str, str]] = _RETRIEVAL_POLICIES.nested_text_mapping("extractive_table_leads")
+GENERIC_REUSE_HEADINGS = set(_RETRIEVAL_POLICIES.tuple_mapping("generic_reuse_headings").get("values", ()))
 INTERNAL_REUSE_HEADING_PATTERNS = (
     re.compile(r"^(建议插入图表|建议图表|建议参考资产|推荐资产|可用参考资料|可用复用包|替换与禁用约束|参考摘要)$", re.IGNORECASE),
     re.compile(r"^(图表建议|插图建议|图表清单)$", re.IGNORECASE),
@@ -276,108 +168,14 @@ REWRITE_LEAKAGE_TOKENS = (
     "已根据要求完成重写",
     "QWEN模型",
 )
-MAIN_CIRCUIT_FOCUS_TOKENS = ("主回路", "主接线", "一次接线", "一次系统", "单线图", "变压器", "旁路", "隔离", "母排", "电缆", "绝缘", "短路", "温升", "谐波")
-MAIN_CIRCUIT_TOPOLOGY_TOKENS = (
-    "单线图",
-    "single line diagram",
-    "进线",
-    "断路器",
-    "icb",
-    "ocb",
-    "rcb",
-    "输入变压器",
-    "输出变压器",
-    "同步电机",
-    "并网",
-    "工频",
-    "旁路",
-    "同步装置",
-    "synchrotact",
-    "切换",
-    "加速",
-)
-MAIN_CIRCUIT_NOISE_TOKENS = ("控制", "监控", "辅助设备", "油站", "冷却器", "励磁柜", "启动时间", "同步过程", "运行方式", "dcs", "认证", "证书", "测试", "试验")
-MAIN_CIRCUIT_HARD_NOISE_TOKENS = (
-    "fieldbus",
-    "profibus",
-    "modbus",
-    "rs485",
-    "i/o",
-    "digital input",
-    "routine test",
-    "type test",
-    "tests and certificates",
-    "standard and certification",
-    "packing",
-    "transportation",
-    "冷却系统",
-    "润滑",
-    "轴承",
-    "保护功能",
-)
-MAIN_CIRCUIT_LINE_KEEP_TOKENS = (
-    "进线",
-    "断路器",
-    "icb",
-    "ocb",
-    "rcb",
-    "变频变压器",
-    "输入变压器",
-    "输出变压器",
-    "同步装置",
-    "synchrotact",
-    "励磁装置",
-    "切换",
-    "工频运行",
-    "并网",
-    "同步电机",
-    "主回路",
-)
-MAIN_CIRCUIT_LINE_DROP_TOKENS = (
-    "description of start and sychronization",
-    "lci start-up characteristic",
-    "load data",
-    "component technical data",
-    "converter configuration",
-    "converter system overview",
-    "start curve by sfc",
-    "变频启动曲线",
-    "启动曲线",
-    "负载数据",
-    "飞轮力矩",
-    "起动阻力矩",
-    "静阻力矩",
-    "总启动时间",
-    "纯加速时间",
-    "建立磁场",
-    "连续启动3次",
-    "连续启动 3 次",
-    "gd2",
-)
-PROTECTION_FOCUS_TOKENS = ("控制", "监控", "监视", "联锁", "保护", "告警", "报警", "跳闸", "顺控", "故障", "信号接口", "plc", "dcs")
-PROTECTION_NOISE_TOKENS = (
-    "主回路",
-    "一次接线",
-    "一次图",
-    "一次方案",
-    "单线图",
-    "功率单元",
-    "结构示意",
-    "波形",
-    "谐波",
-    "启动曲线",
-    "转矩曲线",
-    "外形尺寸",
-    "版本",
-    "页码",
-    "备品备件",
-    "备件",
-    "spare",
-    "售后",
-    "服务",
-    "额定数据",
-    "rated data",
-)
+MAIN_CIRCUIT_FOCUS_TOKENS = _RETRIEVAL_POLICIES.tokens("main_circuit.focus")
+MAIN_CIRCUIT_TOPOLOGY_TOKENS = _RETRIEVAL_POLICIES.tokens("main_circuit.topology")
+MAIN_CIRCUIT_NOISE_TOKENS = _RETRIEVAL_POLICIES.tokens("main_circuit.noise")
+MAIN_CIRCUIT_HARD_NOISE_TOKENS = _RETRIEVAL_POLICIES.tokens("main_circuit.hard_noise")
+MAIN_CIRCUIT_LINE_KEEP_TOKENS = _RETRIEVAL_POLICIES.tokens("main_circuit.line_keep")
+MAIN_CIRCUIT_LINE_DROP_TOKENS = _RETRIEVAL_POLICIES.tokens("main_circuit.line_drop")
+PROTECTION_FOCUS_TOKENS = _RETRIEVAL_POLICIES.tokens("protection.focus")
+PROTECTION_NOISE_TOKENS = _RETRIEVAL_POLICIES.tokens("protection.noise")
 SEMANTIC_RULES = get_semantic_rules()
 CONTROL_LOGIC_FOCUS_TOKENS = SEMANTIC_RULES.tokens("control_logic.focus")
 CONTROL_LOGIC_NOISE_TOKENS = SEMANTIC_RULES.tokens("control_logic.noise")
@@ -427,20 +225,8 @@ EVIDENCE_JUDGE_SCHEMA: dict[str, Any] = {
     "required": ["summary", "items"],
     "additionalProperties": False,
 }
-TABLE_PLACEHOLDER_REFERENCE_ONLY_SECTION_TYPES = {
-    "bom_or_supply_list",
-    "site_conditions",
-    "supply_scope",
-    "transformer_spec",
-    "vfd_spec",
-    "motor_spec",
-}
-SUPPLY_SCOPE_REQUIRED_ITEM_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("LCI/SFC 变频软起动装置", ("lci", "sfc", "变频软起", "软起动", "软启动")),
-    ("输入变压器", ("输入变压器", "进线变压器")),
-    ("输出变压器", ("输出变压器", "出线变压器")),
-    ("励磁控制盘", ("励磁控制盘", "励磁柜", "励磁控制柜", "励磁调节")),
-)
+TABLE_PLACEHOLDER_REFERENCE_ONLY_SECTION_TYPES = _RETRIEVAL_POLICIES.section_types("table_placeholder_reference_only_section_types")
+SUPPLY_SCOPE_REQUIRED_ITEM_RULES: tuple[tuple[str, tuple[str, ...]], ...] = _RETRIEVAL_POLICIES.rules("supply_scope_required_items")
 INVALID_ASSET_PLACEHOLDER_PATTERN = re.compile(r"\[\[ASSET:([A-Z_]+):([^\]]+)\]\]")
 TITLE_ONLY_ASSET_PLACEHOLDER_PATTERN = re.compile(r"\[\[ASSET:(?![A-Z_]+:)([^\]]+)\]\]")
 MIN_RECOMMENDED_ASSET_SCORE = 0.12
@@ -448,6 +234,7 @@ MIN_RECOMMENDED_FIGURE_SCORE = 0.16
 MIN_RECOMMENDED_TABLE_SCORE = 0.10
 ASSET_RECOMMENDATION_LIMIT = 3
 ASSET_CANDIDATE_LIMIT = 10
+ASSET_FILTERED_TRACE_LIMIT = 12
 RUNTIME_ASSET_RERANK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -471,32 +258,11 @@ RUNTIME_ASSET_RERANK_SCHEMA: dict[str, Any] = {
     "required": ["items"],
     "additionalProperties": False,
 }
-SYSTEM_DIAGRAM_INTENT_TOKENS = ("系统架构", "系统方案", "系统示意", "单线图", "主回路", "一次接线", "接线图", "拓扑")
-SYSTEM_DIAGRAM_FOCUS_TOKENS = (
-    "系统架构",
-    "系统方案",
-    "系统示意",
-    "单线图",
-    "主回路",
-    "一次接线",
-    "接线图",
-    "拓扑",
-    "结构图",
-)
-SYSTEM_DIAGRAM_NOISE_TOKENS = (
-    "负载数据",
-    "启动曲线",
-    "曲线",
-    "波形",
-    "load data",
-    "start curve",
-    "外形",
-    "尺寸",
-    "封面",
-    "技术协议",
-)
-CURVE_FIGURE_INTENT_TOKENS = ("启动曲线", "启动特性", "曲线", "波形", "特性曲线", "负载曲线", "waveform", "curve")
-LAYOUT_FIGURE_INTENT_TOKENS = ("布置", "布局", "外形", "尺寸", "安装", "基础", "通道")
+SYSTEM_DIAGRAM_INTENT_TOKENS = _RETRIEVAL_POLICIES.tokens("system_diagram.intent")
+SYSTEM_DIAGRAM_FOCUS_TOKENS = _RETRIEVAL_POLICIES.tokens("system_diagram.focus")
+SYSTEM_DIAGRAM_NOISE_TOKENS = _RETRIEVAL_POLICIES.tokens("system_diagram.noise")
+CURVE_FIGURE_INTENT_TOKENS = _RETRIEVAL_POLICIES.tokens("curve_figure.intent")
+LAYOUT_FIGURE_INTENT_TOKENS = _RETRIEVAL_POLICIES.tokens("layout_figure.intent")
 SPEC_CURVE_OR_LOAD_NOISE_TOKENS = SEMANTIC_RULES.tokens("spec.curve_or_load_noise")
 TRANSFORMER_SPEC_FOCUS_TOKENS = SEMANTIC_RULES.tokens("transformer_spec.focus")
 TRANSFORMER_SPEC_CONCRETE_TOKENS = SEMANTIC_RULES.tokens("transformer_spec.concrete")
@@ -510,18 +276,7 @@ PARAMETER_KEY_GROUPS_BY_SECTION_TYPE = {
     "transformer_spec": SEMANTIC_RULES.tokens("parameter_keys.transformer_spec"),
     "vfd_spec": SEMANTIC_RULES.tokens("parameter_keys.vfd_spec"),
 }
-PROTECTION_LCI_SCENARIO_NOISE_TOKENS = (
-    "高浓磨机",
-    "磨机",
-    "lci",
-    "sfc",
-    "变频软起",
-    "同步电机",
-    "励磁柜",
-    "励磁系统",
-    "油站",
-    "冷却器",
-)
+PROTECTION_LCI_SCENARIO_NOISE_TOKENS = _RETRIEVAL_POLICIES.tokens("protection.lci_scenario_noise")
 SUBSTATION_AUTOMATION_SECTION_TOKENS = ("变电站", "综合自动化", "站控层", "间隔层", "网络层", "iec 61850", "远方通信", "调度")
 SUBSTATION_AUTOMATION_FOCUS_TOKENS = ("变电站", "综合自动化", "站控层", "间隔层", "网络层", "iec 61850", "goose", "mms", "调度")
 SUBSTATION_AUTOMATION_OFF_SCOPE_TYPES = {
@@ -1110,7 +865,14 @@ def filter_recommended_assets_for_section(
         metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
         source_section_recovered = _asset_has_source_section_recovery(asset)
         retrieval_quality = metadata.get("retrieval_quality") if isinstance(metadata.get("retrieval_quality"), dict) else {}
+        stability_gate = _assess_asset_stability_gate(
+            asset=asset,
+            section=section,
+            target_taxonomy=target_taxonomy,
+        )
         if not _recommended_asset_score_passes(asset=asset, section=section, target_taxonomy=target_taxonomy):
+            continue
+        if stability_gate["blocking_flags"]:
             continue
         if retrieval_quality.get("low_information"):
             continue
@@ -1314,7 +1076,13 @@ def filter_recommended_assets_for_section(
                 continue
             if not focus_match:
                 continue
-        filtered.append(asset)
+        filtered.append(
+            _annotate_asset_with_stability_gate(
+                asset=asset,
+                section=section,
+                target_taxonomy=target_taxonomy,
+            )
+        )
     if filtered:
         return filtered
     if installation_section or spare_parts_section:
@@ -1322,9 +1090,14 @@ def filter_recommended_assets_for_section(
     if target_section_type in EXTRACTIVE_SECTION_TYPES:
         return []
     return [
-        asset
+        _annotate_asset_with_stability_gate(
+            asset=asset,
+            section=section,
+            target_taxonomy=target_taxonomy,
+        )
         for asset in recommended_assets
         if _recommended_asset_score_passes(asset=asset, section=section, target_taxonomy=target_taxonomy)
+        and not _assess_asset_stability_gate(asset=asset, section=section, target_taxonomy=target_taxonomy)["blocking_flags"]
     ]
 
 
@@ -1417,6 +1190,194 @@ def _asset_has_source_section_recovery(asset: dict[str, Any]) -> bool:
         or str(score_breakdown.get("source_section_relation") or "")
         in {"exact", "descendant", "ancestor", "heading_family"}
     )
+
+
+def _asset_source_binding_from_candidate(asset: dict[str, Any]) -> dict[str, Any]:
+    metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    existing = metadata.get("source_binding") if isinstance(metadata.get("source_binding"), dict) else {}
+    sample_id = str(existing.get("sample_id") or metadata.get("sample_id") or metadata.get("source_doc_id") or "").strip()
+    raw_document_id = str(existing.get("raw_document_id") or asset.get("raw_document_id") or metadata.get("raw_document_id") or "").strip()
+    source_section_id = str(
+        existing.get("source_section_id")
+        or asset.get("source_section_id")
+        or metadata.get("source_section_id")
+        or ""
+    ).strip()
+    heading_path = str(
+        existing.get("heading_path")
+        or asset.get("heading_path")
+        or metadata.get("heading_path")
+        or metadata.get("section_path")
+        or ""
+    ).strip()
+    page_no = existing.get("page_no") if existing.get("page_no") not in (None, "") else asset.get("page_no") or metadata.get("page_no")
+    page_bound = page_no not in (None, "")
+    missing_fields: list[str] = []
+    if not sample_id:
+        missing_fields.append("sample_id")
+    if not raw_document_id:
+        missing_fields.append("raw_document_id")
+    if not source_section_id:
+        missing_fields.append("source_section_id")
+    if not heading_path:
+        missing_fields.append("heading_path")
+    if not page_bound:
+        missing_fields.append("page_no")
+    document_bound = bool(sample_id or raw_document_id)
+    high_confidence = bool(document_bound and source_section_id and heading_path and page_bound)
+    tier = "high" if high_confidence else "medium" if document_bound and (heading_path or page_bound) else "low"
+    return {
+        "sample_id": sample_id or None,
+        "raw_document_id": raw_document_id or None,
+        "source_section_id": source_section_id or None,
+        "heading_path": heading_path or None,
+        "page_no": page_no if page_bound else None,
+        "document_bound": document_bound,
+        "section_bound": bool(source_section_id),
+        "page_bound": page_bound,
+        "high_confidence_eligible": high_confidence,
+        "tier": tier,
+        "missing_fields": missing_fields,
+    }
+
+
+def _assess_asset_stability_gate(
+    *,
+    asset: dict[str, Any],
+    section: dict[str, Any],
+    target_taxonomy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    taxonomy = target_taxonomy or infer_target_taxonomy(section)
+    target_section_type = str(taxonomy.get("section_type") or "unknown").lower()
+    asset_type = str(asset.get("asset_type") or "").lower()
+    metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    retrieval_quality = metadata.get("retrieval_quality") if isinstance(metadata.get("retrieval_quality"), dict) else {}
+    visual_role = str(asset.get("visual_role") or metadata.get("visual_role") or "").lower()
+    content_form = str(metadata.get("content_form") or "").lower()
+    signal_text = " ".join(
+        str(part)
+        for part in (
+            asset.get("heading_path"),
+            asset.get("title"),
+            asset.get("display_title"),
+            asset.get("caption"),
+            asset.get("preview_text"),
+            metadata.get("source_heading"),
+            metadata.get("raw_title"),
+            metadata.get("semantic_summary"),
+        )
+        if part
+    )
+    normalized_signal = signal_text.casefold()
+    section_text = _section_asset_signal_text(section).casefold()
+    figure_intents = _infer_section_figure_intents(section)
+    source_binding = _asset_source_binding_from_candidate(asset)
+    blocking_flags: list[str] = []
+    warning_flags: list[str] = []
+
+    def _add_block(flag: str) -> None:
+        if flag not in blocking_flags:
+            blocking_flags.append(flag)
+
+    def _add_warning(flag: str) -> None:
+        if flag not in warning_flags:
+            warning_flags.append(flag)
+
+    if asset_type == "figure":
+        if not source_binding["source_section_id"] and not _asset_has_source_section_recovery(asset):
+            _add_warning("missing_source_section_id")
+        if source_binding["tier"] == "low":
+            _add_warning("weak_source_binding")
+
+    if retrieval_quality.get("small_fragment") or retrieval_quality.get("partial_fragment") and not retrieval_quality.get("complete_diagram"):
+        _add_block("small_fragment")
+    if retrieval_quality.get("page_decoration") or visual_role == "page_furniture":
+        _add_block("page_decoration")
+    if retrieval_quality.get("text_screenshot") or visual_role == "text_fragment":
+        _add_block("text_screenshot")
+    if retrieval_quality.get("low_information"):
+        _add_block("low_information")
+
+    topology_targets = {
+        "main_circuit_scheme",
+        "overall_solution",
+        "control_logic",
+        "protection_interlock",
+        "communication_interface",
+    }
+    product_photo_signal = (
+        retrieval_quality.get("product_photo")
+        or visual_role == "product_photo"
+        or _text_contains_any_token(normalized_signal, ("产品照片", "设备照片", "实拍", "现场照片", "photo", "photograph"))
+    )
+    if asset_type == "figure" and target_section_type in topology_targets and product_photo_signal:
+        _add_block("product_photo_as_topology")
+
+    if target_section_type == "cabinet_layout" and asset_type == "figure":
+        wants_cabinet_outline = _text_contains_any_token(section_text, ("柜体外形", "外形尺寸", "外观", "柜体尺寸", "尺寸图"))
+        looks_like_layout = _text_contains_any_token(normalized_signal, ("布置", "布局", "平面", "间距", "通道", "现场布置"))
+        has_outline_signal = _text_contains_any_token(normalized_signal, ("柜体", "外形", "尺寸", "外观"))
+        if wants_cabinet_outline and looks_like_layout and not has_outline_signal:
+            _add_block("layout_as_cabinet_outline")
+
+    expected_types = set(_effective_section_evidence_types(section))
+    table_expected = bool(expected_types.intersection({"table", "parameter"}))
+    if "system_diagram" in figure_intents and not table_expected:
+        table_like = (
+            asset_type == "table"
+            or visual_role == "table_asset"
+            or content_form in {"parameter_table", "bom_table", "interface_table", "table"}
+            or _text_contains_any_token(normalized_signal, ("参数表", "数据表", "清单", "表格"))
+        )
+        if table_like:
+            _add_block("table_image_as_system_diagram")
+
+    return {
+        "status": "blocked" if blocking_flags else "candidate",
+        "blocking_flags": blocking_flags,
+        "warning_flags": warning_flags,
+        "source_binding": source_binding,
+    }
+
+
+def _annotate_asset_with_stability_gate(
+    *,
+    asset: dict[str, Any],
+    section: dict[str, Any],
+    target_taxonomy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    annotated = {**asset}
+    metadata = dict(asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {})
+    gate = _assess_asset_stability_gate(asset=asset, section=section, target_taxonomy=target_taxonomy)
+    metadata["source_binding"] = gate["source_binding"]
+    metadata["asset_stability_gate"] = {
+        "status": gate["status"],
+        "blocking_flags": list(gate["blocking_flags"]),
+        "warning_flags": list(gate["warning_flags"]),
+    }
+    annotated["metadata"] = metadata
+    if str(annotated.get("asset_type") or "").lower() == "figure" and gate["warning_flags"]:
+        annotated["review_required"] = True
+        if not str(annotated.get("risk_level") or "").strip() or str(annotated.get("risk_level") or "").lower() == "low":
+            annotated["risk_level"] = "medium"
+    return annotated
+
+
+def _asset_is_auto_body_eligible(
+    *,
+    asset: dict[str, Any],
+    section: dict[str, Any],
+    target_taxonomy: dict[str, Any] | None = None,
+) -> bool:
+    gate = _assess_asset_stability_gate(asset=asset, section=section, target_taxonomy=target_taxonomy)
+    if gate["blocking_flags"]:
+        return False
+    asset_type = str(asset.get("asset_type") or "").lower()
+    if asset_type == "figure":
+        source_binding = gate["source_binding"]
+        if not source_binding["source_section_id"] and not _asset_has_source_section_recovery(asset):
+            return False
+    return True
 
 
 def _build_runtime_asset_gate_candidate(asset: dict[str, Any]) -> dict[str, Any]:
@@ -1830,12 +1791,97 @@ def sanitize_generated_section_content(*, content_md: str, section_title: str, s
     text = STORAGE_CONTROL_CHAR_PATTERN.sub("", "\n".join(cleaned)).strip()
     text = _strip_leading_section_purpose(text=text, section_purpose=section_purpose)
     text = _strip_leading_section_goal_or_overview(text=text)
+    text = _normalize_customer_language_to_chinese(text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     if not text:
         return f"## {section_title}\n"
     if not text.lstrip().startswith("#"):
         return f"## {section_title}\n\n{text}\n"
     return text.rstrip() + "\n"
+
+
+def _normalize_customer_language_to_chinese(text: str) -> str:
+    """Keep Chinese customer copy while preserving necessary technical acronyms."""
+    normalized_lines: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            normalized_lines.append("")
+            continue
+        if _should_drop_english_repetition_line(stripped):
+            continue
+        normalized_lines.append(_strip_bilingual_repetition_from_line(line))
+    return "\n".join(normalized_lines).strip()
+
+
+def _should_drop_english_repetition_line(line: str) -> bool:
+    if not line or line.startswith(("|", "[[ASSET:", "<!--")):
+        return False
+    if re.search(r"[\u4e00-\u9fff]", line):
+        return False
+    if re.search(r"\[\[ASSET:[^\]]+\]\]", line):
+        return False
+    ascii_words = re.findall(r"[A-Za-z][A-Za-z'-]{1,}", line)
+    if len(ascii_words) < 3:
+        return False
+    code_like_tokens = re.findall(r"\b[A-Z]{2,}(?:/[A-Z]{2,})?\b", line)
+    if len(code_like_tokens) >= max(3, len(ascii_words) - 1):
+        return False
+    return True
+
+
+def _strip_bilingual_repetition_from_line(line: str) -> str:
+    stripped = line.strip()
+    heading_match = re.match(r"^(?P<prefix>#{1,6}\s+)(?P<title>.+)$", stripped)
+    if heading_match:
+        title = _strip_trailing_english_translation(heading_match.group("title"))
+        return f"{heading_match.group('prefix')}{title}".rstrip()
+
+    bullet_prefix = ""
+    body = line
+    bullet_match = re.match(r"^(?P<prefix>\s*(?:[-*+]|\d+[.)])\s+)(?P<body>.+)$", line)
+    if bullet_match:
+        bullet_prefix = bullet_match.group("prefix")
+        body = bullet_match.group("body")
+
+    body = _strip_leading_english_translation(body)
+    body = _strip_trailing_english_translation(body)
+    return f"{bullet_prefix}{body}".rstrip()
+
+
+def _strip_leading_english_translation(text: str) -> str:
+    value = str(text or "").strip()
+    if not re.search(r"[\u4e00-\u9fff]", value):
+        return value
+    first_cjk = re.search(r"[\u4e00-\u9fff]", value)
+    if first_cjk is None or first_cjk.start() == 0:
+        return value
+    prefix = value[: first_cjk.start()].strip(" ：:，,。.;；-—")
+    if "[[ASSET:" in prefix:
+        return value
+    if len(re.findall(r"[A-Za-z][A-Za-z'-]{1,}", prefix)) < 3:
+        return value
+    return value[first_cjk.start() :].lstrip()
+
+
+def _strip_trailing_english_translation(text: str) -> str:
+    value = str(text or "").strip()
+    if not re.search(r"[\u4e00-\u9fff]", value):
+        return value
+    match = re.search(
+        r"(?P<cn>[\u4e00-\u9fff）】】\]])[\s:：,-]+(?P<en>[A-Za-z][A-Za-z0-9 /&().,+-]{2,})$",
+        value,
+    )
+    if not match:
+        return value
+    english = match.group("en").strip()
+    ascii_words = re.findall(r"[A-Za-z][A-Za-z'-]{1,}", english)
+    if not ascii_words:
+        return value
+    if len(ascii_words) == 1 and re.fullmatch(r"[A-Z]{2,}(?:/[A-Z]{2,})?", english):
+        return value
+    return value[: match.start("en")].rstrip(" ：:，,。.;；-—")
 
 
 def clean_customer_facing_section_title(section_title: str) -> str:
@@ -2289,6 +2335,8 @@ def _build_asset_retrieval_trace(
                 "visual_source": item.get("score_breakdown", {}).get("visual_source")
                 if isinstance(item.get("score_breakdown"), dict)
                 else (item.get("metadata") or {}).get("visual_source"),
+                "source_binding": (item.get("metadata") or {}).get("source_binding") or {},
+                "asset_stability_gate": (item.get("metadata") or {}).get("asset_stability_gate") or {},
             }
             for item in recommended_assets[:REUSE_TRACE_BLOCK_LIMIT]
         ],
@@ -2312,10 +2360,41 @@ def _build_asset_retrieval_trace(
                 "visual_source": item.get("score_breakdown", {}).get("visual_source")
                 if isinstance(item.get("score_breakdown"), dict)
                 else (item.get("metadata") or {}).get("visual_source"),
+                "source_binding": (item.get("metadata") or {}).get("source_binding") or {},
+                "asset_stability_gate": (item.get("metadata") or {}).get("asset_stability_gate") or {},
             }
             for item in normalized_candidates[:ASSET_CANDIDATE_LIMIT]
         ],
     }
+
+
+def _refresh_asset_trace_after_evidence_selector(
+    *,
+    asset_trace: dict[str, Any],
+    recommended_assets: list[dict[str, Any]],
+    asset_candidates: list[dict[str, Any]],
+    evidence_selector_trace: dict[str, Any],
+) -> dict[str, Any]:
+    updated = dict(asset_trace or {})
+    refreshed = _build_asset_retrieval_trace(
+        query=str(updated.get("query") or ""),
+        asset_types=list(updated.get("asset_types") or []),
+        skipped_optional_search=bool(updated.get("skipped_optional_search")),
+        recommended_assets=recommended_assets,
+        asset_candidates=asset_candidates,
+        search_trace=updated.get("search_trace") if isinstance(updated.get("search_trace"), dict) else {},
+        diagnostics=updated.get("diagnostics") if isinstance(updated.get("diagnostics"), dict) else {},
+    )
+    updated.update(
+        {
+            "selected_count": refreshed["selected_count"],
+            "candidate_count": refreshed["candidate_count"],
+            "selected_assets": refreshed["selected_assets"],
+            "asset_candidates": refreshed["asset_candidates"],
+            "evidence_selector": evidence_selector_trace,
+        }
+    )
+    return updated
 
 
 def _build_composition_retrieval_trace(
@@ -2352,10 +2431,12 @@ def _build_composition_retrieval_trace(
                 "knowledge_wiki_prior_summary": generation_details.get("knowledge_wiki_prior_summary") or {},
                 "selection_reason": generation_details.get("selection_reason") or {},
                 "token_budget": generation_details.get("token_budget") or {},
+                "evidence_selector": reuse_pack.get("evidence_selector_trace") or {},
             },
             "assets": {
                 "role": "图表/公式层",
                 **asset_trace,
+                "evidence_selector": reuse_pack.get("evidence_selector_trace") or {},
             },
         },
     }
@@ -4380,6 +4461,91 @@ def _remove_mismatched_asset_placeholders(
     return _remove_empty_asset_reference_sections(cleaned).rstrip() + "\n"
 
 
+def _remove_unrecommended_asset_placeholders(
+    *,
+    content_md: str,
+    recommended_assets: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    text = str(content_md or "")
+    allowed_ids = {
+        str(asset.get("asset_id") or "").strip()
+        for asset in recommended_assets
+        if str(asset.get("asset_id") or "").strip()
+    }
+    if "[[ASSET:" not in text:
+        return text, {
+            "status": "not_applicable",
+            "allowed_asset_ids": sorted(allowed_ids),
+            "kept_asset_ids": [],
+            "removed_asset_ids": [],
+        }
+
+    kept_ids: set[str] = set()
+    removed_ids: set[str] = set()
+    deduped_ids: set[str] = set()
+    removed_samples: list[dict[str, Any]] = []
+    cleaned: list[str] = []
+    for line_index, line in enumerate(text.splitlines()):
+        matches = list(ASSET_PLACEHOLDER_PATTERN.finditer(line))
+        if not matches:
+            cleaned.append(line)
+            continue
+        normalized_line = line
+        removed_in_line = False
+        kept_in_line = False
+        for match in matches:
+            placeholder = match.group(0)
+            asset_id = str(match.group(1) or "").strip()
+            if asset_id in allowed_ids:
+                if asset_id in kept_ids:
+                    deduped_ids.add(asset_id)
+                    removed_in_line = True
+                    if len(removed_samples) < 8:
+                        removed_samples.append(
+                            {
+                                "asset_id": asset_id,
+                                "placeholder": placeholder,
+                                "line_index": line_index,
+                                "reason": "duplicate_placeholder_in_section",
+                            }
+                        )
+                    normalized_line = normalized_line.replace(placeholder, "相关图表见本节前文")
+                    continue
+                kept_ids.add(asset_id)
+                kept_in_line = True
+                continue
+            removed_ids.add(asset_id)
+            removed_in_line = True
+            if len(removed_samples) < 8:
+                removed_samples.append(
+                    {
+                        "asset_id": asset_id,
+                        "placeholder": placeholder,
+                        "line_index": line_index,
+                        "reason": "not_in_recommended_assets",
+                    }
+                )
+            normalized_line = normalized_line.replace(placeholder, "相关图表待人工确认")
+
+        if removed_in_line and not kept_in_line:
+            stripped = line.strip()
+            if all(stripped == match.group(0) or stripped.startswith(f"- {match.group(0)}") for match in matches):
+                continue
+        cleaned.append(re.sub(r"\s{2,}", " ", normalized_line).rstrip())
+
+    filtered = _remove_empty_asset_reference_sections(cleaned).rstrip()
+    if filtered:
+        filtered += "\n"
+    return filtered, {
+        "status": "removed_asset_placeholders" if removed_ids or deduped_ids else "ok",
+        "allowed_asset_ids": sorted(allowed_ids),
+        "kept_asset_ids": sorted(kept_ids),
+        "removed_asset_ids": sorted(removed_ids),
+        "deduped_asset_ids": sorted(deduped_ids),
+        "removed_samples": removed_samples,
+    }
+
+
 def _remove_empty_asset_reference_sections(lines: list[str]) -> str:
     cleaned: list[str] = []
     index = 0
@@ -5402,6 +5568,7 @@ def _build_required_asset_placeholders(
     recommended_assets: list[dict[str, Any]],
     *,
     asset_required: bool,
+    section: dict[str, Any] | None = None,
     target_taxonomy: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not asset_required:
@@ -5418,6 +5585,12 @@ def _build_required_asset_placeholders(
             continue
         asset_id = asset.get("asset_id")
         if not asset_id:
+            continue
+        if section is not None and not _asset_is_auto_body_eligible(
+            asset=asset,
+            section=section,
+            target_taxonomy=target_taxonomy,
+        ):
             continue
         normalized_type = "FORMULA" if asset_type == "formula_candidate" else asset_type.upper()
         placeholders.append(
@@ -5463,6 +5636,99 @@ def _build_missing_asset_diagnostics(
             }
         )
     return diagnostics
+
+
+def _summarize_asset_for_stability_trace(asset: dict[str, Any], *, gate: dict[str, Any] | None = None) -> dict[str, Any]:
+    metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    effective_gate = gate or {
+        "status": (metadata.get("asset_stability_gate") or {}).get("status"),
+        "blocking_flags": (metadata.get("asset_stability_gate") or {}).get("blocking_flags") or [],
+        "warning_flags": (metadata.get("asset_stability_gate") or {}).get("warning_flags") or [],
+        "source_binding": metadata.get("source_binding") or {},
+    }
+    return {
+        "asset_id": asset.get("asset_id"),
+        "asset_type": asset.get("asset_type"),
+        "visual_role": asset.get("visual_role"),
+        "display_title": asset.get("display_title") or asset.get("title"),
+        "title": asset.get("title"),
+        "document_name": asset.get("document_name"),
+        "heading_path": asset.get("heading_path"),
+        "page_no": asset.get("page_no"),
+        "score": asset.get("score"),
+        "reason": asset.get("reason"),
+        "reason_trace": list(asset.get("reason_trace") or [])[:4],
+        "preview_text": str(asset.get("preview_text") or "")[:360],
+        "metadata": {
+            "section_type": metadata.get("section_type"),
+            "content_form": metadata.get("content_form"),
+            "retrieval_quality": metadata.get("retrieval_quality") or {},
+            "source_binding": effective_gate.get("source_binding") or {},
+            "asset_stability_gate": {
+                "status": effective_gate.get("status") or "candidate",
+                "blocking_flags": list(effective_gate.get("blocking_flags") or []),
+                "warning_flags": list(effective_gate.get("warning_flags") or []),
+            },
+            "visual_backend": metadata.get("visual_backend"),
+            "visual_source": metadata.get("visual_source"),
+        },
+    }
+
+
+def _build_asset_stability_diagnostics(
+    *,
+    section: dict[str, Any],
+    reusable_blocks: list[dict[str, Any]] | None,
+    recommended_assets: list[dict[str, Any]],
+    asset_candidates: list[dict[str, Any]],
+    raw_assets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    target_taxonomy = infer_target_taxonomy(section)
+    selected_ids = {
+        str(asset.get("asset_id") or "").strip()
+        for asset in recommended_assets
+        if str(asset.get("asset_id") or "").strip()
+    }
+    candidate_ids = {
+        str(asset.get("asset_id") or "").strip()
+        for asset in asset_candidates
+        if str(asset.get("asset_id") or "").strip()
+    }
+    filtered_assets: list[dict[str, Any]] = []
+    gate_counts: Counter[str] = Counter()
+    for asset in raw_assets:
+        asset_id = str(asset.get("asset_id") or "").strip()
+        if asset_id and (asset_id in selected_ids or asset_id in candidate_ids):
+            continue
+        gate = _assess_asset_stability_gate(asset=asset, section=section, target_taxonomy=target_taxonomy)
+        if not gate["blocking_flags"] and asset_id:
+            continue
+        for flag in gate["blocking_flags"] or ["filtered_by_section_gate"]:
+            gate_counts[str(flag)] += 1
+        filtered_assets.append(_summarize_asset_for_stability_trace(asset, gate=gate))
+        if len(filtered_assets) >= ASSET_FILTERED_TRACE_LIMIT:
+            break
+
+    missing_asset_diagnostics = _build_missing_asset_diagnostics(
+        reusable_blocks=list(reusable_blocks or []),
+        recommended_assets=recommended_assets,
+    )
+    selected_primary = recommended_assets[0] if recommended_assets else None
+    return {
+        "status": "ok" if recommended_assets else "missing_or_manual_review",
+        "needs_figure": _section_needs_figure_asset(section),
+        "selected_primary": _summarize_asset_for_stability_trace(selected_primary) if selected_primary else None,
+        "alternatives": [
+            _summarize_asset_for_stability_trace(asset)
+            for asset in asset_candidates
+            if str(asset.get("asset_id") or "").strip() not in selected_ids
+        ][:3],
+        "filtered_assets": filtered_assets,
+        "filtered_count": len(filtered_assets),
+        "filter_reason_counts": dict(sorted(gate_counts.items())),
+        "missing_asset_diagnostics": missing_asset_diagnostics,
+        "missing_asset_explainable": bool(missing_asset_diagnostics) if not recommended_assets else True,
+    }
 
 
 def build_reusable_blocks(
@@ -5733,6 +5999,7 @@ def build_reuse_pack(
     asset_candidates: list[dict[str, Any]] | None = None,
     parameter_evidence_candidates: list[dict[str, Any]] | None = None,
     retrieval_trace: dict[str, Any] | None = None,
+    evidence_selector_trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     target_taxonomy = infer_target_taxonomy(section)
     serializable_target_taxonomy = _json_safe_value(target_taxonomy)
@@ -5755,6 +6022,7 @@ def build_reuse_pack(
     required_asset_placeholders = _build_required_asset_placeholders(
         recommended_assets,
         asset_required=bool(section.get("asset_required")),
+        section=section,
         target_taxonomy=target_taxonomy,
     )
     missing_asset_diagnostics = _build_missing_asset_diagnostics(
@@ -5796,6 +6064,7 @@ def build_reuse_pack(
         ],
         "risk_flags": risk_flags,
         "retrieval_trace": retrieval_trace or {},
+        "evidence_selector_trace": evidence_selector_trace or {},
     }
 
 
@@ -5804,6 +6073,22 @@ def _merge_evidence_judge_trace(retrieval_trace: dict[str, Any] | None, evidence
     if evidence_judge_trace:
         merged["evidence_judge"] = evidence_judge_trace
     return merged
+
+
+def _sync_context_after_evidence_selector(
+    *,
+    context: str,
+    citations: list[dict[str, Any]],
+    reusable_blocks: list[dict[str, Any]],
+    evidence_selector_trace: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]]]:
+    if str(evidence_selector_trace.get("status") or "").lower() not in {"applied", "deterministic", "fallback_error"}:
+        return context, citations
+    input_counts = evidence_selector_trace.get("input_counts") if isinstance(evidence_selector_trace.get("input_counts"), dict) else {}
+    input_block_count = int(input_counts.get("blocks") or 0)
+    if input_block_count <= len(reusable_blocks):
+        return context, citations
+    return _build_context_from_reusable_blocks(reusable_blocks)
 
 
 def _reuse_prompt_block_limit(section: dict[str, Any]) -> int:
@@ -6616,7 +6901,10 @@ def build_manual_only_section_content(*, section: dict[str, Any], reuse_pack: di
 
 def ensure_required_asset_placeholders(*, content_md: str, reuse_pack: dict[str, Any]) -> str:
     placeholders = _filter_required_asset_placeholders_for_section(
-        placeholders=list(reuse_pack.get("required_asset_placeholders") or []),
+        placeholders=_filter_required_asset_placeholders_to_recommended_assets(
+            placeholders=list(reuse_pack.get("required_asset_placeholders") or []),
+            recommended_assets=list(reuse_pack.get("recommended_assets") or []),
+        ),
         reuse_pack=reuse_pack,
     )
     if not placeholders:
@@ -6646,6 +6934,26 @@ def ensure_required_asset_placeholders(*, content_md: str, reuse_pack: dict[str,
     for item in remaining:
         appendix_lines.append(f"- {item.get('placeholder')} {item.get('title') or '参考资产'}")
     return content_with_inline_assets.rstrip() + "\n" + "\n".join(appendix_lines).rstrip() + "\n"
+
+
+def _filter_required_asset_placeholders_to_recommended_assets(
+    *,
+    placeholders: list[dict[str, Any]],
+    recommended_assets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    allowed_ids = {
+        str(asset.get("asset_id") or "").strip()
+        for asset in recommended_assets
+        if str(asset.get("asset_id") or "").strip()
+    }
+    if not allowed_ids:
+        return []
+    filtered: list[dict[str, Any]] = []
+    for item in placeholders:
+        asset_id = _extract_asset_id_from_placeholder(str(item.get("placeholder") or ""))
+        if asset_id and asset_id in allowed_ids:
+            filtered.append(item)
+    return filtered
 
 
 def _filter_required_asset_placeholders_for_section(
@@ -7859,6 +8167,10 @@ class SectionDraftService:
         self.section_generation_concurrency = max(1, int(self.settings.section_generation_concurrency or 1))
         self.section_generation_quality_gate = str(self.settings.section_generation_quality_gate or "full").lower()
         self.section_generation_fast_coherence_pass = bool(self.settings.section_generation_fast_coherence_pass)
+        self.section_generation_item_timeout_seconds = max(
+            1.0,
+            float(self.settings.section_generation_item_timeout_seconds or 240.0),
+        )
         self.section_generation_granularity = str(self.settings.section_generation_granularity or "top_level").lower()
         self.section_reuse_context_mode = str(self.settings.section_reuse_context_mode or "prefer_full_section").lower()
         self.section_reuse_candidate_limit = max(DEFAULT_REUSE_LIMIT, int(self.settings.section_reuse_candidate_limit or DEFAULT_REUSE_LIMIT))
@@ -7868,6 +8180,7 @@ class SectionDraftService:
         )
         self.evidence_judge_mode = str(self.settings.evidence_judge_mode or "off").lower()
         self.evidence_judge_max_candidates = max(1, int(self.settings.evidence_judge_max_candidates or 10))
+        self.evidence_judge_timeout_seconds = max(1.0, float(self.settings.evidence_judge_timeout_seconds or 18.0))
 
     @property
     def asset_retriever(self) -> AssetRetrievalService:
@@ -7932,22 +8245,23 @@ class SectionDraftService:
             candidates=candidates,
         )
         try:
-            response = await self.executor.llm_client.invoke(
-                LLMRequest(
-                    task_type=TaskType.EVIDENCE_JUDGE,
-                    session_id=f"{task_id}-evidence-judge",
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    temperature=0.0,
-                    max_tokens=900,
-                    json_schema=EVIDENCE_JUDGE_SCHEMA,
-                    metadata={
-                        "section": section,
-                        "target_taxonomy": infer_target_taxonomy(section),
-                        "candidates": candidates,
-                    },
+            async with asyncio.timeout(self.evidence_judge_timeout_seconds):
+                response = await self.executor.llm_client.invoke(
+                    LLMRequest(
+                        task_type=TaskType.EVIDENCE_JUDGE,
+                        session_id=f"{task_id}-evidence-judge",
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        temperature=0.0,
+                        max_tokens=900,
+                        json_schema=EVIDENCE_JUDGE_SCHEMA,
+                        metadata={
+                            "section": section,
+                            "target_taxonomy": infer_target_taxonomy(section),
+                            "candidates": candidates,
+                        },
+                    )
                 )
-            )
             decisions = _parse_evidence_judge_decisions(response.content)
             filtered_blocks, trace = _apply_evidence_judge_decisions(
                 reusable_blocks=reusable_blocks,
@@ -7971,6 +8285,14 @@ class SectionDraftService:
                 **trace,
                 "reason": reason,
             }
+        except TimeoutError:
+            return reusable_blocks, {
+                **base_trace,
+                "status": "fallback_timeout",
+                "timeout_seconds": self.evidence_judge_timeout_seconds,
+                "kept_count": len(reusable_blocks),
+                "dropped_count": 0,
+            }
         except Exception as exc:  # noqa: BLE001
             return reusable_blocks, {
                 **base_trace,
@@ -7979,6 +8301,46 @@ class SectionDraftService:
                 "kept_count": len(reusable_blocks),
                 "dropped_count": 0,
             }
+
+    async def _select_generation_evidence(
+        self,
+        *,
+        task_id: str,
+        section: dict[str, Any],
+        global_params: dict[str, Any],
+        case_trace: dict[str, Any],
+        reusable_blocks: list[dict[str, Any]],
+        recommended_assets: list[dict[str, Any]],
+        asset_candidates: list[dict[str, Any]],
+        knowledge_retrieval_bundle: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        selector_trace = await select_evidence_for_section(
+            llm_client=self.executor.llm_client,
+            section=section,
+            global_params=global_params,
+            case_trace=case_trace,
+            reusable_blocks=reusable_blocks,
+            recommended_assets=recommended_assets,
+            asset_candidates=asset_candidates,
+            published_wiki=knowledge_retrieval_bundle or {},
+            task_id=task_id,
+            settings=self.settings,
+        )
+        return (
+            list(selector_trace.get("filtered_reusable_blocks") or reusable_blocks),
+            list(selector_trace.get("filtered_recommended_assets") or recommended_assets),
+            list(selector_trace.get("filtered_asset_candidates") or asset_candidates),
+            {
+                key: value
+                for key, value in selector_trace.items()
+                if key
+                not in {
+                    "filtered_reusable_blocks",
+                    "filtered_recommended_assets",
+                    "filtered_asset_candidates",
+                }
+            },
+        )
 
     async def _prepare_single_section_retrieval_payload(
         self,
@@ -8038,6 +8400,11 @@ class SectionDraftService:
                 "reusable_blocks": [],
                 "parameter_evidence_candidates": parameter_evidence_candidates,
                 "evidence_judge_trace": evidence_judge_trace,
+                "evidence_selector_trace": {
+                    "mode": self.settings.evidence_selector_mode,
+                    "status": "skipped",
+                    "reason": "parameter_snapshot_short_circuit",
+                },
                 "recommended_assets": [],
                 "asset_trace": asset_trace,
                 "asset_candidates": [],
@@ -8101,12 +8468,6 @@ class SectionDraftService:
             evidence_bundle=evidence_bundle,
             global_params=global_params,
         )
-        context, citations = _merge_parameter_evidence_context(
-            context=context,
-            citations=citations,
-            parameter_evidence_candidates=parameter_evidence_candidates,
-        )
-        evidence_trace = _build_evidence_retrieval_trace(citations=citations)
         recommended_assets, asset_trace, asset_candidates = await self._search_recommended_assets(
             session=session,
             project_id=project_id,
@@ -8115,6 +8476,34 @@ class SectionDraftService:
             reusable_blocks=reusable_blocks,
             run_runtime_vision_gate=run_runtime_vision_gate,
         )
+        reusable_blocks, recommended_assets, asset_candidates, evidence_selector_trace = await self._select_generation_evidence(
+            task_id=f"{task_id}-selector",
+            section=section,
+            global_params=global_params,
+            case_trace=case_library_result.get("trace") or {},
+            reusable_blocks=reusable_blocks,
+            recommended_assets=recommended_assets,
+            asset_candidates=asset_candidates,
+            knowledge_retrieval_bundle=knowledge_retrieval_bundle,
+        )
+        asset_trace = _refresh_asset_trace_after_evidence_selector(
+            asset_trace=asset_trace,
+            recommended_assets=recommended_assets,
+            asset_candidates=asset_candidates,
+            evidence_selector_trace=evidence_selector_trace,
+        )
+        context, citations = _sync_context_after_evidence_selector(
+            context=context,
+            citations=citations,
+            reusable_blocks=reusable_blocks,
+            evidence_selector_trace=evidence_selector_trace,
+        )
+        context, citations = _merge_parameter_evidence_context(
+            context=context,
+            citations=citations,
+            parameter_evidence_candidates=parameter_evidence_candidates,
+        )
+        evidence_trace = _build_evidence_retrieval_trace(citations=citations)
         return {
             "retrieval_section": section,
             "index": index,
@@ -8126,6 +8515,7 @@ class SectionDraftService:
             "reusable_blocks": reusable_blocks,
             "parameter_evidence_candidates": parameter_evidence_candidates,
             "evidence_judge_trace": evidence_judge_trace,
+            "evidence_selector_trace": evidence_selector_trace,
             "recommended_assets": recommended_assets,
             "asset_trace": asset_trace,
             "asset_candidates": asset_candidates,
@@ -8160,6 +8550,7 @@ class SectionDraftService:
                 asset_candidates=payload["asset_candidates"],
                 parameter_evidence_candidates=payload["parameter_evidence_candidates"],
                 retrieval_trace=_merge_evidence_judge_trace(payload["case_trace"], payload["evidence_judge_trace"]),
+                evidence_selector_trace=payload["evidence_selector_trace"],
             )
             return {
                 "context": payload["context"],
@@ -8169,6 +8560,7 @@ class SectionDraftService:
                 "recommended_assets": payload["recommended_assets"],
                 "asset_candidates": payload["asset_candidates"],
                 "reusable_blocks": payload["reusable_blocks"],
+                "evidence_selector_trace": payload["evidence_selector_trace"],
                 "reuse_pack": reuse_pack,
             }
 
@@ -8240,6 +8632,18 @@ class SectionDraftService:
             if not any(str(asset.get("asset_type") or "").lower() == "figure" for asset in recommended_assets):
                 diagnostics["missing_figure_asset"] = True
                 diagnostics.setdefault("missing_figure_reason", "no_usable_figure_candidate_after_parent_gate")
+            stability_diagnostics = _build_asset_stability_diagnostics(
+                section=section,
+                reusable_blocks=reusable_blocks,
+                recommended_assets=recommended_assets,
+                asset_candidates=asset_candidates,
+                raw_assets=asset_candidates,
+            )
+            diagnostics["asset_stability"] = stability_diagnostics
+            if stability_diagnostics.get("filtered_assets"):
+                diagnostics["filtered_assets"] = stability_diagnostics["filtered_assets"]
+            if stability_diagnostics.get("missing_asset_diagnostics"):
+                diagnostics["missing_asset_diagnostics"] = stability_diagnostics["missing_asset_diagnostics"]
             asset_trace = _build_asset_retrieval_trace(
                 query=query,
                 asset_types=build_section_asset_types(section),
@@ -8268,6 +8672,32 @@ class SectionDraftService:
             reusable_blocks=reusable_blocks,
             evidence_judge_trace=evidence_judge_trace,
         )
+        knowledge_retrieval_bundle = self._build_knowledge_wiki_retrieval_bundle(
+            section=section,
+            global_params=global_params,
+        )
+        reusable_blocks, recommended_assets, asset_candidates, evidence_selector_trace = await self._select_generation_evidence(
+            task_id=f"{project_id}-{section.get('section_id') or index + 1}-selector",
+            section=section,
+            global_params=global_params,
+            case_trace=case_trace,
+            reusable_blocks=reusable_blocks,
+            recommended_assets=recommended_assets,
+            asset_candidates=asset_candidates,
+            knowledge_retrieval_bundle=knowledge_retrieval_bundle,
+        )
+        asset_trace = _refresh_asset_trace_after_evidence_selector(
+            asset_trace=asset_trace,
+            recommended_assets=recommended_assets,
+            asset_candidates=asset_candidates,
+            evidence_selector_trace=evidence_selector_trace,
+        )
+        context, citations = _sync_context_after_evidence_selector(
+            context=context,
+            citations=citations,
+            reusable_blocks=reusable_blocks,
+            evidence_selector_trace=evidence_selector_trace,
+        )
         parameter_evidence_candidates = _merge_parameter_evidence_candidates(child_results)
         context, citations = _merge_parameter_evidence_context(
             context=context,
@@ -8283,6 +8713,7 @@ class SectionDraftService:
             asset_candidates=asset_candidates,
             parameter_evidence_candidates=parameter_evidence_candidates,
             retrieval_trace=_merge_evidence_judge_trace(case_trace, evidence_judge_trace),
+            evidence_selector_trace=evidence_selector_trace,
         )
         return {
             "context": context,
@@ -8292,6 +8723,7 @@ class SectionDraftService:
             "recommended_assets": recommended_assets,
             "asset_candidates": asset_candidates,
             "reusable_blocks": reusable_blocks,
+            "evidence_selector_trace": evidence_selector_trace,
             "parameter_evidence_candidates": parameter_evidence_candidates,
             "reuse_pack": reuse_pack,
         }
@@ -8382,6 +8814,22 @@ class SectionDraftService:
                     recommended_assets=item["recommended_assets"],
                     allow_rewrite=True,
                 )
+        content_md = _normalize_invalid_asset_placeholders(
+            content_md=content_md,
+            recommended_assets=item["recommended_assets"],
+        )
+        content_md = _remove_mismatched_asset_placeholders(
+            content_md=content_md,
+            recommended_assets=item["recommended_assets"],
+        )
+        content_md, asset_placeholder_filter_trace = _remove_unrecommended_asset_placeholders(
+            content_md=content_md,
+            recommended_assets=item["recommended_assets"],
+        )
+        generation_details = {
+            **generation_details,
+            "asset_placeholder_filter": asset_placeholder_filter_trace,
+        }
         return {
             **item,
             "content_md": content_md,
@@ -8390,6 +8838,147 @@ class SectionDraftService:
             "generation_details": generation_details,
             "quality_gate_result": quality_gate_result,
         }
+
+    def _allocate_parallel_section_assets(self, prepared_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        asset_claims: dict[str, list[tuple[float, int, int, dict[str, Any]]]] = {}
+        for item in prepared_items:
+            item_index = int(item.get("index") or 0)
+            section = dict(item.get("section") or {})
+            for rank, asset in enumerate(item.get("recommended_assets") or []):
+                asset_id = str(asset.get("asset_id") or "").strip()
+                if not asset_id:
+                    continue
+                claim_score = self._score_parallel_asset_claim(section=section, asset=asset, rank=rank)
+                asset_claims.setdefault(asset_id, []).append((claim_score, -rank, -item_index, item))
+
+        duplicate_claims = {asset_id: claims for asset_id, claims in asset_claims.items() if len(claims) > 1}
+        if not duplicate_claims:
+            return prepared_items
+
+        demoted_by_index: dict[int, list[dict[str, Any]]] = {}
+        allocation_summary: dict[str, dict[str, Any]] = {}
+        for asset_id, claims in duplicate_claims.items():
+            owner_claim = max(claims, key=lambda claim: (claim[0], claim[1], claim[2]))
+            owner_item = owner_claim[3]
+            owner_index = int(owner_item.get("index") or 0)
+            allocation_summary[asset_id] = {
+                "owner_index": owner_index,
+                "owner_section_id": str((owner_item.get("section") or {}).get("section_id") or ""),
+                "demoted_indexes": [],
+            }
+            for _score, _rank, _negative_index, item in claims:
+                item_index = int(item.get("index") or 0)
+                if item_index == owner_index:
+                    continue
+                demoted_assets = [
+                    dict(asset)
+                    for asset in (item.get("recommended_assets") or [])
+                    if str(asset.get("asset_id") or "").strip() == asset_id
+                ]
+                if demoted_assets:
+                    demoted_by_index.setdefault(item_index, []).extend(demoted_assets)
+                    allocation_summary[asset_id]["demoted_indexes"].append(item_index)
+
+        if not demoted_by_index:
+            return prepared_items
+
+        for item in prepared_items:
+            item_index = int(item.get("index") or 0)
+            demoted_assets = demoted_by_index.get(item_index) or []
+            if not demoted_assets:
+                continue
+            demoted_ids = {str(asset.get("asset_id") or "").strip() for asset in demoted_assets}
+            item["recommended_assets"] = [
+                asset
+                for asset in (item.get("recommended_assets") or [])
+                if str(asset.get("asset_id") or "").strip() not in demoted_ids
+            ]
+            existing_candidate_ids = {
+                str(asset.get("asset_id") or "").strip()
+                for asset in (item.get("asset_candidates") or [])
+            }
+            demoted_candidates: list[dict[str, Any]] = []
+            for asset in demoted_assets:
+                asset_id = str(asset.get("asset_id") or "").strip()
+                if not asset_id or asset_id in existing_candidate_ids:
+                    continue
+                demoted_candidates.append(
+                    {
+                        **asset,
+                        "cross_section_asset_reuse_demoted": True,
+                        "reason": (
+                            str(asset.get("reason") or "").strip()
+                            + "；跨章节资产分配：该图已分配给更匹配章节，本章节保留为候选，不直接插入。"
+                        ).strip("；"),
+                    }
+                )
+                existing_candidate_ids.add(asset_id)
+            item["asset_candidates"] = [*(item.get("asset_candidates") or []), *demoted_candidates]
+
+            asset_trace = dict(item.get("asset_trace") or {})
+            diagnostics = dict(asset_trace.get("diagnostics") or {})
+            diagnostics["cross_section_asset_allocation"] = {
+                "status": "demoted_duplicate_recommendations",
+                "demoted_asset_ids": sorted(demoted_ids),
+                "allocation_summary": allocation_summary,
+            }
+            asset_trace["diagnostics"] = diagnostics
+            item["asset_trace"] = asset_trace
+
+            reuse_pack = dict(item.get("reuse_pack") or {})
+            reuse_pack["recommended_assets"] = item["recommended_assets"]
+            reuse_pack["asset_candidates"] = item["asset_candidates"]
+            reuse_pack["required_asset_placeholders"] = _filter_required_asset_placeholders_to_recommended_assets(
+                placeholders=list(reuse_pack.get("required_asset_placeholders") or []),
+                recommended_assets=item["recommended_assets"],
+            )
+            item["reuse_pack"] = reuse_pack
+
+        return prepared_items
+
+    def _score_parallel_asset_claim(self, *, section: dict[str, Any], asset: dict[str, Any], rank: int) -> float:
+        try:
+            score = float(asset.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        metadata = dict(asset.get("metadata") or {})
+        section_title = str(section.get("title") or "").casefold()
+        section_id = str(section.get("section_id") or "").strip()
+        asset_text = " ".join(
+            str(value or "")
+            for value in (
+                asset.get("title"),
+                asset.get("display_title"),
+                asset.get("caption"),
+                metadata.get("heading_path"),
+                metadata.get("section_path"),
+                metadata.get("source_heading"),
+            )
+        ).casefold()
+        source_section_id = str(
+            metadata.get("source_section_id")
+            or (metadata.get("source_binding") or {}).get("source_section_id")
+            or ""
+        ).strip()
+        if source_section_id and section_id and source_section_id == section_id:
+            score += 1.0
+        score += min(0.35, self._parallel_keyword_overlap_boost(section_title, asset_text))
+        score -= rank * 0.02
+        return score
+
+    def _parallel_keyword_overlap_boost(self, query: str, text: str) -> float:
+        if not query or not text:
+            return 0.0
+        normalized_text = text.casefold()
+        fragments: set[str] = set()
+        for keyword in re.findall(r"[A-Za-z0-9_+-]{2,}|[\u4e00-\u9fff]{2,}", query.casefold()):
+            fragments.add(keyword)
+            if any("\u4e00" <= char <= "\u9fff" for char in keyword):
+                max_size = min(6, len(keyword))
+                for size in range(2, max_size + 1):
+                    for index in range(0, len(keyword) - size + 1):
+                        fragments.add(keyword[index : index + size])
+        return sum(1 for fragment in fragments if fragment in normalized_text) * 0.03
 
     async def _generate_sections_parallel(
         self,
@@ -8453,21 +9042,69 @@ class SectionDraftService:
                 task.cancel()
             raise
         prepared_items = [prepared_by_index[index] for index in range(total_sections)]
+        prepared_items = self._allocate_parallel_section_assets(prepared_items)
 
         semaphore = asyncio.Semaphore(self.section_generation_concurrency)
 
         async def _run_item(item: dict[str, Any]) -> dict[str, Any]:
             async with semaphore:
-                return await self._generate_prepared_section_item(
-                    job=job,
-                    outline=outline,
-                    outline_title=outline_title,
-                    global_params=global_params,
-                    item=item,
-                )
+                try:
+                    async with asyncio.timeout(self.section_generation_item_timeout_seconds):
+                        return await self._generate_prepared_section_item(
+                            job=job,
+                            outline=outline,
+                            outline_title=outline_title,
+                            global_params=global_params,
+                            item=item,
+                        )
+                except TimeoutError:
+                    section = item["section"]
+                    section_title = clean_customer_facing_section_title(str(section.get("title") or "未命名章节"))
+                    content_md = build_llm_write_fallback_section_content(section=section, global_params=global_params)
+                    content_md = sanitize_generated_section_content(
+                        content_md=content_md,
+                        section_title=section_title,
+                        section_purpose=str(section.get("purpose") or section.get("description") or ""),
+                    )
+                    return {
+                        **item,
+                        "content_md": content_md,
+                        "draft_status": "review_required",
+                        "citations": item["citations"],
+                        "generation_details": {
+                            "effective_path": "section_generation_timeout_fallback",
+                            "timeout_seconds": self.section_generation_item_timeout_seconds,
+                            "retrieval_mode": (item.get("reuse_pack") or {}).get("retrieval_mode"),
+                            "retrieval_trace": _build_composition_retrieval_trace(
+                                evidence_trace=item["evidence_trace"],
+                                asset_trace=item["asset_trace"],
+                                reuse_pack=item["reuse_pack"],
+                                generation_details={"effective_path": "section_generation_timeout_fallback"},
+                            ),
+                        },
+                        "quality_gate_result": {
+                            "status": "skipped_timeout",
+                            "summary": "章节生成超过单章时间上限，已降级为需人工复核的兜底草稿。",
+                            "rewrite_attempted": False,
+                            "rewrite_applied": False,
+                        },
+                    }
 
         tasks = [asyncio.create_task(_run_item(item)) for item in prepared_items]
         results_by_index: dict[int, dict[str, Any]] = {}
+        job.output_ref = {
+            "progress": {
+                "stage": "generating_parallel",
+                "completed_sections": 0,
+                "prepared_sections": total_sections,
+                "total_sections": total_sections,
+                "granularity": self.section_generation_granularity,
+                "concurrency": self.section_generation_concurrency,
+                "quality_gate": self.section_generation_quality_gate,
+            }
+        }
+        if job_id is not None:
+            await session.commit()
         try:
             for completed_task in asyncio.as_completed(tasks):
                 result = await completed_task
@@ -8516,12 +9153,21 @@ class SectionDraftService:
         )
         for result in ordered_results:
             section = result["section"]
+            content_md, asset_placeholder_filter_trace = _remove_unrecommended_asset_placeholders(
+                content_md=str(result.get("content_md") or ""),
+                recommended_assets=list(result.get("recommended_assets") or []),
+            )
+            result["content_md"] = content_md
+            result["generation_details"] = {
+                **(result.get("generation_details") or {}),
+                "asset_placeholder_filter": asset_placeholder_filter_trace,
+            }
             draft = SectionDraft(
                 project_id=project_id,
                 draft_version=draft_version,
                 section_id=str(section.get("section_id")),
                 title=clean_customer_facing_section_title(str(section.get("title") or "未命名章节")),
-                content_md=str(result.get("content_md") or ""),
+                content_md=content_md,
                 citation_refs=result.get("citations") or [],
                 assumptions=[],
                 global_param_snapshot=global_params if isinstance(global_params, dict) else {},
@@ -8529,6 +9175,7 @@ class SectionDraftService:
                 validator_result={
                     "recommended_assets": result.get("recommended_assets") or [],
                     "asset_candidates": result.get("asset_candidates") or [],
+                    "asset_trace": result.get("asset_trace") or {},
                     "generation_mode": result.get("generation_mode") or "baseline",
                     "reuse_pack": result.get("reuse_pack") or {},
                     "generation_details": result.get("generation_details") or {},
@@ -8751,6 +9398,14 @@ class SectionDraftService:
                         content_md=content_md,
                         recommended_assets=recommended_assets,
                     )
+            content_md, asset_placeholder_filter_trace = _remove_unrecommended_asset_placeholders(
+                content_md=content_md,
+                recommended_assets=recommended_assets,
+            )
+            generation_details = {
+                **generation_details,
+                "asset_placeholder_filter": asset_placeholder_filter_trace,
+            }
             _record_inter_section_context(
                 state=inter_section_state,
                 covered_topics=covered_topics,
@@ -8772,6 +9427,7 @@ class SectionDraftService:
                 validator_result={
                     "recommended_assets": recommended_assets,
                     "asset_candidates": asset_candidates,
+                    "asset_trace": asset_trace,
                     "generation_mode": generation_mode,
                     "reuse_pack": reuse_pack,
                     "generation_details": generation_details,
@@ -9291,6 +9947,14 @@ class SectionDraftService:
                     content_md=content_md,
                     recommended_assets=recommended_assets,
                 )
+        content_md, asset_placeholder_filter_trace = _remove_unrecommended_asset_placeholders(
+            content_md=content_md,
+            recommended_assets=recommended_assets,
+        )
+        generation_details = {
+            **generation_details,
+            "asset_placeholder_filter": asset_placeholder_filter_trace,
+        }
         draft.title = clean_customer_facing_section_title(str(section.get("title") or draft.title))
         draft.content_md = content_md
         draft.citation_refs = citations
@@ -9299,6 +9963,7 @@ class SectionDraftService:
         draft.validator_result = {
             "recommended_assets": recommended_assets,
             "asset_candidates": asset_candidates,
+            "asset_trace": asset_trace,
             "generation_mode": generation_mode,
             "reuse_pack": reuse_pack,
             "quality_gate": quality_gate_result,
@@ -9378,6 +10043,7 @@ class SectionDraftService:
         draft.validator_result = {
             "recommended_assets": current_result.get("recommended_assets", []),
             "asset_candidates": current_result.get("asset_candidates", []),
+            "asset_trace": current_result.get("asset_trace", {}),
             "generation_mode": current_result.get("generation_mode", "baseline"),
             "reuse_pack": current_result.get("reuse_pack", {}),
             "quality_gate": {
@@ -9438,6 +10104,8 @@ class SectionDraftService:
         figure_dominant = _section_is_figure_dominant(section, target_taxonomy=target_taxonomy)
         figure_assets: list[dict[str, Any]] = []
         figure_candidates: list[dict[str, Any]] = []
+        raw_figure_assets: list[dict[str, Any]] = []
+        raw_regular_assets: list[dict[str, Any]] = []
 
         if needs_figure:
             figure_response = await self.asset_retriever.search_project_assets(
@@ -9453,15 +10121,16 @@ class SectionDraftService:
             trace_details["figure_first"] = (
                 figure_response.search_trace.model_dump(mode="json") if figure_response.search_trace is not None else {}
             )
+            raw_figure_assets = [item.model_dump(mode="json") for item in figure_response.results]
             figure_assets = await self._post_process_recommended_assets(
                 session=session,
-                assets=[item.model_dump(mode="json") for item in figure_response.results],
+                assets=raw_figure_assets,
                 section=section,
                 reusable_blocks=reusable_blocks,
             )
             figure_candidates = await self._post_process_recommended_assets(
                 session=session,
-                assets=[item.model_dump(mode="json") for item in figure_response.results],
+                assets=raw_figure_assets,
                 section=section,
                 reusable_blocks=reusable_blocks,
                 limit=ASSET_CANDIDATE_LIMIT,
@@ -9481,15 +10150,17 @@ class SectionDraftService:
                 trace_details["figure_relaxed"] = (
                     relaxed_response.search_trace.model_dump(mode="json") if relaxed_response.search_trace is not None else {}
                 )
+                relaxed_raw_assets = [item.model_dump(mode="json") for item in relaxed_response.results]
+                raw_figure_assets = _merge_recommended_assets(raw_figure_assets, relaxed_raw_assets)
                 relaxed_assets = await self._post_process_recommended_assets(
                     session=session,
-                    assets=[item.model_dump(mode="json") for item in relaxed_response.results],
+                    assets=relaxed_raw_assets,
                     section=section,
                     reusable_blocks=reusable_blocks,
                 )
                 relaxed_candidates = await self._post_process_recommended_assets(
                     session=session,
-                    assets=[item.model_dump(mode="json") for item in relaxed_response.results],
+                    assets=relaxed_raw_assets,
                     section=section,
                     reusable_blocks=reusable_blocks,
                     limit=ASSET_CANDIDATE_LIMIT,
@@ -9514,15 +10185,16 @@ class SectionDraftService:
                 include_global_historical=True,
             )
             regular_response_trace = response.search_trace.model_dump(mode="json") if response.search_trace is not None else {}
+            raw_regular_assets = [item.model_dump(mode="json") for item in response.results]
             regular_assets = await self._post_process_recommended_assets(
                 session=session,
-                assets=[item.model_dump(mode="json") for item in response.results],
+                assets=raw_regular_assets,
                 section=section,
                 reusable_blocks=reusable_blocks,
             )
             regular_candidates = await self._post_process_recommended_assets(
                 session=session,
-                assets=[item.model_dump(mode="json") for item in response.results],
+                assets=raw_regular_assets,
                 section=section,
                 reusable_blocks=reusable_blocks,
                 limit=ASSET_CANDIDATE_LIMIT,
@@ -9579,6 +10251,19 @@ class SectionDraftService:
         if needs_figure and not any(str(asset.get("asset_type") or "").lower() == "figure" for asset in assets):
             diagnostics["missing_figure_asset"] = True
             diagnostics.setdefault("missing_figure_reason", "no_usable_figure_candidate_after_filtering")
+        if needs_figure:
+            stability_diagnostics = _build_asset_stability_diagnostics(
+                section=section,
+                reusable_blocks=reusable_blocks,
+                recommended_assets=assets,
+                asset_candidates=asset_candidates,
+                raw_assets=_merge_recommended_assets(raw_figure_assets, raw_regular_assets),
+            )
+            diagnostics["asset_stability"] = stability_diagnostics
+            if stability_diagnostics.get("filtered_assets"):
+                diagnostics["filtered_assets"] = stability_diagnostics["filtered_assets"]
+            if stability_diagnostics.get("missing_asset_diagnostics"):
+                diagnostics["missing_asset_diagnostics"] = stability_diagnostics["missing_asset_diagnostics"]
         trace = _build_asset_retrieval_trace(
             query=query,
             asset_types=asset_types,

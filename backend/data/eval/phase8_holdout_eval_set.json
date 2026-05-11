@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "name": "phase8_holdout_pk_eval_set",
+  "description": "Fixed MVP PK regression set. Run outline and draft scoring separately; when outline quality is under review, generate a baseline-outline override before draft scoring.",
+  "thresholds": {
+    "target_duration_seconds": 300,
+    "max_duration_seconds": 600,
+    "min_outline_coverage": 0.8,
+    "min_technical_evidence_accuracy": 0.8,
+    "min_asset_top3_source_bound_rate": 0.8,
+    "max_wrong_figure_body_rate": 0.1,
+    "max_internal_residue_count": 0
+  },
+  "items": [
+    {
+      "id": "holdout_linyi_lci_near_library",
+      "kind": "holdout_document",
+      "baseline_document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+      "scenario": "near_library_lci_system_scheme",
+      "expected_similarity_to_library": "high",
+      "focus": ["outline_match", "system_scheme_draft", "lci_diagrams", "technical_data_tables"]
+    },
+    {
+      "id": "holdout_zhanjiang_lci_generalization",
+      "kind": "holdout_document",
+      "baseline_document_name": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+      "scenario": "lci_generalization_with_different_customer_context",
+      "expected_similarity_to_library": "medium",
+      "focus": ["outline_draft_split", "asset_top3", "control_interface", "transformer_specs"]
+    },
+    {
+      "id": "sim_steel_fan_vfd_near_library",
+      "kind": "simulated_requirement",
+      "requirement_path": "output/trial-requirement-steel-fan-vfd-20260423.md",
+      "scenario": "steel_fan_vfd_upgrade_close_to_existing_library",
+      "expected_similarity_to_library": "medium_high",
+      "focus": ["vfd_system_scheme", "main_circuit_asset", "equipment_parameters"]
+    },
+    {
+      "id": "sim_new_domain_generalization_placeholder",
+      "kind": "simulated_requirement_placeholder",
+      "scenario": "new_or_weakly_covered_electrical_solution",
+      "expected_similarity_to_library": "low_medium",
+      "focus": ["taxonomy_generalization", "evidence_rejection", "no_false_asset_insertion"],
+      "status": "to_be_authored_before_customer_pk"
+    }
+  ]
+}

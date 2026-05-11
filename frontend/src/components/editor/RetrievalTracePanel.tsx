@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Search } from 'lucide-react';
+import { ChevronDown, ChevronRight, GalleryVerticalEnd, Search } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import type { SectionDraft } from '@/lib/types';
 import {
@@ -12,6 +12,7 @@ import {
   buildBlockRetrievalBreakdownText,
   buildKnowledgeWikiPriorBreakdownText,
   getGenerationDetails,
+  getAssetTrace,
   getReuseTrace,
 } from './sectionBlockUtils';
 
@@ -26,6 +27,8 @@ export function RetrievalTracePanel({ section }: RetrievalTracePanelProps) {
 
   const generationDetails = getGenerationDetails(section);
   const reuseTrace = getReuseTrace(section);
+  const assetTrace = getAssetTrace(section);
+  const assetStability = assetTrace?.diagnostics?.asset_stability;
   const queryIntents = reuseTrace?.query_intents;
   const sectionCandidates = reuseTrace?.section_candidates || [];
   const selectedSections = generationDetails?.selected_sections || reuseTrace?.scoped_sections || [];
@@ -214,6 +217,39 @@ export function RetrievalTracePanel({ section }: RetrievalTracePanelProps) {
               <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Asset Tokens</p>
                 <p className="mt-1 text-sm font-semibold text-slate-900">{tokenBudget.asset_tokens ?? 0}</p>
+              </div>
+            </div>
+          ) : null}
+
+          {assetTrace ? (
+            <div className="space-y-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Asset Stability</p>
+              <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <GalleryVerticalEnd className="h-4 w-4 text-slate-500" />
+                  <Badge variant="outline">selected {assetTrace.selected_count ?? 0}</Badge>
+                  <Badge variant="outline">candidates {assetTrace.candidate_count ?? 0}</Badge>
+                  {assetStability?.filtered_count ? (
+                    <Badge variant="warning">filtered {assetStability.filtered_count}</Badge>
+                  ) : null}
+                  {assetStability?.missing_asset_diagnostics?.length ? (
+                    <Badge variant="warning">missing explained</Badge>
+                  ) : null}
+                </div>
+                {assetStability?.selected_primary ? (
+                  <p className="mt-3 text-xs text-slate-600">
+                    Primary: {assetStability.selected_primary.display_title || assetStability.selected_primary.title || assetStability.selected_primary.asset_id}
+                  </p>
+                ) : null}
+                {assetStability?.filter_reason_counts && Object.keys(assetStability.filter_reason_counts).length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {Object.entries(assetStability.filter_reason_counts).map(([reason, count]) => (
+                      <Badge key={reason} variant="outline" className="bg-white text-slate-600">
+                        {reason}: {count}
+                      </Badge>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : null}

@@ -237,6 +237,118 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(metadata["asset_repair_success_count"], 1)
         self.assertEqual(metadata["asset_repair_raster_media_success_count"], 1)
 
+    def test_docx_composite_group_repair_adds_parent_asset_and_suppresses_child(self) -> None:
+        try:
+            from PIL import Image
+        except Exception:
+            self.skipTest("pillow required")
+
+        image_handle = BytesIO()
+        Image.new("RGBA", (20, 80), color=(255, 0, 0, 255)).save(image_handle, format="PNG")
+        child_image_bytes = image_handle.getvalue()
+        document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document
+  xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+  xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+  xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  <w:body>
+    <w:p><w:r><w:t>3.1 变频软起系统单线图 Single line Diagram</w:t></w:r></w:p>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:anchor>
+            <wp:extent cx="1905000" cy="952500"/>
+            <wp:docPr id="37" name="组合 23"/>
+            <a:graphic>
+              <a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">
+                <wpg:wgp>
+                  <wpg:cNvGrpSpPr/>
+                  <wpg:grpSpPr>
+                    <a:xfrm>
+                      <a:off x="0" y="0"/>
+                      <a:ext cx="1905000" cy="952500"/>
+                      <a:chOff x="0" y="0"/>
+                      <a:chExt cx="2000" cy="1000"/>
+                    </a:xfrm>
+                  </wpg:grpSpPr>
+                  <wps:wsp>
+                    <wps:cNvPr id="2" name="矩形 1"/>
+                    <wps:spPr>
+                      <a:xfrm><a:off x="0" y="0"/><a:ext cx="2000" cy="1000"/></a:xfrm>
+                      <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                      <a:noFill/>
+                      <a:ln w="9525"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>
+                    </wps:spPr>
+                  </wps:wsp>
+                  <pic:pic>
+                    <pic:nvPicPr><pic:cNvPr id="3" name="图片 25"/><pic:cNvPicPr/></pic:nvPicPr>
+                    <pic:blipFill><a:blip r:embed="rId7"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
+                    <pic:spPr>
+                      <a:xfrm><a:off x="800" y="100"/><a:ext cx="300" cy="800"/></a:xfrm>
+                      <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                    </pic:spPr>
+                  </pic:pic>
+                </wpg:wgp>
+              </a:graphicData>
+            </a:graphic>
+          </wp:anchor>
+        </w:drawing>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>
+"""
+        rels_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image3.png"/>
+</Relationships>
+"""
+        with tempfile.NamedTemporaryFile("wb", suffix=".docx", delete=False) as handle:
+            path = Path(handle.name)
+        try:
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("word/document.xml", document_xml)
+                archive.writestr("word/_rels/document.xml.rels", rels_xml)
+                archive.writestr("word/media/image3.png", child_image_bytes)
+            child_asset = ParsedAsset(
+                asset_type="figure",
+                page_no=None,
+                title="3.1 变频软起系统单线图 Single line Diagram",
+                caption=None,
+                heading_path="3.1 变频软起系统单线图 Single line Diagram",
+                context_before=None,
+                context_after=None,
+                bbox=None,
+                source_ref="#/pictures/2",
+                image_bytes=child_image_bytes,
+                meta={"width": 20, "height": 80, "visual_role": "engineering_figure"},
+            )
+
+            repaired, metadata = DoclingParser()._repair_docx_composite_figures(
+                [child_asset],
+                source_path=path,
+                effective_path=path,
+            )
+        finally:
+            path.unlink(missing_ok=True)
+
+        self.assertEqual(metadata["docx_composite_group_count"], 1)
+        self.assertEqual(metadata["docx_composite_export_success_count"], 1)
+        self.assertEqual(metadata["docx_composite_child_suppressed_count"], 1)
+        self.assertEqual(len(repaired), 2)
+        self.assertEqual(repaired[0].meta["visual_role"], "asset_fragment")
+        self.assertFalse(repaired[0].meta["preserve_in_vector_db"])
+        self.assertTrue(repaired[0].meta["composite_child_asset"])
+        self.assertEqual(repaired[1].meta["asset_repair_method"], "docx_ooxml_composite_group")
+        self.assertTrue(repaired[1].meta["composite_figure"])
+        with Image.open(BytesIO(repaired[1].image_bytes or b"")) as composite_image:
+            self.assertGreater(composite_image.width, 100)
+            self.assertGreater(composite_image.height, 60)
+
     def test_vector_media_repair_falls_back_to_pdf_page_candidate(self) -> None:
         try:
             from PIL import Image

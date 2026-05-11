@@ -399,6 +399,30 @@ Draft 页面需要展示：
 
 ### Phase 8：回归评测与 PK 准备
 
+#### 当前实现状态（2026-05-06）
+
+已新增/补强：
+
+- `backend/data/eval/phase8_holdout_eval_set.json`：固定 Phase 8 评测集与默认阈值。
+- `backend/scripts/evaluate_holdout_outline_draft.py`：单项目 holdout 评测入口。
+- `output/phase8-holdout-evaluation-usage.md`：运行方式与指标说明。
+
+当前脚本会分开输出：
+
+- outline 覆盖率。
+- draft 章节与图占位情况。
+- 技术章节证据准确率。
+- 跨章节证据污染。
+- 内部残留词。
+- 废话模板比例。
+- 图资产 Top-3 source-bound rate。
+- 错图进入正文比例。
+- 生成耗时。
+- Word 导出可用性。
+- Phase 8 gate 汇总状态。
+
+该阶段仍需要在服务器上对真实项目逐个运行评测，形成实际 PK 前的基线结果。
+
 #### 8.1 固定评测集
 
 至少包含：

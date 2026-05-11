@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "synonym_groups": [
+    {"canonical": "变频器", "aliases": ["高压变频器", "高压变频", "变频装置", "变频柜", "变频驱动", "变频驱动系统", "频率转换器", "vfd", "hv-vfd"]},
+    {"canonical": "变频软起", "aliases": ["变频软起动", "变频软启动"]},
+    {"canonical": "lci", "aliases": ["sfc", "晶闸管换相", "晶闸管换流器", "负载换相"]},
+    {"canonical": "软起动", "aliases": ["软启动", "软起动器", "软启动器", "软起"]},
+    {"canonical": "启动", "aliases": ["起动", "start-up", "startup", "start up"]},
+    {"canonical": "同步", "aliases": ["同期", "synchronization", "synchronize", "synchro-tact"]},
+    {"canonical": "单线图", "aliases": ["single line diagram", "single line"]},
+    {"canonical": "总布置图", "aliases": ["general arrangement drawing", "general arrangement"]},
+    {"canonical": "启动曲线", "aliases": ["启动特性", "start curve", "start-up characteristic", "startup characteristic"]},
+    {"canonical": "plc", "aliases": ["可编程逻辑控制器", "可编程控制器"]},
+    {"canonical": "dcs", "aliases": ["分布式控制系统", "集散控制系统"]},
+    {"canonical": "hmi", "aliases": ["人机界面", "触摸屏", "操作面板"]},
+    {"canonical": "lcu", "aliases": ["本地控制单元", "本地控制器"]},
+    {"canonical": "通信", "aliases": ["通讯"]},
+    {"canonical": "通信接口", "aliases": ["通讯接口"]},
+    {"canonical": "总体方案", "aliases": ["整体方案", "总体设计", "整体设计", "系统方案", "系统总体"]},
+    {"canonical": "供货清单", "aliases": ["设备清单", "配置清单", "物料清单", "bom"]},
+    {"canonical": "主回路", "aliases": ["一次接线", "一次系统", "主接线"]},
+    {"canonical": "pt100", "aliases": ["热电阻"]},
+    {"canonical": "ups", "aliases": ["不间断电源"]}
+  ]
+}

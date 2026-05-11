@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -35,6 +38,7 @@ class AliyunDocMindParser:
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("Aliyun DocMind SDK is not installed. Install backend parsing extras.") from exc
 
+        original_path = path
         if not path.exists():
             raise FileNotFoundError(str(path))
 
@@ -47,59 +51,68 @@ class AliyunDocMindParser:
         if not access_key_id or not access_key_secret:
             raise RuntimeError("Aliyun DocMind AccessKey is not configured")
 
-        config = open_api_models.Config(
-            access_key_id=access_key_id,
-            access_key_secret=access_key_secret,
-        )
-        config.endpoint = str(self.settings.aliyun_docmind_endpoint or "docmind-api.cn-hangzhou.aliyuncs.com")
-        client = DocMindClient(config)
-        runtime = util_models.RuntimeOptions(
-            connect_timeout=10000,
-            read_timeout=max(10000, int(self.settings.aliyun_docmind_timeout_seconds * 1000)),
-        )
-
-        with path.open("rb") as handle:
-            request = docmind_models.SubmitDocParserJobAdvanceRequest(
-                file_url_object=handle,
-                file_name=path.name,
-                file_name_extension=path.suffix.lower().lstrip("."),
-                formula_enhancement=bool(self.settings.aliyun_docmind_formula_enhancement),
-                llm_enhancement=bool(self.settings.aliyun_docmind_llm_enhancement),
-                output_format=["markdown", "visualLayoutInfo"],
-                output_html_table=bool(self.settings.aliyun_docmind_output_html_table),
+        path, preparation_metadata, cleanup_prepared_path = self._prepare_cloud_input(path)
+        try:
+            config = open_api_models.Config(
+                access_key_id=access_key_id,
+                access_key_secret=access_key_secret,
             )
-            enhancement_mode = str(self.settings.aliyun_docmind_enhancement_mode or "").strip()
-            if enhancement_mode:
-                request.enhancement_mode = enhancement_mode
-            submit_response = client.submit_doc_parser_job_advance(request, runtime)
+            config.endpoint = str(self.settings.aliyun_docmind_endpoint or "docmind-api.cn-hangzhou.aliyuncs.com")
+            config.connect_timeout = 10000
+            config.read_timeout = max(10000, int(min(float(self.settings.aliyun_docmind_timeout_seconds), 60.0) * 1000))
+            client = DocMindClient(config)
+            runtime = util_models.RuntimeOptions(
+                connect_timeout=10000,
+                read_timeout=max(10000, int(self.settings.aliyun_docmind_timeout_seconds * 1000)),
+            )
 
-        submit_payload = _to_plain(submit_response.body)
-        job_id = _extract_docmind_job_id(submit_payload)
-        if not job_id:
-            raise RuntimeError(f"Aliyun DocMind did not return a job id: {submit_payload}")
+            llm_enhancement = bool(self.settings.aliyun_docmind_llm_enhancement)
+            output_html_table = bool(self.settings.aliyun_docmind_output_html_table) and llm_enhancement
+            with path.open("rb") as handle:
+                request = docmind_models.SubmitDocParserJobAdvanceRequest(
+                    file_url_object=handle,
+                    file_name=path.name,
+                    file_name_extension=path.suffix.lower().lstrip("."),
+                    formula_enhancement=bool(self.settings.aliyun_docmind_formula_enhancement),
+                    llm_enhancement=llm_enhancement,
+                    output_format=["markdown", "visualLayoutInfo"],
+                    output_html_table=output_html_table,
+                )
+                enhancement_mode = str(self.settings.aliyun_docmind_enhancement_mode or "").strip()
+                if enhancement_mode:
+                    request.enhancement_mode = enhancement_mode
+                submit_response = client.submit_doc_parser_job_advance(request, runtime)
 
-        status_payload = self._wait_for_success(
-            client=client,
-            docmind_models=docmind_models,
-            runtime=runtime,
-            job_id=job_id,
-        )
-        markdown = self._extract_markdown_from_status(status_payload)
-        if not markdown:
-            result_payload = self._fetch_result_payload(
+            submit_payload = _to_plain(submit_response.body)
+            job_id = _extract_docmind_job_id(submit_payload)
+            if not job_id:
+                raise RuntimeError(f"Aliyun DocMind did not return a job id: {submit_payload}")
+
+            status_payload = self._wait_for_success(
                 client=client,
                 docmind_models=docmind_models,
                 runtime=runtime,
                 job_id=job_id,
-                status_payload=status_payload,
             )
-            markdown = _extract_markdown(result_payload)
-        else:
-            result_payload = {}
+            markdown = self._extract_markdown_from_status(status_payload)
+            if not markdown:
+                result_payload = self._fetch_result_payload(
+                    client=client,
+                    docmind_models=docmind_models,
+                    runtime=runtime,
+                    job_id=job_id,
+                    status_payload=status_payload,
+                )
+                markdown = _extract_markdown(result_payload)
+            else:
+                result_payload = {}
+        finally:
+            if cleanup_prepared_path is not None:
+                cleanup_prepared_path()
 
         assets = self._extract_markdown_image_assets(markdown) if include_assets else []
         metadata = {
-            "source_name": path.name,
+            "source_name": original_path.name,
             "parser": "aliyun-docmind",
             "parser_backend_requested": self.settings.parser_backend,
             "parser_backend_used": "aliyun_docmind",
@@ -108,10 +121,13 @@ class AliyunDocMindParser:
             "docmind_status": _compact_payload(status_payload),
             "docmind_result": _compact_payload(result_payload),
             "format": path.suffix.lower().lstrip("."),
-            "original_format": path.suffix.lower().lstrip("."),
+            "original_format": original_path.suffix.lower().lstrip("."),
+            **preparation_metadata,
             "asset_extraction_enabled": include_assets,
             "image_count": len(assets),
             "figure_asset_count": len(assets),
+            "docmind_llm_enhancement": llm_enhancement,
+            "docmind_output_html_table": output_html_table,
         }
         if not markdown.strip():
             metadata["parse_gate_status"] = "parse_insufficient"
@@ -119,19 +135,66 @@ class AliyunDocMindParser:
 
         return ParsedDocument(markdown=markdown, metadata=metadata, assets=assets, structure={})
 
+    def _prepare_cloud_input(self, path: Path) -> tuple[Path, dict[str, Any], Callable[[], None] | None]:
+        threshold = int(self.settings.aliyun_docmind_convert_office_to_pdf_min_bytes or 0)
+        suffix = path.suffix.lower()
+        if threshold <= 0 or suffix not in {".doc", ".docx"}:
+            return path, {}, None
+        try:
+            source_size = path.stat().st_size
+        except OSError:
+            return path, {}, None
+        if source_size < threshold:
+            return path, {}, None
+
+        office_cmd = _resolve_office_converter(self.settings.docling_libreoffice_cmd)
+        if not office_cmd:
+            return path, {"docmind_input_conversion_skipped": "libreoffice_unavailable"}, None
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="docmind-office-pdf-"))
+        try:
+            completed = subprocess.run(
+                [office_cmd, "--headless", "--convert-to", "pdf", "--outdir", str(temp_dir), str(path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=max(60.0, min(float(self.settings.parser_document_timeout_seconds), 600.0)),
+                check=False,
+            )
+            pdf_path = temp_dir / f"{path.stem}.pdf"
+            if completed.returncode != 0 or not pdf_path.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return path, {
+                    "docmind_input_conversion_skipped": "office_to_pdf_failed",
+                    "docmind_input_conversion_error": (completed.stderr or completed.stdout or "")[-1000:],
+                }, None
+            metadata = {
+                "docmind_input_converted_to_pdf": True,
+                "docmind_input_original_format": suffix.lstrip("."),
+                "docmind_input_original_size_bytes": source_size,
+                "docmind_input_pdf_size_bytes": pdf_path.stat().st_size,
+            }
+            return pdf_path, metadata, lambda: shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception as exc:  # noqa: BLE001
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return path, {
+                "docmind_input_conversion_skipped": "office_to_pdf_exception",
+                "docmind_input_conversion_error": str(exc),
+            }, None
+
     def _wait_for_success(self, *, client: Any, docmind_models: Any, runtime: Any, job_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + max(1.0, float(self.settings.aliyun_docmind_timeout_seconds))
         interval = max(0.5, float(self.settings.aliyun_docmind_poll_interval_seconds))
         last_payload: dict[str, Any] = {}
         while time.monotonic() < deadline:
             request = docmind_models.QueryDocParserStatusRequest(id=job_id)
-            response = client.query_doc_parser_status(request, runtime)
+            response = _call_docmind_method(client.query_doc_parser_status, request, runtime)
             payload = _to_plain(response.body)
             last_payload = payload if isinstance(payload, dict) else {}
             data = _payload_data(last_payload)
             status = str(data.get("Status") or data.get("status") or "").strip().lower()
             completed = status in {"success", "succeeded"}
-            failed = status == "fail" or str(last_payload.get("Code") or "").lower() not in {"", "200", "ok"}
+            failed = status in {"fail", "failed"} or str(last_payload.get("Code") or "").lower() not in {"", "200", "ok"}
             if completed:
                 return last_payload
             if failed:
@@ -168,8 +231,8 @@ class AliyunDocMindParser:
         collected: list[Any] = []
         offset = 0
         while total <= 0 or offset < total:
-            request = docmind_models.GetDocParserResultRequest(id=job_id, layout_num=step, layout_step_size=offset)
-            response = client.get_doc_parser_result(request, runtime)
+            request = docmind_models.GetDocParserResultRequest(id=job_id, layout_num=offset, layout_step_size=step)
+            response = _call_docmind_method(client.get_doc_parser_result, request, runtime)
             payload = _to_plain(response.body)
             page_data = _payload_data(payload)
             layouts = page_data.get("Layouts") or page_data.get("layouts") or page_data.get("Data") or []
@@ -286,6 +349,26 @@ def _extract_markdown(payload: dict[str, Any]) -> str:
                 lines.append(text)
         return "\n\n".join(lines)
     return ""
+
+
+def _call_docmind_method(method: Any, request: Any, runtime: Any) -> Any:
+    try:
+        return method(request, runtime)
+    except TypeError as exc:
+        if "positional" not in str(exc) and "argument" not in str(exc):
+            raise
+        return method(request)
+
+
+def _resolve_office_converter(configured_command: str | None) -> str | None:
+    candidates = [str(configured_command or "").strip(), "libreoffice", "soffice"]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None
 
 
 def _download_text(url: str, *, timeout_seconds: float) -> str:

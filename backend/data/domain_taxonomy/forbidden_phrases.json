@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "forbidden_phrases": [
+    {"phrase": "我公司", "reason": "客户稿中口径不稳，容易暴露供应方视角", "preferred": "本方案 / 本系统 / 本装置"},
+    {"phrase": "我们团队经验证明", "reason": "主观营销口径，不适合作为技术依据", "preferred": "根据既有项目经验 / 按设计边界说明"},
+    {"phrase": "国内领先", "reason": "缺乏可验证依据", "preferred": "按参数、标准、功能事实描述"},
+    {"phrase": "国际先进", "reason": "泛化宣传语，无法校验", "preferred": "列出标准、指标和配置事实"},
+    {"phrase": "绝对满足", "reason": "绝对化表达存在风险", "preferred": "在给定边界条件下满足"},
+    {"phrase": "唯一方案", "reason": "过度结论化", "preferred": "推荐方案 / 标准配置 / 备选方案"}
+  ]
+}

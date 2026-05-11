@@ -15,8 +15,10 @@ from sqlalchemy import select
 from app.db import get_session_factory
 from app.models.chunk import Chunk
 from app.models.document import Document
+from app.models.job import Job
 from app.models.proposal_outline import ProposalOutline
 from app.models.project import Project
+from app.models.project_export import ProjectExport
 from app.models.section_draft import SectionDraft
 from app.services.composition.outline_service import normalize_outline_payload
 
@@ -24,6 +26,27 @@ from app.services.composition.outline_service import normalize_outline_payload
 HEADING_PREFIX_RE = re.compile(r"^\s*(?:#+\s*)?(?P<number>\d+(?:\.\d+)*)(?:[、.\s]+)?(?P<title>.+?)\s*$")
 MARKDOWN_HEADING_RE = re.compile(r"^\s*#{1,5}\s+(.+?)\s*$")
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]{2,}")
+ASSET_PLACEHOLDER_RE = re.compile(r"\[\[ASSET:([A-Z_]+):([^\]]+)\]\]")
+INTERNAL_RESIDUE_RE = re.compile(
+    r"(prompt|draft|smoke|review|validator|validation|模型|提示词|质检约束|禁用表述|对标资料|项目需求|内部残留|LLM|AI\s*Wiki)",
+    re.IGNORECASE,
+)
+FILLER_RE = re.compile(
+    r"(本章围绕|本节围绕|本章节围绕|确保设备满足|综合要求|总体要求|进行说明|提供支撑|奠定基础|具有重要意义|有效保障|关键环节|主要包括以下方面)"
+)
+TECHNICAL_SECTION_RE = re.compile(r"(系统方案|主回路|主接线|拓扑|单线图|启动|同步|变频器|软起|技术数据|技术参数|核心设备|控制|联锁|接口)")
+COMMERCIAL_OR_SERVICE_RE = re.compile(r"(交付|资料|培训|售后|服务|备品|备件|合同|商务|报价|建设|运营|项目管理)")
+TECHNICAL_NOISE_RE = re.compile(r"(培训|交付资料|提交资料|售后服务|备品备件|合同|商务|报价|建设与运营|项目建设|经营方案)")
+COMMERCIAL_NOISE_RE = re.compile(r"(负载数据|Load data|启动曲线|同步过程|主回路|主接线|单线图|变频器技术数据|技术参数|阻力矩|转动惯量)")
+DEFAULT_THRESHOLDS = {
+    "max_duration_seconds": 600,
+    "target_duration_seconds": 300,
+    "min_outline_coverage": 0.8,
+    "min_technical_evidence_accuracy": 0.8,
+    "min_asset_top3_source_bound_rate": 0.8,
+    "max_wrong_figure_body_rate": 0.1,
+    "max_internal_residue_count": 0,
+}
 
 
 @dataclass(frozen=True)
@@ -80,10 +103,25 @@ async def main() -> None:
         baseline_headings = await _collect_baseline_headings(session=session, document_id=baseline_doc.id)
         draft_version = args.draft_version or int(project.current_draft_version or 0)
         drafts = await _load_section_drafts(session=session, project_id=project_id, draft_version=draft_version)
+        generation_job = await _load_generation_job(session=session, project_id=project_id, draft_version=draft_version)
+        latest_export = await _load_latest_export(session=session, project_id=project_id, draft_version=draft_version)
 
     generated_sections = _flatten_outline_sections(generated_outline.get("sections") or [])
     outline_eval = _evaluate_outline(generated_sections=generated_sections, baseline_headings=baseline_headings)
     draft_eval = _evaluate_drafts(drafts=drafts, baseline_headings=baseline_headings)
+    asset_stability_eval = _evaluate_asset_stability(drafts=drafts)
+    evidence_eval = _evaluate_evidence_quality(drafts=drafts)
+    writing_eval = _evaluate_writing_quality(drafts=drafts)
+    runtime_eval = _evaluate_runtime(job=generation_job)
+    export_eval = _evaluate_export(export_record=latest_export)
+    gate_eval = _evaluate_phase8_gates(
+        outline_eval=outline_eval,
+        evidence_eval=evidence_eval,
+        asset_stability_eval=asset_stability_eval,
+        writing_eval=writing_eval,
+        runtime_eval=runtime_eval,
+        export_eval=export_eval,
+    )
     override_outline = _build_baseline_outline_override(
         project_name=project.name,
         source_outline=generated_outline,
@@ -100,6 +138,12 @@ async def main() -> None:
         "generated_outline_count": len(generated_sections),
         "outline_eval": outline_eval,
         "draft_eval": draft_eval,
+        "asset_stability_eval": asset_stability_eval,
+        "evidence_eval": evidence_eval,
+        "writing_eval": writing_eval,
+        "runtime_eval": runtime_eval,
+        "export_eval": export_eval,
+        "phase8_gate": gate_eval,
         "outline_override_path": str(override_path),
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +214,29 @@ async def _load_section_drafts(*, session: Any, project_id: UUID, draft_version:
         .order_by(SectionDraft.section_id.asc())
     )
     return list(result.all())
+
+
+async def _load_generation_job(*, session: Any, project_id: UUID, draft_version: int) -> Job | None:
+    result = await session.scalars(
+        select(Job)
+        .where(Job.project_id == project_id, Job.job_type == "generate")
+        .order_by(Job.created_at.desc())
+    )
+    for job in result.all():
+        output_ref = job.output_ref if isinstance(job.output_ref, dict) else {}
+        if int(output_ref.get("draft_version") or 0) == int(draft_version or 0):
+            return job
+    return None
+
+
+async def _load_latest_export(*, session: Any, project_id: UUID, draft_version: int) -> ProjectExport | None:
+    result = await session.scalars(
+        select(ProjectExport)
+        .where(ProjectExport.project_id == project_id, ProjectExport.draft_version == draft_version)
+        .order_by(ProjectExport.created_at.desc())
+        .limit(1)
+    )
+    return result.first()
 
 
 def _markdown_headings(content: str) -> list[str]:
@@ -254,7 +321,7 @@ def _evaluate_drafts(*, drafts: list[SectionDraft], baseline_headings: list[Head
     section_reports: list[dict[str, Any]] = []
     for draft in drafts:
         assets = draft.recommended_assets
-        placeholders = re.findall(r"\[\[ASSET:[^\]]+\]\]", draft.content_md or "")
+        placeholders = ASSET_PLACEHOLDER_RE.findall(draft.content_md or "")
         diagnostics = (
             ((draft.validator_result or {}).get("generation_details") or {})
             .get("retrieval_trace", {})
@@ -275,6 +342,12 @@ def _evaluate_drafts(*, drafts: list[SectionDraft], baseline_headings: list[Head
                         "title": asset.get("title") or asset.get("display_title"),
                         "document_name": asset.get("document_name"),
                         "score": asset.get("score"),
+                        "source_binding": ((asset.get("metadata") or {}).get("source_binding") or {})
+                        if isinstance(asset.get("metadata"), dict)
+                        else {},
+                        "asset_stability_gate": ((asset.get("metadata") or {}).get("asset_stability_gate") or {})
+                        if isinstance(asset.get("metadata"), dict)
+                        else {},
                     }
                     for asset in assets
                     if str(asset.get("asset_type") or "") == "figure"
@@ -293,6 +366,347 @@ def _evaluate_drafts(*, drafts: list[SectionDraft], baseline_headings: list[Head
         "asset_intent_without_recommendation": no_asset_sections[:20],
         "sections": section_reports,
     }
+
+
+def _evaluate_evidence_quality(*, drafts: list[SectionDraft]) -> dict[str, Any]:
+    reports: list[dict[str, Any]] = []
+    technical_sections = 0
+    technical_clean = 0
+    body_pollution_count = 0
+    evidence_pollution_count = 0
+    for draft in drafts:
+        title = str(draft.title or "")
+        content = str(draft.content_md or "")
+        validator_result = draft.validator_result if isinstance(draft.validator_result, dict) else {}
+        evidence_text = "\n".join(_collect_evidence_strings(validator_result))
+        is_technical = bool(TECHNICAL_SECTION_RE.search(title))
+        is_commercial = bool(COMMERCIAL_OR_SERVICE_RE.search(title))
+        body_hits = _detect_cross_section_noise(section_title=title, text=content)
+        evidence_hits = _detect_cross_section_noise(section_title=title, text=evidence_text)
+        if is_technical:
+            technical_sections += 1
+            if not body_hits and not evidence_hits:
+                technical_clean += 1
+        body_pollution_count += len(body_hits)
+        evidence_pollution_count += len(evidence_hits)
+        reports.append(
+            {
+                "section_id": draft.section_id,
+                "title": draft.title,
+                "section_kind": "technical" if is_technical else ("commercial_or_service" if is_commercial else "other"),
+                "body_pollution_hits": body_hits,
+                "evidence_pollution_hits": evidence_hits,
+                "evidence_string_count": len(_collect_evidence_strings(validator_result)),
+            }
+        )
+    return {
+        "technical_section_count": technical_sections,
+        "technical_evidence_accuracy": _safe_ratio(technical_clean, technical_sections),
+        "body_pollution_count": body_pollution_count,
+        "evidence_pollution_count": evidence_pollution_count,
+        "polluted_sections": [
+            item
+            for item in reports
+            if item["body_pollution_hits"] or item["evidence_pollution_hits"]
+        ],
+        "sections": reports,
+    }
+
+
+def _evaluate_writing_quality(*, drafts: list[SectionDraft]) -> dict[str, Any]:
+    reports: list[dict[str, Any]] = []
+    total_internal = 0
+    total_filler = 0
+    total_paragraphs = 0
+    for draft in drafts:
+        content = str(draft.content_md or "")
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", content) if part.strip()]
+        internal_hits = _regex_hit_samples(INTERNAL_RESIDUE_RE, content)
+        filler_hits = _regex_hit_samples(FILLER_RE, content)
+        total_internal += len(internal_hits)
+        total_filler += len(filler_hits)
+        total_paragraphs += len(paragraphs)
+        reports.append(
+            {
+                "section_id": draft.section_id,
+                "title": draft.title,
+                "paragraph_count": len(paragraphs),
+                "internal_residue_hits": internal_hits,
+                "filler_hits": filler_hits,
+                "filler_ratio": _safe_ratio(len(filler_hits), max(1, len(paragraphs))),
+            }
+        )
+    return {
+        "internal_residue_count": total_internal,
+        "filler_hit_count": total_filler,
+        "paragraph_count": total_paragraphs,
+        "filler_ratio": _safe_ratio(total_filler, max(1, total_paragraphs)),
+        "sections_with_internal_residue": [item for item in reports if item["internal_residue_hits"]],
+        "sections_with_filler": [item for item in reports if item["filler_hits"]],
+        "sections": reports,
+    }
+
+
+def _evaluate_asset_stability(*, drafts: list[SectionDraft]) -> dict[str, Any]:
+    reports: list[dict[str, Any]] = []
+    for draft in drafts:
+        validator_result = draft.validator_result if isinstance(draft.validator_result, dict) else {}
+        recommended_assets = validator_result.get("recommended_assets") if isinstance(validator_result.get("recommended_assets"), list) else []
+        asset_candidates = validator_result.get("asset_candidates") if isinstance(validator_result.get("asset_candidates"), list) else []
+        asset_trace = validator_result.get("asset_trace") if isinstance(validator_result.get("asset_trace"), dict) else {}
+        if not asset_trace:
+            asset_trace = (
+                (validator_result.get("generation_details") or {})
+                .get("retrieval_trace", {})
+                .get("layers", {})
+                .get("assets", {})
+                if isinstance(validator_result.get("generation_details"), dict)
+                else {}
+            )
+        diagnostics = asset_trace.get("diagnostics") if isinstance(asset_trace.get("diagnostics"), dict) else {}
+        stability = diagnostics.get("asset_stability") if isinstance(diagnostics.get("asset_stability"), dict) else {}
+        placeholders = ASSET_PLACEHOLDER_RE.findall(draft.content_md or "")
+        asset_lookup = {
+            str(asset.get("asset_id") or ""): asset
+            for asset in [*recommended_assets, *asset_candidates]
+            if isinstance(asset, dict) and str(asset.get("asset_id") or "")
+        }
+        wrong_body_assets = []
+        for placeholder_type, asset_id in placeholders:
+            asset = asset_lookup.get(str(asset_id))
+            metadata = asset.get("metadata") if isinstance(asset, dict) and isinstance(asset.get("metadata"), dict) else {}
+            gate = metadata.get("asset_stability_gate") if isinstance(metadata.get("asset_stability_gate"), dict) else {}
+            blocking_flags = list(gate.get("blocking_flags") or []) if isinstance(gate, dict) else []
+            if placeholder_type == "FIGURE" and blocking_flags:
+                wrong_body_assets.append({"asset_id": asset_id, "blocking_flags": blocking_flags})
+
+        figure_required = _text_has_asset_intent(draft.title)
+        recommended_figures = [asset for asset in recommended_assets if str(asset.get("asset_type") or "") == "figure"]
+        top3_candidates = [*recommended_figures, *[asset for asset in asset_candidates if str(asset.get("asset_type") or "") == "figure"]][:3]
+        reports.append(
+            {
+                "section_id": draft.section_id,
+                "title": draft.title,
+                "figure_required": figure_required,
+                "primary_source_bound": _asset_has_source_section(recommended_figures[0]) if recommended_figures else False,
+                "top3_source_bound": any(_asset_has_source_section(asset) for asset in top3_candidates),
+                "wrong_body_assets": wrong_body_assets,
+                "missing_asset_explainable": bool(stability.get("missing_asset_explainable")),
+                "missing_asset_diagnostics": stability.get("missing_asset_diagnostics") or [],
+                "filtered_count": int(stability.get("filtered_count") or 0),
+            }
+        )
+
+    required = [item for item in reports if item["figure_required"]]
+    wrong_body_count = sum(len(item["wrong_body_assets"]) for item in reports)
+    missing_required = [item for item in required if not item["top3_source_bound"]]
+    return {
+        "figure_required_sections": len(required),
+        "top3_source_bound_rate": _safe_ratio(sum(1 for item in required if item["top3_source_bound"]), len(required)),
+        "primary_source_bound_rate": _safe_ratio(sum(1 for item in required if item["primary_source_bound"]), len(required)),
+        "wrong_figure_body_rate": _safe_ratio(wrong_body_count, max(1, len(required))),
+        "missing_asset_explainability_rate": _safe_ratio(
+            sum(1 for item in missing_required if item["missing_asset_explainable"] or item["missing_asset_diagnostics"]),
+            len(missing_required),
+        ),
+        "filtered_asset_count": sum(int(item["filtered_count"] or 0) for item in reports),
+        "sections": reports,
+    }
+
+
+def _evaluate_runtime(*, job: Job | None) -> dict[str, Any]:
+    if job is None:
+        return {
+            "available": False,
+            "duration_seconds": None,
+            "within_target_5m": None,
+            "within_hard_limit_10m": None,
+            "generation_summary": {},
+        }
+    duration = None
+    if job.started_at and job.completed_at:
+        duration = max(0.0, (job.completed_at - job.started_at).total_seconds())
+    output_ref = job.output_ref if isinstance(job.output_ref, dict) else {}
+    return {
+        "available": True,
+        "job_id": str(job.id),
+        "status": job.status,
+        "duration_seconds": round(duration, 3) if duration is not None else None,
+        "within_target_5m": duration <= DEFAULT_THRESHOLDS["target_duration_seconds"] if duration is not None else None,
+        "within_hard_limit_10m": duration <= DEFAULT_THRESHOLDS["max_duration_seconds"] if duration is not None else None,
+        "generation_summary": output_ref.get("generation_summary") if isinstance(output_ref.get("generation_summary"), dict) else {},
+    }
+
+
+def _evaluate_export(*, export_record: ProjectExport | None) -> dict[str, Any]:
+    if export_record is None:
+        return {
+            "available": False,
+            "word_export_available": False,
+            "status": "missing",
+            "file_type": None,
+            "file_name": None,
+        }
+    return {
+        "available": True,
+        "word_export_available": str(export_record.file_type or "").lower() == "docx"
+        and str(export_record.status or "") in {"succeeded", "forced", "ready", "exported"},
+        "status": export_record.status,
+        "file_type": export_record.file_type,
+        "file_name": export_record.file_name,
+        "storage_path": export_record.storage_path,
+    }
+
+
+def _evaluate_phase8_gates(
+    *,
+    outline_eval: dict[str, Any],
+    evidence_eval: dict[str, Any],
+    asset_stability_eval: dict[str, Any],
+    writing_eval: dict[str, Any],
+    runtime_eval: dict[str, Any],
+    export_eval: dict[str, Any],
+) -> dict[str, Any]:
+    checks = {
+        "outline_coverage": _gate_check(
+            value=outline_eval.get("coverage"),
+            threshold=DEFAULT_THRESHOLDS["min_outline_coverage"],
+            op=">=",
+        ),
+        "technical_evidence_accuracy": _gate_check(
+            value=evidence_eval.get("technical_evidence_accuracy"),
+            threshold=DEFAULT_THRESHOLDS["min_technical_evidence_accuracy"],
+            op=">=",
+        ),
+        "asset_top3_source_bound_rate": _gate_check(
+            value=asset_stability_eval.get("top3_source_bound_rate"),
+            threshold=DEFAULT_THRESHOLDS["min_asset_top3_source_bound_rate"],
+            op=">=",
+            skip_when_none=True,
+        ),
+        "wrong_figure_body_rate": _gate_check(
+            value=asset_stability_eval.get("wrong_figure_body_rate"),
+            threshold=DEFAULT_THRESHOLDS["max_wrong_figure_body_rate"],
+            op="<=",
+            skip_when_none=True,
+        ),
+        "internal_residue_count": _gate_check(
+            value=writing_eval.get("internal_residue_count"),
+            threshold=DEFAULT_THRESHOLDS["max_internal_residue_count"],
+            op="<=",
+        ),
+        "generation_duration_10m": _gate_check(
+            value=runtime_eval.get("duration_seconds"),
+            threshold=DEFAULT_THRESHOLDS["max_duration_seconds"],
+            op="<=",
+            skip_when_none=True,
+        ),
+        "word_export": {
+            "value": bool(export_eval.get("word_export_available")),
+            "threshold": True,
+            "status": "passed" if export_eval.get("word_export_available") else ("skipped" if not export_eval.get("available") else "failed"),
+        },
+    }
+    failed = [name for name, check in checks.items() if check.get("status") == "failed"]
+    return {
+        "status": "passed" if not failed else "failed",
+        "failed_checks": failed,
+        "thresholds": DEFAULT_THRESHOLDS,
+        "checks": checks,
+    }
+
+
+def _asset_has_source_section(asset: dict[str, Any]) -> bool:
+    metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    source_binding = metadata.get("source_binding") if isinstance(metadata.get("source_binding"), dict) else {}
+    return bool(source_binding.get("source_section_id") or metadata.get("source_section_id") or asset.get("source_section_id"))
+
+
+def _safe_ratio(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(float(numerator) / float(denominator), 4)
+
+
+def _gate_check(*, value: Any, threshold: float, op: str, skip_when_none: bool = False) -> dict[str, Any]:
+    if value is None:
+        return {"value": None, "threshold": threshold, "op": op, "status": "skipped" if skip_when_none else "failed"}
+    numeric = float(value)
+    passed = numeric >= threshold if op == ">=" else numeric <= threshold
+    return {"value": value, "threshold": threshold, "op": op, "status": "passed" if passed else "failed"}
+
+
+def _collect_evidence_strings(value: Any) -> list[str]:
+    strings: list[str] = []
+    interesting_keys = {
+        "title",
+        "section_title",
+        "source_title",
+        "source_heading",
+        "section_path",
+        "heading_path",
+        "retrieval_subsection_title",
+        "document_name",
+        "file_name",
+        "reason",
+        "retrieval_reason",
+    }
+
+    def walk(node: Any, *, key: str = "") -> None:
+        if isinstance(node, dict):
+            for child_key, child_value in node.items():
+                walk(child_value, key=str(child_key))
+            return
+        if isinstance(node, list):
+            for child in node:
+                walk(child, key=key)
+            return
+        if key in interesting_keys and isinstance(node, (str, int, float)):
+            text = str(node).strip()
+            if text:
+                strings.append(text)
+
+    walk(value)
+    return _dedupe_keep_order(strings)[:300]
+
+
+def _detect_cross_section_noise(*, section_title: str, text: str) -> list[str]:
+    title = str(section_title or "")
+    body = str(text or "")
+    if not body:
+        return []
+    pattern = None
+    if TECHNICAL_SECTION_RE.search(title):
+        pattern = TECHNICAL_NOISE_RE
+    elif COMMERCIAL_OR_SERVICE_RE.search(title):
+        pattern = COMMERCIAL_NOISE_RE
+    if pattern is None:
+        return []
+    return _regex_hit_samples(pattern, body)
+
+
+def _regex_hit_samples(pattern: re.Pattern[str], text: str, *, limit: int = 12) -> list[str]:
+    hits: list[str] = []
+    for match in pattern.finditer(str(text or "")):
+        hit = match.group(0).strip()
+        if hit and hit not in hits:
+            hits.append(hit)
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        normalized = str(value or "").strip()
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+    return deduped
 
 
 def _build_baseline_outline_override(
@@ -371,26 +785,63 @@ def _text_has_asset_intent(value: str) -> bool:
 def _render_markdown(*, payload: dict[str, Any], baseline_headings: list[HeadingItem]) -> str:
     outline_eval = payload["outline_eval"]
     draft_eval = payload["draft_eval"]
+    evidence_eval = payload["evidence_eval"]
+    writing_eval = payload["writing_eval"]
+    runtime_eval = payload["runtime_eval"]
+    export_eval = payload["export_eval"]
+    phase8_gate = payload["phase8_gate"]
     lines = [
         "# Holdout Outline / Draft Evaluation",
         "",
         f"- Project: {payload['project_name']} (`{payload['project_id']}`)",
         f"- Baseline: {payload['baseline_document']}",
+        f"- Phase 8 gate: `{phase8_gate['status']}`",
         f"- Outline coverage: {outline_eval['coverage']}",
         f"- Weak or missing baseline headings: {outline_eval['weak_or_missing_count']}",
         f"- Draft sections: {draft_eval['section_count']}",
         f"- Draft sections with asset placeholders: {draft_eval['sections_with_placeholders']}",
+        f"- Technical evidence accuracy: {evidence_eval['technical_evidence_accuracy']}",
+        f"- Evidence pollution hits: {evidence_eval['evidence_pollution_count']}",
+        f"- Body pollution hits: {evidence_eval['body_pollution_count']}",
+        f"- Internal residue hits: {writing_eval['internal_residue_count']}",
+        f"- Filler ratio: {writing_eval['filler_ratio']}",
+        f"- Figure-required sections: {payload['asset_stability_eval']['figure_required_sections']}",
+        f"- Figure Top-3 source-bound rate: {payload['asset_stability_eval']['top3_source_bound_rate']}",
+        f"- Wrong figure body rate: {payload['asset_stability_eval']['wrong_figure_body_rate']}",
+        f"- Generation duration seconds: {runtime_eval['duration_seconds']}",
+        f"- Word export available: {export_eval['word_export_available']}",
         f"- Baseline outline override: `{payload['outline_override_path']}`",
         "",
+        "## Gate Checks",
+        "",
+        "| Check | Status | Value | Threshold |",
+        "| --- | --- | ---: | ---: |",
+    ]
+    for name, check in phase8_gate["checks"].items():
+        lines.append(
+            f"| `{name}` | `{check.get('status')}` | {check.get('value')} | {check.get('threshold')} |"
+        )
+    lines.extend(
+        [
+            "",
         "## Baseline Headings",
         "",
-    ]
+        ]
+    )
     lines.extend(f"- {item.title}" for item in baseline_headings[:80])
     lines.extend(["", "## Weak / Missing Outline Matches", ""])
     for item in outline_eval["weak_or_missing"][:20]:
         baseline = item["baseline"]
         best = item["best_generated"]
         lines.append(f"- {baseline['title']} -> {best['title'] or 'NO_MATCH'} ({best['score']:.2f})")
+    lines.extend(["", "## Evidence Pollution", ""])
+    for item in evidence_eval["polluted_sections"][:20]:
+        lines.append(
+            f"- {item['section_id']} {item['title']} | body={item['body_pollution_hits']} | evidence={item['evidence_pollution_hits']}"
+        )
+    lines.extend(["", "## Internal Residue", ""])
+    for item in writing_eval["sections_with_internal_residue"][:20]:
+        lines.append(f"- {item['section_id']} {item['title']} | hits={item['internal_residue_hits']}")
     lines.extend(["", "## Asset Gaps", ""])
     for item in draft_eval["asset_intent_without_recommendation"][:20]:
         lines.append(f"- {item['section_id']} {item['title']}")

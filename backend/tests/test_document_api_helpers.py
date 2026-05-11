@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from app.api.documents import (
+    _apply_successful_conversion_route,
     _build_chunk_contextual_text,
     _build_document_upload_message,
+    _clean_successful_parse_metadata,
     _extract_document_id_from_parse_job,
     _resolve_document_parse_outcome,
     _resolve_section_anchor_from_catalog,
@@ -245,6 +248,39 @@ class DocumentApiHelperTests(unittest.TestCase):
 
         self.assertEqual(outcome["parse_status"], "done")
         self.assertTrue(outcome["history_library_eligible"])
+
+    def test_apply_successful_conversion_route_moves_to_review_pending(self) -> None:
+        document = SimpleNamespace(project_id=None, doc_type="legacy_conversion")
+
+        metadata = _apply_successful_conversion_route(
+            document=document,  # type: ignore[arg-type]
+            metadata={"material_route": "conversion_required", "library_track": "pilot_main"},
+        )
+
+        self.assertEqual(document.doc_type, "historical_review")
+        self.assertEqual(metadata["material_route"], "review_pending")
+        self.assertEqual(metadata["library_track"], "review_pending")
+        self.assertTrue(metadata["auto_route_after_conversion"])
+        self.assertEqual(metadata["previous_material_route"], "conversion_required")
+
+    def test_clean_successful_parse_metadata_clears_stale_failure_flags(self) -> None:
+        cleaned = _clean_successful_parse_metadata(
+            metadata={
+                "parse_error": "old failure",
+                "requires_cloud_parse": True,
+                "parse_gate_status": "insufficient",
+                "parse_gate_reason": "cloud_parse_required",
+                "asset_enrichment_deferred": True,
+            },
+            parse_status="done",
+            figure_asset_count=3,
+        )
+
+        self.assertNotIn("parse_error", cleaned)
+        self.assertNotIn("asset_enrichment_deferred", cleaned)
+        self.assertFalse(cleaned["requires_cloud_parse"])
+        self.assertEqual(cleaned["parse_gate_status"], "ready")
+        self.assertIsNone(cleaned["parse_gate_reason"])
 
     def test_build_document_upload_message_explains_parse_insufficient_history_document(self) -> None:
         message = _build_document_upload_message(

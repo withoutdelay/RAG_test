@@ -22,6 +22,8 @@ from app.services.parsing.case_library import (
 from app.services.parsing.document_sources import is_library_ready_entry
 from app.services.parsing.parser import ParserService
 from app.services.knowledge.wiki_compiler import compile_knowledge_wiki
+from app.services.knowledge.wiki_llm_compiler import compile_llm_wiki_candidates, merge_llm_wiki_items
+from app.services.knowledge.wiki_storage import write_knowledge_wiki_bundle
 from app.services.retrieval.visual_backend import rebuild_visual_embedding_cache
 from app.utils.object_storage import get_object_storage
 
@@ -235,7 +237,7 @@ async def rebuild_case_library_and_knowledge_wiki() -> dict[str, Any]:
         render_case_library_markdown(summary=summary, outline_entries=combined_outline_entries),
         encoding="utf-8",
     )
-    _write_knowledge_wiki(
+    wiki_write_result = await _write_knowledge_wiki(
         output_dir=wiki_output_dir,
         outline_entries=combined_outline_entries,
         block_entries=combined_block_entries,
@@ -250,6 +252,7 @@ async def rebuild_case_library_and_knowledge_wiki() -> dict[str, Any]:
         "uploaded_reusable_blocks": len(uploaded_block_entries),
         "deduped_outline_documents": len(raw_combined_outline_entries) - len(combined_outline_entries),
         "deduped_reusable_blocks": len(raw_combined_block_entries) - len(combined_block_entries),
+        **wiki_write_result,
         **refresh_meta,
     }
 
@@ -761,64 +764,39 @@ async def _build_uploaded_case_library_entries() -> tuple[list[dict[str, Any]], 
     }
 
 
-def _write_knowledge_wiki(
+async def _write_knowledge_wiki(
     *,
     output_dir: Path,
     outline_entries: list[dict[str, Any]],
     block_entries: list[dict[str, Any]],
     term_lexicon: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
+    settings = get_settings()
     bundle = compile_knowledge_wiki(
         outline_entries=outline_entries,
         block_entries=block_entries,
         term_lexicon=term_lexicon,
     )
-    _prune_stale_wiki_pages(output_dir=output_dir, active_page_paths=set(bundle["pages"]))
-
-    for relative_path, content in bundle["pages"].items():
-        target_path = output_dir / relative_path
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(content, encoding="utf-8")
-
-    (output_dir / "manifest.json").write_text(
-        json.dumps(bundle["manifest"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    structured_assets = bundle["structured_assets"]
-    (output_dir / "glossary.json").write_text(
-        json.dumps(structured_assets["glossary"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "product_cards.json").write_text(
-        json.dumps(structured_assets["product_cards"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "module_cards.json").write_text(
-        json.dumps(structured_assets["module_cards"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "equipment_cards.json").write_text(
-        json.dumps(structured_assets["equipment_cards"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "interface_cards.json").write_text(
-        json.dumps(structured_assets["interface_cards"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "section_templates.json").write_text(
-        json.dumps(structured_assets["section_templates"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (output_dir / "forbidden_phrases.json").write_text(
-        json.dumps(structured_assets["forbidden_phrases"], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    log_path = output_dir / "log.md"
-    previous = log_path.read_text(encoding="utf-8") if log_path.exists() else "# AI Wiki Log\n\n"
-    if not previous.endswith("\n"):
-        previous += "\n"
-    log_path.write_text(previous + "\n" + bundle["log_entry"], encoding="utf-8")
+    llm_result: dict[str, Any] = {"status": "disabled", "items": [], "summary": {}}
+    if settings.wiki_llm_compile_enabled:
+        llm_result = await compile_llm_wiki_candidates(
+            wiki_items=bundle.get("wiki_items") or [],
+            structured_assets=bundle.get("structured_assets") or {},
+            outline_entries=outline_entries,
+            block_entries=block_entries,
+            settings=settings,
+            enabled=True,
+        )
+        bundle = merge_llm_wiki_items(bundle=bundle, llm_result=llm_result)
+    write_summary = write_knowledge_wiki_bundle(output_dir=output_dir, bundle=bundle)
+    llm_summary = dict(llm_result.get("summary") or {})
+    return {
+        "knowledge_wiki_draft_items": write_summary["draft_items"],
+        "knowledge_wiki_published_items": write_summary["published_items"],
+        "knowledge_wiki_rejected_items": write_summary["rejected_items"],
+        "knowledge_wiki_llm_compile_status": llm_result.get("status"),
+        "knowledge_wiki_llm_items": int(llm_summary.get("llm_item_count") or len(llm_result.get("items") or [])),
+    }
 
 
 def _prune_stale_wiki_pages(*, output_dir: Path, active_page_paths: set[str]) -> None:

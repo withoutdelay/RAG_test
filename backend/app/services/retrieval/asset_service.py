@@ -15,6 +15,7 @@ from app.models.figure_asset import FigureAsset
 from app.models.project import Project
 from app.models.raw_document import RawDocument
 from app.schemas.retrieval import AssetSearchResponse, AssetSearchResult, AssetSearchTrace
+from app.services.domain.taxonomy_registry import get_asset_role_registry
 from app.services.v2_errors import ArtifactNotFoundError
 from app.services.retrieval.visual_backend import (
     normalize_visual_channel,
@@ -31,51 +32,27 @@ from app.services.vectorstore.block_taxonomy import (
 from app.services.vectorstore.embedder import Embedder
 
 
-ENGINEERING_VISUAL_PATTERN = re.compile(
-    r"(波形|波特图|时序图|点阵图|电路图|原理图|接线图|示意图|电气图|FFT|Bode|waveform|circuit|schematic|diagram)",
-    re.IGNORECASE,
-)
-FORMULA_VISUAL_PATTERN = re.compile(r"(公式|equation|latex|math|推导|算式)", re.IGNORECASE)
+_ASSET_ROLES = get_asset_role_registry()
+ENGINEERING_VISUAL_PATTERN = _ASSET_ROLES.pattern("engineering_visual")
+FORMULA_VISUAL_PATTERN = _ASSET_ROLES.pattern("formula_visual")
 KEYWORD_PATTERN = re.compile(r"[A-Za-z0-9_+-]{2,}|[\u4e00-\u9fff]{2,}")
-PAGE_FURNITURE_PATTERN = re.compile(r"(版本|页码|总页数|目录|dayu electric|买方|卖方)", re.IGNORECASE)
+PAGE_FURNITURE_PATTERN = _ASSET_ROLES.pattern("page_furniture")
 TITLE_NOISE_PATTERN = re.compile(r"(?:\[[A-Za-z]\]\s*){3,}|(?:\d[\d .,*_\-\[\]()]{10,})")
-GENERIC_ASSET_TITLE_PATTERN = re.compile(
-    r"^(系统功能描述|系统方案|系统构成|性能要求|整体要求|项目名称|技术方案|图|附图|page\s*\d+|figure\s*\d+)$",
-    re.IGNORECASE,
-)
-GENERIC_DIAGRAM_TYPE_PATTERN = re.compile(r"^(other|工程示意图|图示|图形资产|主图|系统图|示意图)$", re.IGNORECASE)
-HARD_FRAGMENT_PATTERN = re.compile(
-    r"(cropped\s+figure\s+fragment|figure\s+fragment|symbol\s*/\s*cropped|符号局部|局部图案|"
-    r"仅显示(?:一个|上下|单线图中的)?|无法(?:确认|识别|辨认|提炼)|缺乏可识别|信息非常有限|图意不清|文字太小|"
-    r"文字切片|标题文字|封面字样|text_fragment)",
-    re.IGNORECASE,
-)
-PARTIAL_FRAGMENT_PATTERN = re.compile(r"(局部|fragment|裁剪|符号|symbol)", re.IGNORECASE)
-COMPLETE_DIAGRAM_PATTERN = re.compile(
-    r"(系统图|单线图|一次图|一次接线|原理图|接线图|主回路|系统示意|拓扑|完整|总图)",
-    re.IGNORECASE,
-)
-LAYOUT_ILLUSTRATION_PATTERN = re.compile(
-    r"(外观图|高度关系|平面间距|间距示意|外形|柜体分段|顶部通风|布置图|尺寸图|检修通道)",
-    re.IGNORECASE,
-)
-PRODUCT_PHOTO_PATTERN = re.compile(r"(产品照片|设备照片|实拍|现场照片|photo|photograph)", re.IGNORECASE)
-LOGO_ASSET_PATTERN = re.compile(
-    r"(logo|标\s*识|商标|公司徽标|公司全称|股份有限公司|dayu\s*electric|大\s*禹\s*电\s*气|大\s*禹\s*标\s*识)",
-    re.IGNORECASE,
-)
-CONTROL_INTERFACE_FOCUS_PATTERN = re.compile(
-    r"(控制|监控|监视|联锁|保护|告警|报警|故障|接口|信号|点表|PLC|DCS|励磁|断路器|反馈)",
-    re.IGNORECASE,
-)
-CONTROL_INTERFACE_TABLE_NOISE_PATTERN = re.compile(
-    r"(备品备件|备件|spare|售后|服务|培训|维保|rated\s*data|额定数据|供货范围)",
-    re.IGNORECASE,
-)
-VFD_AUXILIARY_CURVE_NOISE_PATTERN = re.compile(r"(润滑油|油站|冷却器|冷却水|辅机)", re.IGNORECASE)
-VFD_FOCUS_PATTERN = re.compile(r"(LCI|SFC|变频软起|软起动|软启动|同步切换|工频切换|晶闸管|主回路)", re.IGNORECASE)
-MIN_REUSABLE_FIGURE_DIMENSION = 80
-MIN_REUSABLE_FIGURE_AREA = 12000
+GENERIC_ASSET_TITLE_PATTERN = _ASSET_ROLES.pattern("generic_asset_title")
+GENERIC_DIAGRAM_TYPE_PATTERN = _ASSET_ROLES.pattern("generic_diagram_type")
+HARD_FRAGMENT_PATTERN = _ASSET_ROLES.pattern("hard_fragment")
+PARTIAL_FRAGMENT_PATTERN = _ASSET_ROLES.pattern("partial_fragment")
+COMPLETE_DIAGRAM_PATTERN = _ASSET_ROLES.pattern("complete_diagram")
+LAYOUT_ILLUSTRATION_PATTERN = _ASSET_ROLES.pattern("layout_illustration")
+PRODUCT_PHOTO_PATTERN = _ASSET_ROLES.pattern("product_photo")
+LOGO_ASSET_PATTERN = _ASSET_ROLES.pattern("logo_asset")
+CONTROL_INTERFACE_FOCUS_PATTERN = _ASSET_ROLES.pattern("control_interface_focus")
+CONTROL_INTERFACE_TABLE_NOISE_PATTERN = _ASSET_ROLES.pattern("control_interface_table_noise")
+VFD_AUXILIARY_CURVE_NOISE_PATTERN = _ASSET_ROLES.pattern("vfd_auxiliary_curve_noise")
+VFD_FOCUS_PATTERN = _ASSET_ROLES.pattern("vfd_focus")
+TEXT_SCREENSHOT_PATTERN = re.compile(r"(文字截图|文本截图|文字切片|标题文字|扫描截图|OCR|text\s*screenshot)", re.IGNORECASE)
+MIN_REUSABLE_FIGURE_DIMENSION = _ASSET_ROLES.threshold("min_reusable_figure_dimension", 80)
+MIN_REUSABLE_FIGURE_AREA = _ASSET_ROLES.threshold("min_reusable_figure_area", 12000)
 
 
 @dataclass(frozen=True)
@@ -550,6 +527,7 @@ def _to_result(
     metadata.setdefault("content_form", card.content_form)
     metadata.setdefault("raw_title", card.title)
     metadata.setdefault("display_title", card.display_title or card.title)
+    metadata["source_binding"] = _asset_source_binding(card=card)
     metadata["retrieval_quality"] = _asset_quality_flags(card=card)
     if score_breakdown:
         metadata["retrieval_score_breakdown"] = score_breakdown
@@ -1107,8 +1085,26 @@ def _asset_quality_flags(*, card: AssetCard) -> dict[str, Any]:
     normalized_signal_text = unicodedata.normalize("NFKC", signal_text)
     compact_signal_text = re.sub(r"\s+", "", normalized_signal_text)
     logo_like = bool(LOGO_ASSET_PATTERN.search(normalized_signal_text) or LOGO_ASSET_PATTERN.search(compact_signal_text))
-    low_information = bool(HARD_FRAGMENT_PATTERN.search(normalized_signal_text) or logo_like)
-    if _looks_like_visual_fragment_asset(metadata=card.metadata):
+    small_fragment = _looks_like_visual_fragment_asset(metadata=card.metadata)
+    page_decoration = str(card.visual_role or "").lower() == "page_furniture" or logo_like
+    text_screenshot = bool(
+        str(card.visual_role or "").lower() == "text_fragment"
+        or TEXT_SCREENSHOT_PATTERN.search(normalized_signal_text)
+        or TEXT_SCREENSHOT_PATTERN.search(compact_signal_text)
+    )
+    product_photo = bool(
+        str(card.visual_role or "").lower() == "product_photo"
+        or PRODUCT_PHOTO_PATTERN.search(normalized_signal_text)
+        or PRODUCT_PHOTO_PATTERN.search(compact_signal_text)
+    )
+    layout_illustration = bool(
+        str(card.visual_role or "").lower() == "layout_drawing"
+        or LAYOUT_ILLUSTRATION_PATTERN.search(normalized_signal_text)
+        or LAYOUT_ILLUSTRATION_PATTERN.search(compact_signal_text)
+    )
+    table_like_visual = bool(card.asset_type == "table" or str(card.visual_role or "").lower() == "table_asset")
+    low_information = bool(HARD_FRAGMENT_PATTERN.search(normalized_signal_text) or page_decoration or text_screenshot)
+    if small_fragment:
         low_information = True
     partial_fragment = bool(PARTIAL_FRAGMENT_PATTERN.search(signal_text))
     complete_diagram = bool(COMPLETE_DIAGRAM_PATTERN.search(signal_text))
@@ -1119,6 +1115,7 @@ def _asset_quality_flags(*, card: AssetCard) -> dict[str, Any]:
     quality_score = _coerce_confidence(card.metadata.get("asset_quality_score"))
     if audit_status == "rejected":
         low_information = True
+    source_binding = _asset_source_binding(card=card)
 
     if (
         low_information
@@ -1136,6 +1133,12 @@ def _asset_quality_flags(*, card: AssetCard) -> dict[str, Any]:
         "low_information": low_information or audit_status == "rejected",
         "partial_fragment": partial_fragment and not low_information,
         "complete_diagram": complete_diagram,
+        "small_fragment": small_fragment,
+        "page_decoration": page_decoration,
+        "text_screenshot": text_screenshot,
+        "product_photo": product_photo,
+        "layout_illustration": layout_illustration,
+        "table_like_visual": table_like_visual,
         "summary_review_required": summary_review_required,
         "low_confidence_summary": low_confidence_summary,
         "summary_confidence": summary_confidence,
@@ -1143,6 +1146,52 @@ def _asset_quality_flags(*, card: AssetCard) -> dict[str, Any]:
         "asset_quality_score": quality_score,
         "audit_review_pending": audit_status == "review_pending",
         "low_quality_score": bool(quality_score and quality_score < 0.55),
+        "source_binding_tier": source_binding["tier"],
+        "source_section_missing": bool(card.asset_type == "figure" and not source_binding["source_section_id"]),
+        "high_confidence_source_bound": bool(source_binding["high_confidence_eligible"]),
+    }
+
+
+def _asset_source_binding(*, card: AssetCard) -> dict[str, Any]:
+    metadata = card.metadata or {}
+    sample_id = str(metadata.get("sample_id") or metadata.get("source_doc_id") or "").strip()
+    raw_document_id = str(card.raw_document_id or metadata.get("raw_document_id") or "").strip()
+    source_section_id = str(metadata.get("source_section_id") or "").strip()
+    heading_path = str(card.heading_path or metadata.get("heading_path") or metadata.get("section_path") or "").strip()
+    page_no = card.page_no if card.page_no is not None else metadata.get("page_no")
+    page_bound = page_no not in (None, "")
+    missing_fields: list[str] = []
+    if not sample_id:
+        missing_fields.append("sample_id")
+    if not raw_document_id:
+        missing_fields.append("raw_document_id")
+    if not source_section_id:
+        missing_fields.append("source_section_id")
+    if not heading_path:
+        missing_fields.append("heading_path")
+    if not page_bound:
+        missing_fields.append("page_no")
+
+    document_bound = bool(sample_id or raw_document_id)
+    high_confidence = bool(document_bound and source_section_id and heading_path and page_bound)
+    if high_confidence:
+        tier = "high"
+    elif document_bound and (heading_path or page_bound):
+        tier = "medium"
+    else:
+        tier = "low"
+    return {
+        "sample_id": sample_id or None,
+        "raw_document_id": raw_document_id or None,
+        "source_section_id": source_section_id or None,
+        "heading_path": heading_path or None,
+        "page_no": page_no if page_bound else None,
+        "document_bound": document_bound,
+        "section_bound": bool(source_section_id),
+        "page_bound": page_bound,
+        "high_confidence_eligible": high_confidence,
+        "tier": tier,
+        "missing_fields": missing_fields,
     }
 
 
@@ -1335,6 +1384,8 @@ def _derive_review_required(
     if not bool(metadata.get("preserve_in_vector_db", True)):
         return True
     if str(metadata.get("asset_audit_status") or "").strip().lower() in {"review_pending", "rejected"}:
+        return True
+    if asset_type == "figure" and not str(metadata.get("source_section_id") or "").strip():
         return True
     if visual_role == "asset_fragment":
         return True
@@ -1550,6 +1601,10 @@ def _build_asset_display_title(
             return compact
 
     for fallback in (caption, title, heading_path):
+        normalized = _normalize_text(fallback)
+        if normalized and not _looks_like_low_value_title(title=normalized, heading_path=None):
+            return normalized
+    for fallback in (title, heading_path):
         normalized = _normalize_text(fallback)
         if normalized:
             return normalized

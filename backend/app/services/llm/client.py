@@ -28,6 +28,8 @@ class ModelType(str, Enum):
 
 class TaskType(str, Enum):
     EXTRACTION = "extraction"
+    KNOWLEDGE_COMPILE = "knowledge_compile"
+    EVIDENCE_SELECT = "evidence_select"
     ASSET_REVIEW = "asset_review"
     ASSET_SUMMARY = "asset_summary"
     ASSET_RERANK = "asset_rerank"
@@ -42,6 +44,8 @@ class TaskType(str, Enum):
 
 ROUTING_TABLE = {
     TaskType.EXTRACTION: ModelType.DEEPSEEK,
+    TaskType.KNOWLEDGE_COMPILE: ModelType.DEEPSEEK,
+    TaskType.EVIDENCE_SELECT: ModelType.DOUBAO,
     TaskType.ASSET_REVIEW: ModelType.DOUBAO,
     TaskType.ASSET_SUMMARY: ModelType.DOUBAO,
     TaskType.ASSET_RERANK: ModelType.DOUBAO,
@@ -181,6 +185,10 @@ class MockLLMProvider(BaseLLMProvider):
             return self._render_rewrite(model_type, request)
         if request.task_type == TaskType.EXTRACTION:
             return json.dumps({"summary": request.user_prompt[:120]}, ensure_ascii=False)
+        if request.task_type == TaskType.KNOWLEDGE_COMPILE:
+            return self._render_knowledge_compile(request)
+        if request.task_type == TaskType.EVIDENCE_SELECT:
+            return self._render_evidence_select(request)
         if request.task_type == TaskType.ASSET_REVIEW:
             return self._render_asset_review(request)
         if request.task_type == TaskType.ASSET_SUMMARY:
@@ -325,6 +333,94 @@ class MockLLMProvider(BaseLLMProvider):
                 }
             )
         return json.dumps({"items": items}, ensure_ascii=False)
+
+    def _render_knowledge_compile(self, request: LLMRequest) -> str:
+        seed_items = request.metadata.get("seed_items") or []
+        asset_candidates = request.metadata.get("asset_candidates") or []
+        items: list[dict[str, Any]] = []
+        for seed in seed_items:
+            if not isinstance(seed, dict):
+                continue
+            item_type = str(seed.get("item_type") or "")
+            if item_type not in {"product_family", "section_template", "term_alias"}:
+                continue
+            evidence = [item for item in (seed.get("evidence") or []) if isinstance(item, dict)]
+            if not evidence:
+                continue
+            items.append(
+                {
+                    "item_type": item_type,
+                    "canonical_name": str(seed.get("canonical_name") or ""),
+                    "aliases": [str(item) for item in (seed.get("aliases") or []) if str(item)],
+                    "summary": str(seed.get("summary") or "mock knowledge compiler candidate"),
+                    "source_documents": [
+                        str(item) for item in (seed.get("source_documents") or []) if str(item)
+                    ],
+                    "evidence": evidence[:3],
+                    "confidence": 0.78,
+                    "reason": "mock knowledge compiler summarized a deterministic seed item",
+                    "asset_type_label": "",
+                }
+            )
+            if len(items) >= 2:
+                break
+        for asset in asset_candidates:
+            if not isinstance(asset, dict):
+                continue
+            evidence = asset.get("evidence")
+            if not isinstance(evidence, dict):
+                continue
+            label = str(asset.get("visual_role") or "unknown")
+            items.append(
+                {
+                    "item_type": "asset_type_rule",
+                    "canonical_name": str(asset.get("title") or asset.get("heading_path") or label),
+                    "aliases": [label] if label else [],
+                    "summary": "mock image audit candidate based on asset metadata",
+                    "source_documents": [
+                        str(evidence.get("source_document") or "") or str(asset.get("source_document") or "")
+                    ],
+                    "evidence": [evidence],
+                    "confidence": 0.64,
+                    "reason": "mock visual audit used asset metadata only",
+                    "asset_type_label": label,
+                }
+            )
+            break
+        return json.dumps(
+            {"status": "ok" if items else "insufficient_evidence", "items": items},
+            ensure_ascii=False,
+        )
+
+    def _render_evidence_select(self, request: LLMRequest) -> str:
+        candidates = request.metadata.get("candidates") if isinstance(request.metadata, dict) else {}
+        sections = [item for item in (candidates or {}).get("sections", []) if isinstance(item, dict)]
+        blocks = [item for item in (candidates or {}).get("blocks", []) if isinstance(item, dict)]
+        assets = [item for item in (candidates or {}).get("assets", []) if isinstance(item, dict)]
+
+        def _selected(items: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+            return [
+                {
+                    "candidate_id": str(item.get("candidate_id") or ""),
+                    "confidence": 0.78,
+                    "reason": "mock evidence selector kept the candidate",
+                }
+                for item in items[:limit]
+                if str(item.get("candidate_id") or "")
+            ]
+
+        return json.dumps(
+            {
+                "selected_sections": _selected(sections, limit=4),
+                "selected_blocks": _selected(blocks, limit=6),
+                "selected_assets": _selected(assets, limit=3),
+                "rejected_candidates": [],
+                "selection_reason": "mock evidence selector kept deterministic candidates",
+                "risk_flags": [],
+                "confidence": 0.78,
+            },
+            ensure_ascii=False,
+        )
 
     def _render_asset_summary(self, request: LLMRequest) -> str:
         candidates = request.metadata.get("candidates") or []
@@ -1184,7 +1280,12 @@ class LLMClient:
             ordered.append(ModelType.AZURE)
         if ModelType.OPENAI not in ordered:
             ordered.append(ModelType.OPENAI)
-        if request.input_images and task_type in {TaskType.ASSET_REVIEW, TaskType.ASSET_SUMMARY, TaskType.ASSET_RERANK}:
+        if request.input_images and task_type in {
+            TaskType.ASSET_REVIEW,
+            TaskType.ASSET_SUMMARY,
+            TaskType.ASSET_RERANK,
+            TaskType.KNOWLEDGE_COMPILE,
+        }:
             ordered = [ModelType.VISION, *[model_type for model_type in ordered if model_type != ModelType.VISION]]
         return ordered
 

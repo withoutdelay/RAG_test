@@ -2,7 +2,7 @@ import os
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from app.config import get_settings
@@ -12,6 +12,7 @@ from app.services.retrieval.asset_service import (
     _asset_anchor_boost,
     _asset_noise_penalty,
     _asset_quality_flags,
+    _asset_source_binding,
     _asset_summary_boost,
     _asset_taxonomy_boost,
     _build_asset_display_title,
@@ -422,7 +423,7 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         self.assertEqual(len(vector), 16)
 
     def test_embedder_fails_fast_for_missing_explicit_sentence_transformers_backend(self) -> None:
-        with patch("app.services.vectorstore.embedder.SentenceTransformer", None):
+        with patch.dict(Embedder.__init__.__globals__, {"get_settings": None, "SentenceTransformer": None}):
             with patch.dict(
                 os.environ,
                 {
@@ -438,7 +439,8 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
 
     def test_embedder_passes_local_files_only_flag_to_sentence_transformer(self) -> None:
         mock_model = object()
-        with patch("app.services.vectorstore.embedder.SentenceTransformer", return_value=mock_model) as mock_loader:
+        mock_loader = Mock(return_value=mock_model)
+        with patch.dict(Embedder.__init__.__globals__, {"get_settings": None, "SentenceTransformer": mock_loader}):
             with patch.dict(
                 os.environ,
                 {
@@ -1393,6 +1395,43 @@ class RetrievalBuildingBlockTests(unittest.TestCase):
         )
 
         self.assertTrue(_asset_quality_flags(card=logo)["low_information"])
+
+    def test_asset_source_binding_marks_missing_section_as_non_high_confidence(self) -> None:
+        card = AssetCard(
+            asset_card_id="asset:weak",
+            asset_id=uuid4(),
+            document_id=None,
+            raw_document_id=uuid4(),
+            project_id=uuid4(),
+            document_name="样板.pdf",
+            doc_type="historical_proposal",
+            asset_type="figure",
+            visual_role="engineering_figure",
+            risk_level="medium",
+            usage_mode="reference_only",
+            review_required=True,
+            page_no=3,
+            heading_path="4.1 LCI 变频软起系统方案",
+            title="LCI变频软起系统图",
+            display_title="LCI变频软起系统图",
+            caption=None,
+            source_ref=None,
+            asset_uri="/tmp/lci.png",
+            preview_text="LCI 主回路拓扑。",
+            retrieval_text="LCI 主回路拓扑",
+            section_type="main_circuit_scheme",
+            equipment_type="motor_drive",
+            content_form="figure",
+            metadata={"sample_id": "sample-a"},
+        )
+
+        binding = _asset_source_binding(card=card)
+        quality = _asset_quality_flags(card=card)
+
+        self.assertEqual(binding["tier"], "medium")
+        self.assertIn("source_section_id", binding["missing_fields"])
+        self.assertFalse(binding["high_confidence_eligible"])
+        self.assertTrue(quality["source_section_missing"])
 
     def test_build_preview_text_uses_semantic_summary_when_context_is_sparse(self) -> None:
         preview = _build_preview_text(
