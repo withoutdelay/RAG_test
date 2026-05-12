@@ -659,7 +659,7 @@ function Warn-EnvIssues {
         break
       }
     }
-    if ($embeddingKey -in @("", "sk-xxxxx", "replace-with-real-key", "your-api-key", "xxx")) {
+    if ($embeddingKey -in @("", "replace-with-provider-api-key", "replace-with-real-key", "your-api-key", "xxx")) {
       Write-Warn "EMBEDDING_BACKEND=$embeddingBackend but no real embedding API key is configured. Document import/retrieval will fail until EMBEDDING_API_KEY or QWEN_API_KEY is set."
     }
   }

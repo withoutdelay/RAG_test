@@ -69,12 +69,12 @@ EMBEDDING_BATCH_SIZE=16
 AUTH_ENABLED=true
 AUTH_USERNAME=admin
 AUTH_PASSWORD=replace-with-strong-password
-AUTH_SESSION_COOKIE_NAME=presale_session
+AUTH_SESSION_COOKIE_NAME=proposal_session
 AUTH_SESSION_TTL_SECONDS=28800
 AUTH_COOKIE_SECURE=false
 AUTH_COOKIE_SAMESITE=lax
 NEXT_PUBLIC_AUTH_ENABLED=true
-NEXT_PUBLIC_AUTH_COOKIE_NAME=presale_session
+NEXT_PUBLIC_AUTH_COOKIE_NAME=proposal_session
 NEXT_PUBLIC_API_BASE_URL=/api/v1
 API_PROXY_TARGET=http://backend:8000
 CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
@@ -89,7 +89,7 @@ Windows 安装脚本会把旧 `.env` 中的 `BACKEND_EXTRAS=full` / `BACKEND_EXT
 切换 embedding 模型或维度后，旧 Qdrant 向量不能混用。新环境建议使用新的 collection 名称，或重建历史方案库：
 
 ```env
-QDRANT_COLLECTION=presale_knowledge_qwen3_vl_embedding
+QDRANT_COLLECTION=proposal_knowledge_default
 ```
 
 修改 `.env` 后，从项目根目录执行：

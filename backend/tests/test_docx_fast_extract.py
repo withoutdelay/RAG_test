@@ -13,7 +13,7 @@ DOCUMENT_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <w:body>
     <w:p>
       <w:pPr><w:pStyle w:val="Title"/></w:pPr>
-      <w:r><w:t>临沂钢铁鼓风机电机及启动装置技术方案</w:t></w:r>
+      <w:r><w:t>某钢铁企业鼓风机电机及启动装置技术方案</w:t></w:r>
     </w:p>
     <w:p>
       <w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
@@ -57,7 +57,7 @@ class DocxFastExtractTests(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
-        self.assertIn("# 临沂钢铁鼓风机电机及启动装置技术方案", markdown)
+        self.assertIn("# 某钢铁企业鼓风机电机及启动装置技术方案", markdown)
         self.assertIn("# 第一章 系统概述", markdown)
         self.assertIn("本章说明项目背景与改造范围。", markdown)
         self.assertIn("| 参数 | 数值 |", markdown)

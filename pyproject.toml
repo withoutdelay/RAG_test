@@ -1,7 +1,7 @@
 [project]
-name = "rag-test-super-dev-host"
+name = "industrial-proposal-copilot-host"
 version = "2.3.0"
-description = "Repository-local Super Dev host wrapper and release metadata for RAG_test"
+description = "Repository-local development helpers for Industrial Proposal Copilot"
 requires-python = ">=3.11"
 dependencies = []
 

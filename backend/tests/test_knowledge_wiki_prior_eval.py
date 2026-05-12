@@ -86,7 +86,7 @@ class KnowledgeWikiPriorEvalTests(unittest.TestCase):
             section={
                 "title": "输出变压器技术规范",
                 "section_summary": (
-                    "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx\n"
+                    "sample-lci-blower-starting-solution.docx\n"
                     "5 输入/输出变压器技术规范 > 5.2 输出变压器技术规范\n"
                     "输出变压器技术规范\n"
                     "变压器技术 变压器"
@@ -96,7 +96,7 @@ class KnowledgeWikiPriorEvalTests(unittest.TestCase):
                 "equipment_type": "transformer",
                 "content_form": "narrative",
             },
-            document_name="临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+            document_name="sample-lci-blower-starting-solution.docx",
         )
 
         self.assertEqual(query_section["purpose"], "变压器技术 变压器")

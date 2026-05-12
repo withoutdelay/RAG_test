@@ -418,8 +418,8 @@ class CompositionHelperTests(unittest.TestCase):
         parsed = service._parse_outline_response(
             json.dumps(
                 {
-                    "project_name": "临沂钢铁鼓风机项目",
-                    "document_title": "临沂钢铁鼓风机高压电机及启动装置成套技术方案",
+                    "project_name": "某钢铁企业鼓风机项目",
+                    "document_title": "某钢铁企业鼓风机高压电机及启动装置成套技术方案",
                     "chapters": [
                         {
                             "title": "一、项目概述与编制说明",
@@ -432,7 +432,7 @@ class CompositionHelperTests(unittest.TestCase):
             ),
             project_name="测试项目",
         )
-        self.assertEqual(parsed["title"], "临沂钢铁鼓风机高压电机及启动装置成套技术方案")
+        self.assertEqual(parsed["title"], "某钢铁企业鼓风机高压电机及启动装置成套技术方案")
         self.assertEqual(len(parsed["sections"]), 1)
         self.assertEqual(parsed["sections"][0]["title"], "一、项目概述与编制说明")
 
@@ -773,14 +773,14 @@ class CompositionHelperTests(unittest.TestCase):
                 "keywords": ["IEC 61850", "站控层"],
             },
             global_params={
-                "project_name": "湛江中纸项目",
+                "project_name": "某造纸企业项目",
                 "product_line": "hv_vfd",
                 "industry": "电气",
             },
         )
         self.assertIn("技术架构", query)
         self.assertIn("IEC 61850", query)
-        self.assertIn("湛江中纸项目", query)
+        self.assertIn("某造纸企业项目", query)
         self.assertIn("工程示意图", query)
 
     def test_build_section_asset_types_infers_table_for_parameter_sections(self) -> None:
@@ -2253,13 +2253,13 @@ class CompositionHelperTests(unittest.TestCase):
             [
                 {
                     "asset_id": "asset_main",
-                    "document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+                    "document_name": "sample-lci-blower-starting-solution.docx",
                     "heading_path": "2.2 高压变频器主回路方案说明",
                     "metadata": {"section_type": "main_circuit_scheme"},
                 },
                 {
                     "asset_id": "asset_transformer",
-                    "document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+                    "document_name": "sample-lci-blower-starting-solution.docx",
                     "heading_path": "2 ．移 相变压器原理",
                     "metadata": {"section_type": "transformer_spec"},
                 },
@@ -2271,11 +2271,11 @@ class CompositionHelperTests(unittest.TestCase):
             },
             reusable_blocks=[
                 {
-                    "source_title": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+                    "source_title": "sample-lci-blower-starting-solution.docx",
                     "heading_path": ["2.2", "高压变频器主回路方案说明"],
                 },
                 {
-                    "source_title": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+                    "source_title": "sample-lci-blower-starting-solution.docx",
                     "heading_path": ["2.3", "高压变频器主要技术参数"],
                 },
             ],
@@ -2602,7 +2602,7 @@ class CompositionHelperTests(unittest.TestCase):
                     "visual_role": "engineering_figure",
                     "title": "参考图",
                     "heading_path": None,
-                    "preview_text": "武汉钢铁有限公司六号高炉大修改造三鼓风LCI变频启动装置设备技术协议",
+                    "preview_text": "某钢铁集团高炉鼓风LCI变频启动装置设备技术协议",
                     "score": 0.28,
                     "metadata": {"section_type": "vfd_spec", "content_form": "formula"},
                 },
@@ -4380,7 +4380,7 @@ class CompositionHelperTests(unittest.TestCase):
             reuse_pack={
                 "reusable_blocks": [
                     {
-                        "heading_path": ["临沂钢铁鼓风机 LCI 技术协议"],
+                        "heading_path": ["某钢铁企业鼓风机 LCI 技术协议"],
                         "metadata": {"section_type": "starter_spec", "content_form": "formula"},
                         "selection_score": 0.96,
                         "content_md": (
@@ -4716,7 +4716,7 @@ class CompositionHelperTests(unittest.TestCase):
                     "section_candidates": [
                         {
                             "sample_id": "lci-sample",
-                            "file_name": "宝山LCI方案.docx",
+                            "file_name": "样例LCI方案.docx",
                             "section_id": "3",
                             "section_path": "3. 系统方案 SYSTEM SOLUTION",
                             "score": 1.3673,
@@ -4724,7 +4724,7 @@ class CompositionHelperTests(unittest.TestCase):
                         },
                         {
                             "sample_id": "lci-sample",
-                            "file_name": "宝山LCI方案.docx",
+                            "file_name": "样例LCI方案.docx",
                             "section_id": "3",
                             "section_path": "3. 系统方案 SYSTEM SOLUTION",
                             "score": 1.3616,
@@ -4738,7 +4738,7 @@ class CompositionHelperTests(unittest.TestCase):
                 {
                     "block_id": "case:lci:14:7",
                     "sample_id": "lci-sample",
-                    "source_title": "宝山LCI方案.docx",
+                    "source_title": "样例LCI方案.docx",
                     "source_section_id": "3",
                     "section_path": "3. 系统方案 SYSTEM SOLUTION",
                     "heading_path": ["3. 系统方案 SYSTEM SOLUTION"],
@@ -4750,7 +4750,7 @@ class CompositionHelperTests(unittest.TestCase):
                 {
                     "block_id": "case:lci:14:8",
                     "sample_id": "lci-sample",
-                    "source_title": "宝山LCI方案.docx",
+                    "source_title": "样例LCI方案.docx",
                     "source_section_id": "3",
                     "section_path": "3. 系统方案 SYSTEM SOLUTION",
                     "heading_path": ["3. 系统方案 SYSTEM SOLUTION"],
@@ -4779,7 +4779,7 @@ class CompositionHelperTests(unittest.TestCase):
                     "section_candidates": [
                         {
                             "sample_id": "lci-sample",
-                            "file_name": "宝山LCI方案.docx",
+                            "file_name": "样例LCI方案.docx",
                             "section_id": "3.2",
                             "section_path": "3. 系统方案 SYSTEM SOLUTION > 3.2. 启动和同步过程描述",
                             "source_heading": "3.2. 启动和同步过程描述",
@@ -4788,7 +4788,7 @@ class CompositionHelperTests(unittest.TestCase):
                         },
                         {
                             "sample_id": "lci-sample",
-                            "file_name": "宝山LCI方案.docx",
+                            "file_name": "样例LCI方案.docx",
                             "section_id": "3",
                             "section_path": "3. 系统方案 SYSTEM SOLUTION",
                             "score": 0.8774,
@@ -4801,7 +4801,7 @@ class CompositionHelperTests(unittest.TestCase):
                 {
                     "block_id": "case:lci:14",
                     "sample_id": "lci-sample",
-                    "source_title": "宝山LCI方案.docx",
+                    "source_title": "样例LCI方案.docx",
                     "source_section_id": "3",
                     "section_path": "3. 系统方案 SYSTEM SOLUTION",
                     "heading_path": ["3. 系统方案 SYSTEM SOLUTION"],
@@ -4851,7 +4851,7 @@ class CompositionHelperTests(unittest.TestCase):
             {
                 "block_id": f"case:lci:{index}",
                 "sample_id": "lci-sample",
-                "source_title": "宝山LCI方案.docx",
+                "source_title": "样例LCI方案.docx",
                 "source_section_id": "3",
                 "section_path": "3. 系统方案 SYSTEM SOLUTION",
                 "heading_path": ["3. 系统方案 SYSTEM SOLUTION", f"3.{index} 子节"],
@@ -4875,7 +4875,7 @@ class CompositionHelperTests(unittest.TestCase):
                     "section_candidates": [
                         {
                             "sample_id": "lci-sample",
-                            "file_name": "宝山LCI方案.docx",
+                            "file_name": "样例LCI方案.docx",
                             "section_id": "3",
                             "section_path": "3. 系统方案 SYSTEM SOLUTION",
                             "score": 0.95,
@@ -5070,11 +5070,11 @@ class CompositionHelperTests(unittest.TestCase):
             },
             reusable_blocks=[
                 {
-                    "source_title": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+                    "source_title": "sample-lci-blower-starting-solution.docx",
                     "heading_path": ["2.2", "高压变频器主回路方案说明"],
                 },
                 {
-                    "source_title": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+                    "source_title": "sample-lci-blower-starting-solution.docx",
                     "heading_path": ["2.3", "高压变频器主要技术参数"],
                 },
             ],
@@ -5085,7 +5085,7 @@ class CompositionHelperTests(unittest.TestCase):
         self.assertEqual(context["section_class"], "architecture")
         self.assertEqual(
             context["anchor_document_names"],
-            ["临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx"],
+            ["sample-lci-blower-starting-solution.docx"],
         )
         self.assertIn("2.2 > 高压变频器主回路方案说明", context["anchor_heading_paths"])
         self.assertIn("主回路图", context["keywords"])
@@ -5099,7 +5099,7 @@ class CompositionHelperTests(unittest.TestCase):
             },
             reusable_blocks=[
                 {
-                    "source_title": "乌海建龙技术方案.docx",
+                    "source_title": "某钢铁厂技术方案.docx",
                     "sample_id": "sample-a",
                     "source_section_id": "3.2",
                     "heading_path": ["二、系统方案"],
@@ -5115,7 +5115,7 @@ class CompositionHelperTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(context["anchor_image_document_names"], ["乌海建龙技术方案.docx"])
+        self.assertEqual(context["anchor_image_document_names"], ["某钢铁厂技术方案.docx"])
         self.assertEqual(context["anchor_image_sample_ids"], ["sample-a"])
         self.assertEqual(context["anchor_image_source_section_ids"], ["3.2"])
 
@@ -5644,7 +5644,7 @@ class CompositionHelperTests(unittest.TestCase):
         filtered = _filter_reuse_blocks_for_assembly(
             reusable_blocks=[
                 {
-                    "heading_path": ["山东临沂钢铁投资集团特钢公司高炉鼓风机电机及变频软起动系统技术协议"],
+                    "heading_path": ["某钢铁集团高炉鼓风机电机及变频软起动系统技术协议"],
                     "metadata": {"section_type": "unknown", "content_form": "narrative"},
                     "selection_score": 1.0,
                     "content_md": (
@@ -5656,7 +5656,7 @@ class CompositionHelperTests(unittest.TestCase):
                     ),
                 },
                 {
-                    "heading_path": ["山东临沂钢铁投资集团特钢公司高炉鼓风机电机及变频软起动系统技术协议"],
+                    "heading_path": ["某钢铁集团高炉鼓风机电机及变频软起动系统技术协议"],
                     "metadata": {"section_type": "unknown", "content_form": "narrative"},
                     "selection_score": 0.98,
                     "content_md": (

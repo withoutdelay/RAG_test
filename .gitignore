@@ -25,6 +25,9 @@ backend/data/sample_manifests/
 backend/data/case_library/*
 !backend/data/case_library/
 !backend/data/case_library/.gitkeep
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.sqlite3
 
 frontend/node_modules/
 frontend/.next/
@@ -33,7 +36,7 @@ scripts/*.log
 scripts/*.pid
 
 # Runtime boundary rules required by release readiness
-# output/
+output/
 # artifacts/
 .super-dev/runs/
 .super-dev/review-state/

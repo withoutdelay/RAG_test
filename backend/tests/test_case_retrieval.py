@@ -2593,7 +2593,7 @@ class CaseRetrievalTests(unittest.TestCase):
             results = service.retrieve_blocks(
                 query=(
                     "项目交付资料与文档清单 交付文档 技术图纸 操作手册 测试报告 资料归档 "
-                    "table parameter LCI 变频软起方案族 宝山钢铁股份有限公司三鼓风LCI改造方案.docx 控制柜 PLC"
+                    "table parameter LCI 变频软起方案族 sample-blower-lci-retrofit.docx 控制柜 PLC"
                 ),
                 top_k=4,
                 sample_ids={"case-b"},
@@ -2646,7 +2646,7 @@ class CaseRetrievalTests(unittest.TestCase):
             results = service.retrieve_sections(
                 query=(
                     "项目交付资料与文档清单 交付文档 技术图纸 操作手册 测试报告 资料归档 "
-                    "table parameter LCI 变频软起方案族 宝山钢铁股份有限公司三鼓风LCI改造方案.docx 控制柜 PLC"
+                    "table parameter LCI 变频软起方案族 sample-blower-lci-retrofit.docx 控制柜 PLC"
                 ),
                 top_k=4,
                 sample_ids={"case-b"},
@@ -5271,7 +5271,7 @@ class CaseRetrievalTests(unittest.TestCase):
             block_entries=[
                 {
                     "sample_id": "case-a",
-                    "file_name": "乌海建龙方案.docx",
+                    "file_name": "某钢铁厂方案.docx",
                     "library_track": "pilot_main",
                     "heading_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.1 高压变频器选型",
                     "section_path": "第三章 系统及方案介绍 > 二、系统方案 > 2.1 高压变频器选型",
@@ -5290,7 +5290,7 @@ class CaseRetrievalTests(unittest.TestCase):
                 },
                 {
                     "sample_id": "case-a",
-                    "file_name": "乌海建龙方案.docx",
+                    "file_name": "某钢铁厂方案.docx",
                     "library_track": "pilot_main",
                     "heading_path": "1、1#环冷风机",
                     "section_path": "第三章 系统及方案介绍 > 一、电机配置及参数 > 1、1#环冷风机",

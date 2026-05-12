@@ -190,7 +190,7 @@ class CaseLibraryTests(unittest.TestCase):
                     },
                 ],
             },
-            document_title="乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案",
+            document_title="某钢铁厂环冷风机永磁电机变频节能改造技术方案",
             file_name="uhai.docx",
             section_summary="图10 安装图 <!-- image --> 为了进行换气及维护空间，柜体前后应留有检修通道。",
         )
@@ -217,7 +217,7 @@ class CaseLibraryTests(unittest.TestCase):
                 "domain_terms": ["变频器"],
                 "children": [],
             },
-            document_title="乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案",
+            document_title="某钢铁厂环冷风机永磁电机变频节能改造技术方案",
             file_name="uhai.docx",
             section_summary="为了进行换气及维护空间，应确保柜体前后留有检修通道。",
         )
@@ -229,7 +229,7 @@ class CaseLibraryTests(unittest.TestCase):
     def test_build_section_catalog_merges_toc_and_body_headings(self) -> None:
         markdown = "\n".join(
             [
-                "# 乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案",
+                "# 某钢铁厂环冷风机永磁电机变频节能改造技术方案",
                 "",
                 "## 目录",
                 "",
@@ -321,7 +321,7 @@ class CaseLibraryTests(unittest.TestCase):
         )
 
     def test_build_section_catalog_can_use_parser_heading_hints_from_non_markdown_source(self) -> None:
-        markdown = "# 乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案\n\n正文被解析成普通段落，没有稳定 markdown heading。"
+        markdown = "# 某钢铁厂环冷风机永磁电机变频节能改造技术方案\n\n正文被解析成普通段落，没有稳定 markdown heading。"
         catalog = build_section_catalog(
             markdown,
             structure_hints={
@@ -1027,7 +1027,7 @@ class CaseLibraryTests(unittest.TestCase):
         catalog = build_section_catalog(
             "\n".join(
                 [
-                    "# 乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案",
+                    "# 某钢铁厂环冷风机永磁电机变频节能改造技术方案",
                     "",
                     "## 第三章 系统及方案介绍",
                     "",
@@ -1068,11 +1068,11 @@ class CaseLibraryTests(unittest.TestCase):
         catalog = build_section_catalog(
             "\n".join(
                 [
-                    "# 乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案",
+                    "# 某钢铁厂环冷风机永磁电机变频节能改造技术方案",
                     "",
                     "## 第三章 系统及方案介绍",
                     "",
-                    "### 乌海建龙钢铁环冷风机永磁电机变频节能改造技术方案",
+                    "### 某钢铁厂钢铁环冷风机永磁电机变频节能改造技术方案",
                     "",
                     "### 3.2 柜体安装",
                     "",
@@ -1283,7 +1283,7 @@ class CaseLibraryTests(unittest.TestCase):
     def test_build_reusable_block_entries_can_fallback_to_parent_section_by_ordinal(self) -> None:
         markdown = "\n".join(
             [
-                "# 乌海建龙钢铁环冷风机永磁电机+变频节能改造技术方案",
+                "# 某钢铁厂环冷风机永磁电机变频节能改造技术方案",
                 "",
                 "## 第三章 系统及方案介绍",
                 "",

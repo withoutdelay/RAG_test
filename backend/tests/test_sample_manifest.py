@@ -22,7 +22,7 @@ class SampleManifestTests(unittest.TestCase):
             return handle.name
 
     def test_build_sample_id_falls_back_to_hash_for_non_ascii_filename(self) -> None:
-        sample_id = build_sample_id("/tmp/上电湛江中纸高浓磨机项目成套方案VerA.pdf")
+        sample_id = build_sample_id("/tmp/sample-pulp-mill-lci-solution.pdf")
         self.assertTrue(sample_id.startswith("vera-") or sample_id.startswith("sample-"))
 
     def test_apply_profile_to_manifest_entry_updates_suggested_track(self) -> None:

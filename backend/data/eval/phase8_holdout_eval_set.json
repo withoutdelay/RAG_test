@@ -15,7 +15,7 @@
     {
       "id": "holdout_linyi_lci_near_library",
       "kind": "holdout_document",
-      "baseline_document_name": "临沂钢铁鼓风机电机及启动装置技术方案（9.24）.docx",
+      "baseline_document_name": "sample-lci-blower-starting-solution.docx",
       "scenario": "near_library_lci_system_scheme",
       "expected_similarity_to_library": "high",
       "focus": ["outline_match", "system_scheme_draft", "lci_diagrams", "technical_data_tables"]
@@ -23,7 +23,7 @@
     {
       "id": "holdout_zhanjiang_lci_generalization",
       "kind": "holdout_document",
-      "baseline_document_name": "上电湛江中纸高浓磨机项目成套方案VerA.pdf",
+      "baseline_document_name": "sample-pulp-mill-lci-solution.pdf",
       "scenario": "lci_generalization_with_different_customer_context",
       "expected_similarity_to_library": "medium",
       "focus": ["outline_draft_split", "asset_top3", "control_interface", "transformer_specs"]

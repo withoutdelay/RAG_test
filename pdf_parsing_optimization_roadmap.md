@@ -39,10 +39,10 @@ make pdf-audit PDF='/绝对路径/文件.pdf' FORMULA_OCR_BACKEND=pix2tex FORMUL
 
 以下结论来自真实样本：
 
-- 样本文件：[上电湛江中纸高浓磨机项目成套方案VerA.pdf](/Volumes/thunder/code/RAG_test/上电湛江中纸高浓磨机项目成套方案VerA.pdf)
+- 样本文件：[sample-pulp-mill-lci-solution.pdf](/Volumes/thunder/code/RAG_test/sample-pulp-mill-lci-solution.pdf)
 - 最新审计报告：
-  - [上电湛江中纸高浓磨机项目成套方案VerA.audit.md](/Volumes/thunder/code/RAG_test/backend/data/pdf_audits/上电湛江中纸高浓磨机项目成套方案VerA.audit.md)
-  - [上电湛江中纸高浓磨机项目成套方案VerA.audit.json](/Volumes/thunder/code/RAG_test/backend/data/pdf_audits/上电湛江中纸高浓磨机项目成套方案VerA.audit.json)
+  - [上电某造纸企业高浓磨机项目成套方案VerA.audit.md](/Volumes/thunder/code/RAG_test/backend/data/pdf_audits/上电某造纸企业高浓磨机项目成套方案VerA.audit.md)
+  - [上电某造纸企业高浓磨机项目成套方案VerA.audit.json](/Volumes/thunder/code/RAG_test/backend/data/pdf_audits/上电某造纸企业高浓磨机项目成套方案VerA.audit.json)
 
 ### 2.1 Docling 文本提取“可用但不可靠到可直接信任”
 

@@ -16,7 +16,7 @@ class AssetFragmentFilterTests(unittest.TestCase):
         raw_document = SimpleNamespace(
             id=raw_document_id,
             project_id=None,
-            file_name="宝山钢铁股份有限公司三鼓风LCI改造方案.docx",
+            file_name="sample-blower-lci-retrofit.docx",
             doc_type="historical_proposal",
         )
         asset = SimpleNamespace(

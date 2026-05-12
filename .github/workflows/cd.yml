@@ -1,4 +1,4 @@
-name: cd
+name: repository-hygiene
 
 on:
   workflow_dispatch:
@@ -8,19 +8,14 @@ on:
       - main
 
 jobs:
-  release-rehearsal:
+  hygiene:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Release bundle sanity
+      - name: Ensure runtime data is not committed
         run: |
-          test -f output/RAG_test-redteam.json
-          test -f output/RAG_test-quality-gate.md
-          test -f output/RAG_test-task-execution.md
-
-      - name: Rollback marker
-        run: |
-          echo "rollback plan available in output/rehearsal/RAG_test-rollback-playbook.md"
-          echo "rollback simulation remains a documented manual rehearsal gate"
+          test ! -f backend/data/app.db
+          test ! -d backend/data/uploads || [ -z "$(find backend/data/uploads -type f -print -quit)" ]
+          test ! -d output || [ -z "$(find output -type f -print -quit)" ]
