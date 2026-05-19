@@ -165,4 +165,4 @@ If a real secret was committed to git history before this cleanup, rotate that s
 
 ## License
 
-No license has been selected yet. Add a license before distributing or accepting external contributions.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).

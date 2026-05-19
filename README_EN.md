@@ -74,4 +74,4 @@ This cleanup removes runtime data from the current repository state. If real sec
 
 ## License
 
-No license has been selected yet.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
